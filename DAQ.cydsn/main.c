@@ -48,7 +48,7 @@
 #define MAX_TKR_BOARDS 8
 #define MAX_TKR_BOARD_BYTES 203     // Two leading bytes, 12 bit header, 12 chips * (12-bit header and up to 10 12-bit cluster words) + CRC byte
 #define USBFS_DEVICE (0u)
-#define BUFFER_LEN  32u
+#define BUFFER_LEN  64u //increaded from 32u so 2 full commands cn fit, it is now a circular buffer -Brian
 #define MAX_DATA_OUT 256
 #define MXERR 64
 #define SPI_OUTPUT 0u
@@ -83,6 +83,13 @@
 #define ERR_TKR_TRG_ENABLE 24u
 
 #define TKR_READ_TIMEOUT 9u    // Length of time to wait before giving a time-out error
+
+//added for new cmd buffer parsing -Brian
+#define WRAPINC(a,b) ((a + 1) % (b))
+#define WRAP(a,b) ((a) % (b))
+
+uint8 bufferRead = 0;
+uint8 bufferWrite = 0;
 
 uint8 nDataReady;
 uint16 maxEvents;
@@ -1354,38 +1361,90 @@ int main(void)
             }
         }        
         
-        // Get a 9-byte command input from the UART or USB-UART
-        int count = 0;
+        // Get a 29-byte command input from the UART or USB-UART
+        uint8 count = 0;
         if (USBUART_GetConfiguration() != 0u) {    // Command from USB
             if (USBUART_DataIsReady() != 0u) {
-                count = USBUART_GetAll(buffer);
-            }
-        }
-        if (count == 0 && UART_CMD_GetRxBufferSize() >= 29) {   // Command from UART 
-            count = 29;
-            for (int i=0; i<count; ++i) {
-                buffer[i] = UART_CMD_ReadRxData();
-            }
-        }
-        if (count == 29) {
-            bool badCMD = false;
-            for (int i=0; i<9; ++i) {   // Check that all 3 command copies are identical
-                if (buffer[i] != buffer[i+9] || buffer[i] != buffer[i+18]) {
-                    addError(ERR_BAD_CMD, code[buffer[i]], i);
-                    badCMD = true;
-                    break;
+                uint8 tempBuffer[BUFFER_LEN];
+                uint8 partialCount = 0;
+                count = USBUART_GetAll(tempBuffer);
+                if((bufferWrite + count) > (uint8)(BUFFER_LEN))
+                {
+                    partialCount = BUFFER_LEN - bufferRead ;
+                    memcpy((buffer + bufferWrite) , tempBuffer, partialCount);
+                    bufferWrite = 0;
                 }
+                memcpy((buffer + bufferWrite) , (tempBuffer + partialCount), (count - partialCount));
+                bufferWrite += (count - partialCount);
+                if(WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN) < count) 
+                {
+                    bufferRead = WRAPINC(bufferWrite, BUFFER_LEN); //buffer overflowed, discard bytes that didn't have cmd
+                    //TODO error type for discarged bytes
+                }
+                    
             }
-            if (!badCMD && buffer[0] == 'S' && buffer[8] == 'W') {
+        }
+        else //only 1 source per loop
+        {
+            
+            count = UART_CMD_GetRxBufferSize();
+    //        if (count == 0 && UART_CMD_GetRxBufferSize() >= 29) {   // Command from UART 
+    //            count = 29;
+            for (int i=0; i<count; ++i) {
+                buffer[bufferWrite] = UART_CMD_ReadRxData();
+                bufferWrite = WRAPINC(bufferWrite, BUFFER_LEN);
+            }
+            if(WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN) < count) 
+            {
+                bufferRead = WRAPINC(bufferWrite, BUFFER_LEN); //buffer overflowed, discard bytes that didn't have cmd
+                //TODO error type for discarged bytes
+            }
+            
+        }
+        count = WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN);
+        if (count >= 29) {
+            bool badCMD = false;
+            while (!(badCMD || ('S' == buffer[bufferRead])))
+            {
+                if(--count < 29)
+                {
+                    badCMD = true;
+                }
+                //TODO error type for discarged bytes
+                bufferRead = WRAPINC(bufferRead, BUFFER_LEN);
+            }
+            if (!badCMD) 
+            {
+                for (int i=0; i<9; ++i) {   // Check that all 3 command copies are identical
+                    if (buffer[WRAP(bufferRead + i, BUFFER_LEN)] != buffer[WRAP(bufferRead + i+9, BUFFER_LEN)] || buffer[WRAP(bufferRead + i, BUFFER_LEN)] != buffer[WRAP(bufferRead + i+18, BUFFER_LEN)]) {
+                        addError(ERR_BAD_CMD, code[buffer[WRAP(bufferRead + i, BUFFER_LEN)]], WRAP(bufferRead + i, BUFFER_LEN));
+                        badCMD = true;
+                        bufferRead = WRAPINC(bufferRead, BUFFER_LEN); //discard byte that leads to misalignment
+                        break;
+                    }
+                }
+                if(!badCMD) 
+                {
+                    if (('W' != buffer[WRAP(bufferRead + 26, BUFFER_LEN)]) || ('\r' !=  buffer[WRAP(bufferRead + 27, BUFFER_LEN)]) || ('\n' !=  buffer[WRAP(bufferRead + 28, BUFFER_LEN)]))
+                    {
+                        addError(ERR_BAD_CMD, code[buffer[WRAP(bufferRead + 26, BUFFER_LEN)]], WRAP(bufferRead + 26, BUFFER_LEN));
+                        badCMD = true;
+                        bufferRead = WRAPINC(bufferRead, BUFFER_LEN); //discard byte that leads to misalignment
+                    }
+                }
+                
+            }
+            if (!badCMD) //&& buffer[0] == 'S' && buffer[8] == 'W') {
+            {
                 cmdCountGLB++;
                 //cmdTime = time();
-                uint8 nib3 = code[buffer[3]];
-                uint8 nib4 = code[buffer[4]];
+                uint8 nib3 = code[buffer[WRAP(bufferRead + 3, BUFFER_LEN)]];
+                uint8 nib4 = code[buffer[WRAP(bufferRead + 4, BUFFER_LEN)]];
                 uint8 addressByte = (nib3<<4) | nib4;
                 uint8 address = (addressByte & '\x3C')>>2;
                 if (address == eventPSOCaddress) {                    
-                    uint8 nib1 = code[buffer[1]];  // No check on code. Illegal characters get translated to 0.
-                    uint8 nib2 = code[buffer[2]];
+                    uint8 nib1 = code[buffer[WRAP(bufferRead + 1, BUFFER_LEN)]];  // No check on code. Illegal characters get translated to 0.
+                    uint8 nib2 = code[buffer[WRAP(bufferRead + 2, BUFFER_LEN)]];
                     uint8 dataByte = (nib1<<4) | nib2;
                     if (awaitingCommand) {
                         awaitingCommand = false;
@@ -1407,6 +1466,7 @@ int main(void)
                         }
                     }
                 }
+                bufferRead = WRAP(bufferRead + 29, BUFFER_LEN);
                 if (cmdDone) {
                     cmdDone = false;
                     awaitingCommand = true;
