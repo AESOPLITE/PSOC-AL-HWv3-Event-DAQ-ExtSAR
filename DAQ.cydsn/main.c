@@ -838,7 +838,7 @@ int main(void)
     
     SPIM_Start();
     
-    uint8 outputMode = USBUART_OUTPUT;    
+    uint8 outputMode = USBUART_OUTPUT;// SPI_OUTPUT; //USBUART_OUTPUT;    
     USBUART_Start(USBFS_DEVICE, USBUART_3V_OPERATION);
     
     Comp_Ch1_Start();
@@ -1384,7 +1384,7 @@ int main(void)
                     
             }
         }
-        else //only 1 source per loop
+        if (0 == count) //only 1 source per loop
         {
             
             count = UART_CMD_GetRxBufferSize();
@@ -1532,8 +1532,8 @@ int main(void)
                                 if (nErrors == 0) {
                                     nDataReady = 3;
                                     dataOut[0] = 0x00;
-                                    dataOut[1] = 0xEE;
-                                    dataOut[2] = 0xFF;
+                                    dataOut[1] = cmdCount;// debug -Brian 0xEE;
+                                    dataOut[2] = cmdCountGLB;// debug -Brian 0xFF;
                                     break;
                                 }
                                 nDataReady = nErrors*3;
