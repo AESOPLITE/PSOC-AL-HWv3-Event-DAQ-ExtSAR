@@ -1533,8 +1533,10 @@ int main(void)
                                 if (nErrors == 0) {
                                     nDataReady = 3;
                                     dataOut[0] = 0x00;
-                                    dataOut[1] = cmdCount;// debug -Brian 0xEE;
-                                    dataOut[2] = cmdCountGLB;// debug -Brian 0xFF;
+//                                    dataOut[1] = cmdCount;// debug -Brian 0xEE;
+                                    dataOut[1] = 0xEE;
+//                                    dataOut[2] = cmdCountGLB;// debug -Brian 0xFF;
+                                    dataOut[2] = 0xFF;
                                     break;
                                 }
                                 nDataReady = nErrors*3;
