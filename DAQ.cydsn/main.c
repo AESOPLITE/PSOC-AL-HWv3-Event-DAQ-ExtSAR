@@ -81,8 +81,9 @@
 #define ERR_BAD_BYTE 22u
 #define ERR_TKR_BAD_STATUS 23u
 #define ERR_TKR_TRG_ENABLE 24u
+#define ERR_TKR_BAD_TRGHEAD 25u
 
-#define TKR_READ_TIMEOUT 9u    // Length of time to wait before giving a time-out error
+#define TKR_READ_TIMEOUT 15u    // Length of time to wait before giving a time-out error
 
 uint8 nDataReady;
 uint16 maxEvents;
@@ -111,9 +112,6 @@ const uint8 LED2 = '\x10';
 const uint8 RSTPEAK = '\x10';
 const uint8 TKRLED = '\x20'; 
 const uint8 DATLED = '\x40';
-bool dataLEDoff;
-bool tkrLEDoff;
-bool trgLEDoff;
 
 // Input channel map, from left to right on the SMA connectors:
 // Note that channel 5, T2, has a dedicated discriminator and 12-bit threshold DAC outside of the PSOC.
@@ -190,7 +188,9 @@ uint8 nErrors = 0;
 
 uint32 clkCnt;
 uint32 time() {
-    return clkCnt;
+    //uint8 cnt200val = Counter_1_ReadCounter();
+    uint8 cnt200val = Cntr8_Timer_ReadCount();
+    return clkCnt + cnt200val;
 }
 
 char8 *parity[] = { "None", "Odd", "Even", "Mark", "Space" };
@@ -452,6 +452,12 @@ void logicReset() {
     if (stateTrg) isr_GO1_Enable();
     if (state) isr_clk200_Enable();
     LED2_OnOff(false);
+    for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
+        if (tkrData.boardHits[brd].nBytes > 0) {
+            tkrData.boardHits[brd].nBytes = 0;
+            free(tkrData.boardHits[brd].hitList);
+        }
+    }
 }
 
 // Get a byte of data from the Tracker UART, with a time-out in case nothing is coming.
@@ -460,8 +466,8 @@ uint8 tkr_getByte(uint32 startTime, uint8 flag) {
     while (!(UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY)) {
         uint32 timeElapsed = time() - startTime;
         if (timeElapsed > TKR_READ_TIMEOUT) {
-            uint16 temp = (uint16)timeElapsed;
-            addError(ERR_TKR_READ_TIMEOUT, (uint8)((temp & 0x00FF)), flag);
+            uint8 temp = (uint8)(timeElapsed & 0x000000ff);
+            addError(ERR_TKR_READ_TIMEOUT, temp, flag);
             return 0x00;
         }
     }
@@ -474,9 +480,42 @@ void getASICdata() {
     nDataReady = tkr_getByte(startTime, 69);
     dataOut[0] = nDataReady;
     nDataReady++;
-    for (int i=1; i<nDataReady+1; ++i) {
+    for (int i=1; i<nDataReady; ++i) {
+        startTime = time();
         dataOut[i] = tkr_getByte(startTime, 70+i);
     }
+}
+
+// Function to receive i2c register data from the Tracker
+void getTKRi2cData() {
+    uint32 startTime = time();
+    nDataReady = 4;
+    dataOut[0] = tkr_getByte(startTime, 0x89);
+    dataOut[1] = tkr_getByte(startTime, 0x90);
+    dataOut[2] = tkr_getByte(startTime, 0x91);
+    dataOut[3] = tkr_getByte(startTime, 0x92);
+}
+
+// Receive trigger-primitive and TOT data from the tracker, for calibration-pulse events only
+int getTrackerBoardTriggerData(uint8 FPGA) {
+    int rc = 0;
+    uint32 startTime = time();
+    // Ignore the first byte, which is rubbish (not sure why. . .)
+    uint8 theByte = tkr_getByte(startTime, 0x44);
+    // The first good byte received encodes the FPGA address, so we check it here:
+    theByte = tkr_getByte(startTime, 0x45);
+    uint8 fpgaRet = (theByte & 0x38)>>3;
+    if (fpgaRet != FPGA) {
+        addError(ERR_TKR_BAD_TRGHEAD, FPGA, fpgaRet);
+        rc = 1;
+    }
+    nDataReady = 9;   
+    dataOut[0] = theByte;
+    // Read in the other 8 bytes
+    for (int i=1; i<nDataReady; ++i) {
+        dataOut[i] = tkr_getByte(startTime, 0x46);
+    }
+    return rc;
 }
 
 // Function to get a full data packet from the Tracker.
@@ -581,6 +620,11 @@ int getTrackerData() {
         if (nErrors < MXERR) {
             addError(ERR_TKR_BAD_ID, IDcode, len);
         }
+        nDataReady = len;
+        if (len > 15) len = 15;
+        for (int i=0; i<nDataReady; ++i) {
+            dataOut[i] = tkr_getByte(startTime,20+i);
+        }       
     }
     return rc;
 }
@@ -591,7 +635,7 @@ CY_ISR(Store_A)
         while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) {
             uint32 AT = ShiftReg_A_ReadData();
             tofA.shiftReg[tofA.ptr] = AT;
-            tofA.clkCnt[tofA.ptr] = clkCnt;
+            tofA.clkCnt[tofA.ptr] = (uint16)time();
             tofA.filled[tofA.ptr] = true;
             tofA.ptr++;
             if (tofA.ptr >= TOFMAX_EVT) tofA.ptr = 0;
@@ -604,8 +648,9 @@ CY_ISR(Store_A)
                 oReg[2] =  AT & 0x000000FF;
                 oReg[3] = (AT & 0xFF000000)>>24;
                 oReg[4] = (AT & 0x00FF0000)>>16;            
-                oReg[5] = (clkCnt & 0xFF00)>>8;
-                oReg[6] = clkCnt & 0x00FF;                      
+                uint16 clk16 = (uint16)time();
+                oReg[5] = (uint8)((clk16 & 0xFF00)>>8);
+                oReg[6] = (uint8)(clk16 & 0x00FF);             
                 //while(USBUART_CDCIsReady() == 0u);
                 USBUART_PutData(oReg,7);
             }
@@ -621,21 +666,22 @@ CY_ISR(Store_B)
             tofB.shiftReg[tofB.ptr] = BT;
 //            tofB.stop[tofB.ptr] = (uint16)(BT & 0x0000FFFF);
 //            tofB.ref[tofB.ptr] = (uint16)((BT & 0xFFFF0000)>>16);
-            tofB.clkCnt[tofB.ptr] = clkCnt;
+            tofB.clkCnt[tofB.ptr] = (uint16)time();
             tofB.filled[tofB.ptr] = true;
             tofB.ptr++;
             if (tofB.ptr >= TOFMAX_EVT) tofB.ptr = 0;
             if (outputTOF) {  
                 LED2_OnOff(true);
-                trgLEDoff = true;
+                Timer_1_Start();
                 uint8 oReg[7];
                 oReg[0] = 0xBB;
                 oReg[1] = (BT & 0x0000FF00)>>8;
                 oReg[2] =  BT & 0x000000FF;
                 oReg[3] = (BT & 0xFF000000)>>24;
                 oReg[4] = (BT & 0x00FF0000)>>16;
-                oReg[5] = (clkCnt & 0xFF00)>>8;
-                oReg[6] = clkCnt & 0x00FF;                  
+                uint16 clk16 = (uint16)time();
+                oReg[5] = (uint8)((clk16 & 0xFF00)>>8);
+                oReg[6] = (uint8)(clk16 & 0x00FF);                  
                 //while(USBUART_CDCIsReady() == 0u);
                 USBUART_PutData(oReg,7);
             }
@@ -643,34 +689,23 @@ CY_ISR(Store_B)
     }
 }
 
-CY_ISR(clk200) {  // Interrupt every 5 ms
-    clkCnt++;                                // Increment the clock counter used for time stamps
-    Control_Reg_Pls_Write(PULSE_TOF_RESET);  // Reset the TOF reference clock before it rolls over
-    if (clkCnt%20 == 0) {  // Turn off LEDs that are on (giving enough time for them to be visible)
-        uint8 status = Control_Reg_SSN_Read();
-        if (dataLEDoff) {
-            status = status & ~DATLED;
-            Control_Reg_SSN_Write(status);
-            dataLEDoff = false;
-        }    
-        if (tkrLEDoff) {
-            status = status & ~TKRLED;
-            Control_Reg_SSN_Write(status);
-            tkrLEDoff = false;
-        }    
-        if (trgLEDoff) {
-            status = status & ~LED2;
-            Control_Reg_SSN_Write(status);
-            trgLEDoff = false;
-        }
-        if (clkCnt%200 == 0) {   // Create a 1 Hz blinking LED
-            uint8 blink = status & LED1;
-            if (blink == 0x00) blink = LED1;
-            else blink = 0x00;
-            status = (status & ~LED1) | blink;
-            Control_Reg_SSN_Write(status);
-        } 
-    }
+CY_ISR(intTimer) {
+    uint8 status = Control_Reg_SSN_Read();
+    status = status & ~DATLED;
+    status = status & ~TKRLED;
+    status = status & ~LED2;
+    Control_Reg_SSN_Write(status);
+    Timer_1_Stop();
+}
+
+CY_ISR(clk200) {  // Interrupt every second
+    clkCnt += 200;     // Increment the clock counter used for time stamps
+    uint8 status = Control_Reg_SSN_Read();
+    uint8 blink = status & LED1;
+    if (blink == 0x00) blink = LED1;
+    else blink = 0x00;
+    status = (status & ~LED1) | blink;
+    Control_Reg_SSN_Write(status);
 }
 
 CY_ISR(isrCh1)
@@ -708,7 +743,7 @@ CY_ISR(isrGO1)    // GO signal (system trigger). Start the full event readout if
         triggered = true;
         timeStamp = time();
         LED2_OnOff(true);
-        trgLEDoff = true;          // LED2 turns on for each trigger and will stay on at least 100 ms
+        Timer_1_Start();
     }
     cntGO1++;     // Count all GO signals during a run, even if the trigger is not enabled.
     
@@ -717,10 +752,11 @@ CY_ISR(isrGO1)    // GO signal (system trigger). Start the full event readout if
 }
 
 void tkrLED(bool on) {
-    uint8 status = Control_Reg_SSN_Read() & ~TKRLED;
-    if (on) Control_Reg_SSN_Write(status | TKRLED);
-    else {
-        tkrLEDoff = true;
+    if (on) {
+        uint8 status = Control_Reg_SSN_Read() & ~TKRLED;
+        Control_Reg_SSN_Write(status | TKRLED);
+    } else {
+        Timer_1_Start();
     }
 }
 
@@ -730,7 +766,7 @@ void dataLED(bool on) {
         status = Control_Reg_SSN_Read() & ~DATLED;
         Control_Reg_SSN_Write(status | DATLED);
     } else {
-        dataLEDoff = true;
+        Timer_1_Start();
     }
 }
 
@@ -754,8 +790,6 @@ int main(void)
         tofB.filled[i] = false;
     }
     
-    dataLEDoff = false;
-    tkrLEDoff = false;
     nDataReady = 0;
     clkCnt = 0;
     nTkrHouseKeeping = 0;
@@ -802,6 +836,7 @@ int main(void)
     CyGlobalIntEnable; /* Enable global interrupts. */
 
     /* Initialize interrupts */
+    isr_timer_StartEx(intTimer);
     isr_clk200_StartEx(clk200);
     isr_Store_A_StartEx(Store_A);
     isr_Store_B_StartEx(Store_B);
@@ -818,6 +853,15 @@ int main(void)
     // Counters for loading TOF shift registers. The periods are set in the schematic and should never change!
     Count7_1_Start();
     Count7_2_Start();
+    
+    // Set up the counter used for timing. It counts a 200 Hz clock derived from the watch crystal, and every 200 counts
+    // i.e. once each second, it interrupts the CPU, which then increments a 1 Hz count. The time() function adds the two
+    // counts together to get a time tag that increments every 5 ms. Note that the main purpose of the 200 Hz clock is to
+    // send a hardware reset to the time-of-flight chip every 5 ms, so that we know exactly when its counting starts.
+    //Counter_1_Start();
+    //Counter_1_WritePeriod(199);  // Should count from 0 to 199, for a period of 200
+    //Counter_1_SetCaptureMode(Counter_1__B_COUNTER__SOFTWARE_CONTROL);
+    Cntr8_Timer_WritePeriod(199);
     
     // Counter for the delay time to wait before resetting the peak detectors.
     Count7_3_Start();
@@ -990,6 +1034,7 @@ int main(void)
     setTriggerMask('p',0x05);
 
     // Enable interrupts and configure TOF shift register interrupt signals
+    isr_timer_Enable();
     isr_clk200_Enable();
     isr_Store_A_Enable();
     ShiftReg_A_EnableInt();
@@ -1090,6 +1135,7 @@ int main(void)
             }           
             
             // Start the read of the Tracker data by sending a read-event command
+            tkrLED(true);
             tkrCmdCode = 0x01;
             while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
             UART_TKR_WriteTxData(0x00);    // Address byte
@@ -1100,7 +1146,11 @@ int main(void)
             while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
             UART_TKR_WriteTxData(0x00);    // Use internally generated trigger tags
             // Read the Tracker data in from the UART and into internal arrays
-            getTrackerData();           
+            rc = getTrackerData();        
+            if (rc != 0) {
+                addError(ERR_GET_TKR_DATA, rc, 0x77);
+            }
+            tkrLED(false);
             
             // Search for nearly coincident TOF data
             uint16 timeStamp16 = (uint16)(timeStampSave & 0x0000FFFF);
@@ -1238,6 +1288,7 @@ int main(void)
                     dataOut[nDataReady++] = tkrData.boardHits[brd].hitList[b];
                 }
                 free(tkrData.boardHits[brd].hitList);
+                tkrData.boardHits[brd].nBytes = 0;
             }
             dataOut[nDataReady++] = 0x46;
             dataOut[nDataReady++] = 0x49;
@@ -1541,6 +1592,8 @@ int main(void)
                                 // Now look for the bytes coming back from the Tracker.
                                 if (tkrCmdCode >= 0x20 && tkrCmdCode <= 0x25) {
                                     getASICdata();
+                                } else if (tkrCmdCode == 0x46) {
+                                    getTKRi2cData();
                                 } else {
                                     rc = getTrackerData();
                                     if (rc != 0) {
@@ -1604,6 +1657,83 @@ int main(void)
                                 if (rc != 0) {
                                     addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
                                 }
+                                tkrLED(false);
+                                break;
+                            case '\x42':        // Start a tracker calibration sequence
+                                // First send a calibration strobe command
+                                tkrLED(true);
+                                tkrCmdCode = '\x02';
+                                UART_TKR_PutChar('\x00');
+                                UART_TKR_PutChar(tkrCmdCode);
+                                UART_TKR_PutChar('\x03');
+                                UART_TKR_PutChar('\x31');
+                                uint8 FPGA = cmdData[0];
+                                uint8 trgDelay = cmdData[1];
+                                uint8 trgTag = cmdData[2] & 0x03;
+                                uint8 byte2 = (trgDelay & 0x3f)<<2;
+                                byte2 = byte2 | trgTag;
+                                UART_TKR_PutChar(byte2);
+                                UART_TKR_PutChar(FPGA);
+                                // Wait around for up to a second for all the data to transmit
+                                tStart = time();
+                                while (UART_TKR_GetTxBufferSize() > 0) {                                           
+                                    if (time() - tStart > 200) {
+                                        addError(ERR_TX_FAILED, tkrCmdCode, command);
+                                        tkrLED(false);
+                                        break;
+                                    }
+                                }    
+                                // Catch the trigger output and send back to the computer                              
+                                getTrackerBoardTriggerData(FPGA);
+                                tkrLED(false);
+                                break;
+                            case '\x43':   // Send a tracker read-event command for calibration events
+                                tkrLED(true);
+                                tkrCmdCode = '\x01';
+                                trgTag = cmdData[0] & 0x03;
+                                UART_TKR_PutChar('\x00');
+                                UART_TKR_PutChar(tkrCmdCode);
+                                UART_TKR_PutChar('\x01');
+                                UART_TKR_PutChar(0x04 | trgTag);
+                                // Wait around for up to a second for all the data to transmit
+                                tStart = time();
+                                while (UART_TKR_GetTxBufferSize() > 0) {                                           
+                                    if (time() - tStart > 200) {
+                                        addError(ERR_TX_FAILED, tkrCmdCode, command);
+                                        tkrLED(false);
+                                        break;
+                                    }
+                                }    
+                                // Read the data from the tracker
+                                rc = getTrackerData();
+                                if (rc != 0) {
+                                    addError(ERR_GET_TKR_DATA, rc, command);
+                                }
+                                
+                                // Then send the data out as a tracker-only event
+                                dataOut[0] = 0x5A;
+                                dataOut[1] = 0x45;
+                                dataOut[2] = 0x52;
+                                dataOut[3] = 0x4F;
+                                dataOut[4] = tkrData.nTkrBoards;
+                                nDataReady = 5;
+                                for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
+                                    if (nDataReady > MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
+                                        addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
+                                        break;
+                                    }
+                                    dataOut[nDataReady++] = brd;
+                                    dataOut[nDataReady++] = tkrData.boardHits[brd].nBytes;
+                                    for (int b=0; b<tkrData.boardHits[brd].nBytes; ++b) {
+                                        dataOut[nDataReady++] = tkrData.boardHits[brd].hitList[b];
+                                    }
+                                    free(tkrData.boardHits[brd].hitList);
+                                    tkrData.boardHits[brd].nBytes = 0;
+                                }
+                                dataOut[nDataReady++] = 0x46;
+                                dataOut[nDataReady++] = 0x49;
+                                dataOut[nDataReady++] = 0x4E;
+                                dataOut[nDataReady++] = 0x49;
                                 tkrLED(false);
                                 break;
                             case '\x0C':        // Reset the TOF chip
@@ -1785,9 +1915,10 @@ int main(void)
                                 break;
                             case '\x38':   // Reset the logic and counters, after reading back 24 bits of the clock count
                                 nDataReady = 3;
-                                dataOut[0] = (uint8)((clkCnt & 0x00FF0000)>>16);
-                                dataOut[1] = (uint8)((clkCnt & 0x0000FF00)>>8);
-                                dataOut[2] = (uint8)(clkCnt & 0x000000FF);
+                                uint32 now = time();
+                                dataOut[0] = (uint8)((now & 0x00FF0000)>>16);
+                                dataOut[1] = (uint8)((now & 0x0000FF00)>>8);
+                                dataOut[2] = (uint8)(now & 0x000000FF);
                                 logicReset();
                                 break;
                             case '\x39':   // Set trigger prescales
@@ -1812,6 +1943,7 @@ int main(void)
                                     tofA.filled[j] = false;
                                     tofB.filled[j] = false;
                                 }
+                                clkCnt = 0;
                                 tofA.ptr = 0;
                                 tofB.ptr = 0;
                                 ch1Count = 0;
