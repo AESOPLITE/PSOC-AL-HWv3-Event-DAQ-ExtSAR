@@ -84,12 +84,12 @@
 
 #define TKR_READ_TIMEOUT 9u    // Length of time to wait before giving a time-out error
 
-//added for new cmd buffer parsing -Brian
-#define WRAPINC(a,b) ((a + 1) % (b))
-#define WRAP(a,b) ((a) % (b))
+//added for new cmd buffer parsing -Brian Lucas
+#define WRAPINC(a,b) ((a + 1) % (b)) //Macro to increment an index a around a circular buffer of size b  
+#define WRAP(a,b) ((a) % (b)) //Macro to bring new calculated index a into the bounds of a circular buffer of size b
 
-uint8 bufferRead = 0;
-uint8 bufferWrite = 0;
+uint8 bufferRead = 0; //index of byte to read circular raw ASCII buffer of commands -Brian
+uint8 bufferWrite = 0; //index of byte to write circular raw ASCII buffer of commands, if read = write then empty
 
 uint8 nDataReady;
 uint16 maxEvents;
@@ -770,7 +770,7 @@ int main(void)
     runNumber = 0;
     timeStamp = time();
     
-    uint8 buffer[BUFFER_LEN];  // Buffer for incoming UART commands
+    uint8 buffer[BUFFER_LEN];  // Circular Buffer for incoming UART commands
     uint8 code[256];  // ASCII code translation to hex nibbles
     for (int i=0; i<256; ++i) code[i] = 0;
     code[49] = 1;
@@ -1362,21 +1362,22 @@ int main(void)
         }        
         
         // Get a 29-byte command input from the UART or USB-UART
-        uint8 count = 0;
-        if (USBUART_GetConfiguration() != 0u) {    // Command from USB
-            if (USBUART_DataIsReady() != 0u) {
-                uint8 tempBuffer[BUFFER_LEN];
-                uint8 partialCount = 0;
-                count = USBUART_GetAll(tempBuffer);
-                if((bufferWrite + count) > (uint8)(BUFFER_LEN))
+        // reads partial to full commands from either input and adds them to a buffer for parsing 
+        uint8 count = 0; //Temporary variable to keep count of revelant new command bytes 
+        if (USBUART_GetConfiguration() != 0u) {    // USB is active
+            if (USBUART_DataIsReady() != 0u) { // command bytes are ready
+                uint8 tempBuffer[BUFFER_LEN]; //new buffer to get the datat from USBUART_GetAll
+                uint8 partialCount = 0; //count to end of buffer if it wraps around
+                count = USBUART_GetAll(tempBuffer); // get the bytes from USB
+                if((bufferWrite + count) > (uint8)(BUFFER_LEN)) //check if new bytes will push the cirucular buffer past boundary
                 {
-                    partialCount = BUFFER_LEN - bufferRead ;
-                    memcpy((buffer + bufferWrite) , tempBuffer, partialCount);
-                    bufferWrite = 0;
+                    partialCount = BUFFER_LEN - bufferRead ;// bytes to coppy to boundary
+                    memcpy((buffer + bufferWrite) , tempBuffer, partialCount); // copy from tempBuffer to boundary of buffer
+                    bufferWrite = 0;// move index to low boundary
                 }
-                memcpy((buffer + bufferWrite) , (tempBuffer + partialCount), (count - partialCount));
-                bufferWrite += (count - partialCount);
-                if(WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN) < count) 
+                memcpy((buffer + bufferWrite) , (tempBuffer + partialCount), (count - partialCount)); // copy rest of bytes from tempBuffer to buffer
+                bufferWrite += (count - partialCount); //move write index to next byte, will not wrap
+                if(WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN) < count) //Check if write index moved past read by making sure the buufered bytes are at least count
                 {
                     bufferRead = WRAPINC(bufferWrite, BUFFER_LEN); //buffer overflowed, discard bytes that didn't have cmd
                     //TODO error type for discarged bytes
@@ -1384,57 +1385,57 @@ int main(void)
                     
             }
         }
-        if (0 == count) //only 1 source per loop
+        if (0 == count) //only 1 source per loop, so don't read URT if already read USB
         {
             
-            count = UART_CMD_GetRxBufferSize();
+            count = UART_CMD_GetRxBufferSize(); //number of bytes to read TODO decrease buffer size of UART_CMD
     //        if (count == 0 && UART_CMD_GetRxBufferSize() >= 29) {   // Command from UART 
     //            count = 29;
-            for (int i=0; i<count; ++i) {
-                buffer[bufferWrite] = UART_CMD_ReadRxData();
-                bufferWrite = WRAPINC(bufferWrite, BUFFER_LEN);
+            for (int i=0; i<count; ++i) { //loop to copy all bytes
+                buffer[bufferWrite] = UART_CMD_ReadRxData(); //copy 1 byte
+                bufferWrite = WRAPINC(bufferWrite, BUFFER_LEN); //increment write index
             }
-            if(WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN) < count) 
+            if(WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN) < count) //Check if write index moved past read by making sure the buufered bytes are at least count
             {
                 bufferRead = WRAPINC(bufferWrite, BUFFER_LEN); //buffer overflowed, discard bytes that didn't have cmd
                 //TODO error type for discarged bytes
             }
             
         }
-        count = WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN);
-        if (count >= 29) {
-            bool badCMD = false;
-            while (!(badCMD || ('S' == buffer[bufferRead])))
+        count = WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN); //Count of active buffard bytes to parse
+        if (count >= 29) {// command is 29 bytes long so that is the min to parse
+            bool badCMD = false; // this flag true will stop futher checks
+            while (!(badCMD || ('S' == buffer[bufferRead])))//Find S to start the command, discard bytes untill found
             {
-                if(--count < 29)
+                if(--count < 29) //Check if command cannot exist in remaining bytes 
                 {
-                    badCMD = true;
+                    badCMD = true; //command is bad so stop futher checks
                 }
                 //TODO error type for discarged bytes
-                bufferRead = WRAPINC(bufferRead, BUFFER_LEN);
+                bufferRead = WRAPINC(bufferRead, BUFFER_LEN); //increment read index
             }
-            if (!badCMD) 
+            if (!badCMD) //continue checks
             {
                 for (int i=0; i<9; ++i) {   // Check that all 3 command copies are identical
-                    if (buffer[WRAP(bufferRead + i, BUFFER_LEN)] != buffer[WRAP(bufferRead + i+9, BUFFER_LEN)] || buffer[WRAP(bufferRead + i, BUFFER_LEN)] != buffer[WRAP(bufferRead + i+18, BUFFER_LEN)]) {
-                        addError(ERR_BAD_CMD, code[buffer[WRAP(bufferRead + i, BUFFER_LEN)]], WRAP(bufferRead + i, BUFFER_LEN));
-                        badCMD = true;
+                    if (buffer[WRAP(bufferRead + i, BUFFER_LEN)] != buffer[WRAP(bufferRead + i+9, BUFFER_LEN)] || buffer[WRAP(bufferRead + i, BUFFER_LEN)] != buffer[WRAP(bufferRead + i+18, BUFFER_LEN)]) { //single byte doesn't match
+                        addError(ERR_BAD_CMD, code[buffer[WRAP(bufferRead + i, BUFFER_LEN)]], WRAP(bufferRead + i+9, BUFFER_LEN)); //command doesn't match in triplicate
+                        badCMD = true; //command is bad so stop futher checks
                         bufferRead = WRAPINC(bufferRead, BUFFER_LEN); //discard byte that leads to misalignment
-                        break;
+                        break;//stop futher checks
                     }
                 }
-                if(!badCMD) 
+                if(!badCMD) //continue checks
                 {
                     if (('W' != buffer[WRAP(bufferRead + 26, BUFFER_LEN)]) || ('\r' !=  buffer[WRAP(bufferRead + 27, BUFFER_LEN)]) || ('\n' !=  buffer[WRAP(bufferRead + 28, BUFFER_LEN)]))
                     {
-                        addError(ERR_BAD_CMD, code[buffer[WRAP(bufferRead + 26, BUFFER_LEN)]], WRAP(bufferRead + 26, BUFFER_LEN));
-                        badCMD = true;
+                        addError(ERR_BAD_CMD, code[buffer[WRAP(bufferRead + 26, BUFFER_LEN)]], WRAP(bufferRead + 27, BUFFER_LEN));
+                        badCMD = true; //command is bad so stop futher checks
                         bufferRead = WRAPINC(bufferRead, BUFFER_LEN); //discard byte that leads to misalignment
                     }
                 }
                 
             }
-            if (!badCMD) //&& buffer[0] == 'S' && buffer[8] == 'W') {
+            if (!badCMD) //if not set, command passed all checks
             {
                 cmdCountGLB++;
                 //cmdTime = time();
@@ -1466,7 +1467,7 @@ int main(void)
                         }
                     }
                 }
-                bufferRead = WRAP(bufferRead + 29, BUFFER_LEN);
+                bufferRead = WRAP(bufferRead + 29, BUFFER_LEN);//command processed, move read index past it
                 if (cmdDone) {
                     cmdDone = false;
                     awaitingCommand = true;
