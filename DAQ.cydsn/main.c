@@ -26,7 +26,7 @@
 #define THRDEF (5u)
 
 /* Timeout in 5 millisecond units when waiting for command completion */
-#define TIMEOUT 9u 
+#define TIMEOUT 16u //9u debug 
 
 /* Packet IDs */
 #define FIX_HEAD ('\xDB')
@@ -882,7 +882,7 @@ int main(void)
     
     SPIM_Start();
     
-    uint8 outputMode = USBUART_OUTPUT;// SPI_OUTPUT; //USBUART_OUTPUT;    
+    uint8 outputMode = SPI_OUTPUT; //USBUART_OUTPUT;    
     USBUART_Start(USBFS_DEVICE, USBUART_3V_OPERATION);
     
     Comp_Ch1_Start();
