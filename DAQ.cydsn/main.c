@@ -16,6 +16,8 @@
 #include <string.h>
 #include <stdbool.h>
 
+#define VERSION 1
+
 /* I2C mode */
 #define ACK  (1u)
 #define NACK (0u)
@@ -26,7 +28,7 @@
 #define THRDEF (5u)
 
 /* Timeout in 5 millisecond units when waiting for command completion */
-#define TIMEOUT 9u 
+#define TIMEOUT 200u 
 
 /* Packet IDs */
 #define FIX_HEAD ('\xDB')
@@ -48,7 +50,7 @@
 #define MAX_TKR_BOARDS 8
 #define MAX_TKR_BOARD_BYTES 203     // Two leading bytes, 12 bit header, 12 chips * (12-bit header and up to 10 12-bit cluster words) + CRC byte
 #define USBFS_DEVICE (0u)
-#define BUFFER_LEN  64u //increaded from 32u so 2 full commands cn fit, it is now a circular buffer -Brian
+#define BUFFER_LEN  32u
 #define MAX_DATA_OUT 256
 #define MXERR 64
 #define SPI_OUTPUT 0u
@@ -83,14 +85,7 @@
 #define ERR_TKR_TRG_ENABLE 24u
 #define ERR_TKR_BAD_TRGHEAD 25u
 
-#define TKR_READ_TIMEOUT 15u    // Length of time to wait before giving a time-out error
-
-//added for new cmd buffer parsing -Brian Lucas
-#define WRAPINC(a,b) ((a + 1) % (b)) //Macro to increment an index a around a circular buffer of size b  
-#define WRAP(a,b) ((a) % (b)) //Macro to bring new calculated index a into the bounds of a circular buffer of size b
-
-uint8 bufferRead = 0; //index of byte to read circular raw ASCII buffer of commands -Brian
-uint8 bufferWrite = 0; //index of byte to write circular raw ASCII buffer of commands, if read = write then empty
+#define TKR_READ_TIMEOUT 31u    // Length of time to wait before giving a time-out error
 
 uint8 nDataReady;
 uint16 maxEvents;
@@ -440,7 +435,7 @@ uint8 byte16(uint16 word, int byte) {
 }
 
 void logicReset() {
-    LED2_OnOff(true);
+    //LED2_OnOff(true);
     int state = isr_clk200_GetState();
     isr_clk200_Disable();
     int stateTrg = isr_GO1_GetState();
@@ -458,7 +453,7 @@ void logicReset() {
     CyDelay(20);
     if (stateTrg) isr_GO1_Enable();
     if (state) isr_clk200_Enable();
-    LED2_OnOff(false);
+    //LED2_OnOff(false);
     for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
         if (tkrData.boardHits[brd].nBytes > 0) {
             tkrData.boardHits[brd].nBytes = 0;
@@ -678,7 +673,7 @@ CY_ISR(Store_B)
             tofB.ptr++;
             if (tofB.ptr >= TOFMAX_EVT) tofB.ptr = 0;
             if (outputTOF) {  
-                LED2_OnOff(true);
+                //LED2_OnOff(true);
                 Timer_1_Start();
                 uint8 oReg[7];
                 oReg[0] = 0xBB;
@@ -700,7 +695,7 @@ CY_ISR(intTimer) {
     uint8 status = Control_Reg_SSN_Read();
     status = status & ~DATLED;
     status = status & ~TKRLED;
-    status = status & ~LED2;
+    //status = status & ~LED2;
     Control_Reg_SSN_Write(status);
     Timer_1_Stop();
 }
@@ -749,7 +744,7 @@ CY_ISR(isrGO1)    // GO signal (system trigger). Start the full event readout if
         cntGO++;
         triggered = true;
         timeStamp = time();
-        LED2_OnOff(true);
+        //LED2_OnOff(true);
         Timer_1_Start();
     }
     cntGO1++;     // Count all GO signals during a run, even if the trigger is not enabled.
@@ -804,7 +799,7 @@ int main(void)
     runNumber = 0;
     timeStamp = time();
     
-    uint8 buffer[BUFFER_LEN];  // Circular Buffer for incoming UART commands
+    uint8 buffer[BUFFER_LEN];  // Buffer for incoming UART commands
     uint8 code[256];  // ASCII code translation to hex nibbles
     for (int i=0; i<256; ++i) code[i] = 0;
     code[49] = 1;
@@ -882,7 +877,7 @@ int main(void)
     
     SPIM_Start();
     
-    uint8 outputMode = USBUART_OUTPUT;// SPI_OUTPUT; //USBUART_OUTPUT;    
+    uint8 outputMode = USBUART_OUTPUT;    
     USBUART_Start(USBFS_DEVICE, USBUART_3V_OPERATION);
     
     Comp_Ch1_Start();
@@ -1348,7 +1343,8 @@ int main(void)
                     USBUART_PutData(dataPacket, 9);   
                 } else {
                     set_SPI_SSN(SSN_Main, true);
-                    for (int i=0; i<9; ++i) SPIM_WriteTxData(dataPacket[i]);
+                    SPIM_PutArray(dataPacket, 9);
+                    //for (int i=0; i<9; ++i) SPIM_WriteTxData(dataPacket[i]);
                 }
             } else {
                 int nPackets = (nDataReady - 1)/3 + 1;
@@ -1412,91 +1408,39 @@ int main(void)
             }
         }        
         
-        // Get a 29-byte command input from the UART or USB-UART
-        // reads partial to full commands from either input and adds them to a buffer for parsing 
-        uint8 count = 0; //Temporary variable to keep count of revelant new command bytes 
-        if (USBUART_GetConfiguration() != 0u) {    // USB is active
-            if (USBUART_DataIsReady() != 0u) { // command bytes are ready
-                uint8 tempBuffer[BUFFER_LEN]; //new buffer to get the datat from USBUART_GetAll
-                uint8 partialCount = 0; //count to end of buffer if it wraps around
-                count = USBUART_GetAll(tempBuffer); // get the bytes from USB
-                if((bufferWrite + count) > (uint8)(BUFFER_LEN)) //check if new bytes will push the cirucular buffer past boundary
-                {
-                    partialCount = BUFFER_LEN - bufferRead ;// bytes to coppy to boundary
-                    memcpy((buffer + bufferWrite) , tempBuffer, partialCount); // copy from tempBuffer to boundary of buffer
-                    bufferWrite = 0;// move index to low boundary
-                }
-                memcpy((buffer + bufferWrite) , (tempBuffer + partialCount), (count - partialCount)); // copy rest of bytes from tempBuffer to buffer
-                bufferWrite += (count - partialCount); //move write index to next byte, will not wrap
-                if(WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN) < count) //Check if write index moved past read by making sure the buufered bytes are at least count
-                {
-                    bufferRead = WRAPINC(bufferWrite, BUFFER_LEN); //buffer overflowed, discard bytes that didn't have cmd
-                    //TODO error type for discarged bytes
-                }
-                    
+        // Get a 9-byte command input from the UART or USB-UART
+        // The two should not be used at the same time (no reason for that, anyway)
+        int count = 0;
+        if (USBUART_GetConfiguration() != 0u) {    // Command from USB
+            if (USBUART_DataIsReady() != 0u) {
+                count = USBUART_GetAll(buffer);
             }
         }
-        if (0 == count) //only 1 source per loop, so don't read URT if already read USB
-        {
-            
-            count = UART_CMD_GetRxBufferSize(); //number of bytes to read TODO decrease buffer size of UART_CMD
-    //        if (count == 0 && UART_CMD_GetRxBufferSize() >= 29) {   // Command from UART 
-    //            count = 29;
-            for (int i=0; i<count; ++i) { //loop to copy all bytes
-                buffer[bufferWrite] = UART_CMD_ReadRxData(); //copy 1 byte
-                bufferWrite = WRAPINC(bufferWrite, BUFFER_LEN); //increment write index
+        if (count == 0 && UART_CMD_GetRxBufferSize() >= 29) {   // Command from UART 
+            count = 29;
+            for (int i=0; i<count; ++i) {
+                buffer[i] = UART_CMD_ReadRxData();
             }
-            if(WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN) < count) //Check if write index moved past read by making sure the buufered bytes are at least count
-            {
-                bufferRead = WRAPINC(bufferWrite, BUFFER_LEN); //buffer overflowed, discard bytes that didn't have cmd
-                //TODO error type for discarged bytes
-            }
-            
         }
-        count = WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN); //Count of active buffard bytes to parse
-        if (count >= 29) {// command is 29 bytes long so that is the min to parse
-            bool badCMD = false; // this flag true will stop futher checks
-            while (!(badCMD || ('S' == buffer[bufferRead])))//Find S to start the command, discard bytes untill found
-            {
-                if(--count < 29) //Check if command cannot exist in remaining bytes 
-                {
-                    badCMD = true; //command is bad so stop futher checks
+        if (count == 29) {
+            bool badCMD = false;
+            for (int i=0; i<9; ++i) {   // Check that all 3 command copies are identical
+                if (buffer[i] != buffer[i+9] || buffer[i] != buffer[i+18]) {
+                    addError(ERR_BAD_CMD, code[buffer[i]], i);
+                    badCMD = true;
+                    break;
                 }
-                //TODO error type for discarged bytes
-                bufferRead = WRAPINC(bufferRead, BUFFER_LEN); //increment read index
             }
-            if (!badCMD) //continue checks
-            {
-                for (int i=0; i<9; ++i) {   // Check that all 3 command copies are identical
-                    if (buffer[WRAP(bufferRead + i, BUFFER_LEN)] != buffer[WRAP(bufferRead + i+9, BUFFER_LEN)] || buffer[WRAP(bufferRead + i, BUFFER_LEN)] != buffer[WRAP(bufferRead + i+18, BUFFER_LEN)]) { //single byte doesn't match
-                        addError(ERR_BAD_CMD, code[buffer[WRAP(bufferRead + i, BUFFER_LEN)]], WRAP(bufferRead + i+9, BUFFER_LEN)); //command doesn't match in triplicate
-                        badCMD = true; //command is bad so stop futher checks
-                        bufferRead = WRAPINC(bufferRead, BUFFER_LEN); //discard byte that leads to misalignment
-                        break;//stop futher checks
-                    }
-                }
-                if(!badCMD) //continue checks
-                {
-                    if (('W' != buffer[WRAP(bufferRead + 26, BUFFER_LEN)]) || ('\r' !=  buffer[WRAP(bufferRead + 27, BUFFER_LEN)]) || ('\n' !=  buffer[WRAP(bufferRead + 28, BUFFER_LEN)]))
-                    {
-                        addError(ERR_BAD_CMD, code[buffer[WRAP(bufferRead + 26, BUFFER_LEN)]], WRAP(bufferRead + 27, BUFFER_LEN));
-                        badCMD = true; //command is bad so stop futher checks
-                        bufferRead = WRAPINC(bufferRead, BUFFER_LEN); //discard byte that leads to misalignment
-                    }
-                }
-                
-            }
-            if (!badCMD) //if not set, command passed all checks
-            {
+            if (!badCMD && buffer[0] == 'S' && buffer[8] == 'W') {
                 cmdCountGLB++;
                 //cmdTime = time();
-                uint8 nib3 = code[buffer[WRAP(bufferRead + 3, BUFFER_LEN)]];
-                uint8 nib4 = code[buffer[WRAP(bufferRead + 4, BUFFER_LEN)]];
+                uint8 nib3 = code[buffer[3]];
+                uint8 nib4 = code[buffer[4]];
                 uint8 addressByte = (nib3<<4) | nib4;
-                uint8 address = (addressByte & '\x3C')>>2;
-                if (address == eventPSOCaddress) {                    
-                    uint8 nib1 = code[buffer[WRAP(bufferRead + 1, BUFFER_LEN)]];  // No check on code. Illegal characters get translated to 0.
-                    uint8 nib2 = code[buffer[WRAP(bufferRead + 2, BUFFER_LEN)]];
+                uint8 PSOCaddress = (addressByte & '\x3C')>>2;
+                if (PSOCaddress == eventPSOCaddress) {                    
+                    uint8 nib1 = code[buffer[1]];  // No check on code. Illegal characters get translated to 0.
+                    uint8 nib2 = code[buffer[2]];
                     uint8 dataByte = (nib1<<4) | nib2;
                     if (awaitingCommand) {
                         awaitingCommand = false;
@@ -1518,7 +1462,6 @@ int main(void)
                         }
                     }
                 }
-                bufferRead = WRAP(bufferRead + 29, BUFFER_LEN);//command processed, move read index past it
                 if (cmdDone) {
                     cmdDone = false;
                     awaitingCommand = true;
@@ -1532,7 +1475,7 @@ int main(void)
                     uint8 chipAddress;
                     // If the trigger is enabled, ignore all commands besides disable trigger, 
                     // so that nothing can interrupt the readout.
-                    if (command == '\x07' || command == '\x3D' || !isTriggerEnabled()) {
+                    if (command == '\x3D' || !isTriggerEnabled()) {
                         switch (command) { 
                             case '\x01':         // Load a threshold DAC setting
                                 switch (cmdData[0]) {
@@ -1584,9 +1527,7 @@ int main(void)
                                 if (nErrors == 0) {
                                     nDataReady = 3;
                                     dataOut[0] = 0x00;
-//                                    dataOut[1] = cmdCount;// debug -Brian 0xEE;
                                     dataOut[1] = 0xEE;
-//                                    dataOut[2] = cmdCountGLB;// debug -Brian 0xFF;
                                     dataOut[2] = 0xFF;
                                     break;
                                 }
@@ -1622,9 +1563,21 @@ int main(void)
                                     DACsetting12 = 0;
                                     addError(ERR_TOF_DAC_READ, rc, DACaddress);                                         
                                 }
+                                
                                 nDataReady = 2;
                                 dataOut[0] = (uint8)((DACsetting12 & 0xFF00)>>8);
                                 dataOut[1] = (uint8)(DACsetting12 & 0x00FF);
+                                break;
+                            case '\x06':        // Turn LED on or off, for communication test
+                                if (cmdData[0] == 1) {
+                                    LED2_OnOff(true);
+                                } else {
+                                    LED2_OnOff(false);
+                                }
+                                break;
+                            case '\x07':        // Return the version number
+                                nDataReady = 1;
+                                dataOut[0] = VERSION;
                                 break;
                             case '\x10':        // Send an arbitrary command to the tracker
                                 tkrCmdCode = cmdData[1];
@@ -1680,7 +1633,7 @@ int main(void)
                                 for (int i=0; i<nCalClusters; ++i) {
                                     uint64 mask0 = 0;
                                     int nch = cmdData[ptr];
-                                    int ch0 = cmdData[ptr+1];
+                                    int ch0 = 64-nch-cmdData[ptr+1];
                                     mask0 = mask0 +1;
                                     for (int j=1; j<nch; ++j) {
                                         mask0 = mask0<<1;
@@ -1729,7 +1682,7 @@ int main(void)
                                 UART_TKR_PutChar('\x00');
                                 UART_TKR_PutChar(tkrCmdCode);
                                 UART_TKR_PutChar('\x03');
-                                UART_TKR_PutChar('\x31');
+                                UART_TKR_PutChar('\x1F');
                                 uint8 FPGA = cmdData[0];
                                 uint8 trgDelay = cmdData[1];
                                 uint8 trgTag = cmdData[2] & 0x03;
@@ -1767,6 +1720,7 @@ int main(void)
                                         break;
                                     }
                                 }    
+                                //CyDelay(1);
                                 // Read the data from the tracker
                                 rc = getTrackerData();
                                 if (rc != 0) {
@@ -1866,7 +1820,7 @@ int main(void)
                                     outputMode = cmdData[0];
                                 }
                                 break;
-                            case '\x31':       // Re-initialize the SPI interface
+                            case '\x31':       // Initialize the SPI interface
                                 SPIM_Init();
                                 SPIM_Enable();
                                 break;
