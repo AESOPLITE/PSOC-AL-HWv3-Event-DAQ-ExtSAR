@@ -1513,7 +1513,9 @@ int main(void)
                         if (byteCnt != 0) {
                             cmdData[byteCnt-1] = dataByte;
                             dCnt++;
-                            if (dCnt == nDataBytes) cmdDone = true; 
+                            if (dCnt == nDataBytes) {
+                                cmdDone = true; 
+                            }
                         } else {
                             addError(ERR_BAD_BYTE, command, nDataBytes);
                             badCMD = true;
