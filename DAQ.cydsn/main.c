@@ -88,7 +88,6 @@
 #define TKR_READ_TIMEOUT 31u    // Length of time to wait before giving a time-out error
 
 uint8 nDataReady;
-uint16 maxEvents;
 uint8 dataOut[MAX_DATA_OUT];      // Buffer for output data
 uint16 tkrCmdCount;               // Command count returned from the Tracker
 uint8 tkrCmdCode;                 // Command code echoed from the Tracker
@@ -148,6 +147,8 @@ const uint8 powerOnRESET = 0x30;
 const uint8 writeConfig = 0x80;
 const uint8 readConfig = 0x40;
 const uint8 readResults =  0x60;
+
+RTC_1_TIME_DATE* timeDate;
 
 // TOF circular data buffers
 struct TOF {
@@ -744,6 +745,7 @@ CY_ISR(isrGO1)    // GO signal (system trigger). Start the full event readout if
         cntGO++;
         triggered = true;
         timeStamp = time();
+        timeDate = RTC_1_ReadTime();
         //LED2_OnOff(true);
         Timer_1_Start();
     }
@@ -919,7 +921,10 @@ int main(void)
     TrigWindow_V1_5_Count7_1_Start();
     setCoincidenceWindow(12);
     
-    // Configure the Real-Time-Clock
+    // Start the internal real-time-clock component
+    RTC_1_Start();
+    
+    // Configure the i2c Real-Time-Clock if that bus extends to the event PSOC (normally not)
     //loadI2Creg(I2C_Address_RTC, 0x00, 0x59);
     //loadI2Creg(I2C_Address_RTC, 0x07, 0x80);     
     
@@ -1051,7 +1056,6 @@ int main(void)
     isr_Ch5_Enable();
     isr_GO1_Enable();
     
-    maxEvents = 0;
     bool eventDataReady = false;
     bool awaitingCommand = true;
     time_t cmdStartTime;
@@ -1061,22 +1065,8 @@ int main(void)
     set_SPI_SSN(0, false);   // Deselect all SPI slaves
     //uint32 cmdTime = time();
     triggerEnable(false);
-    bool countsSaved = true;
     for(;;)
     {
-        if (cntGO == maxEvents && !countsSaved) {
-            ch1CtrSave = Cntr8_V1_1_ReadCount();
-            ch2CtrSave = Cntr8_V1_2_ReadCount();
-            ch3CtrSave = Cntr8_V1_3_ReadCount();
-            ch4CtrSave = Cntr8_V1_4_ReadCount();
-            ch5CtrSave = Cntr8_V1_5_ReadCount();
-            ch1CountSave = ch1Count;
-            ch2CountSave = ch2Count;
-            ch3CountSave = ch3Count;
-            ch4CountSave = ch4Count;
-            ch5CountSave = ch5Count;
-            countsSaved = true;
-        }
         if (USBUART_IsConfigurationChanged() != 0u) {
             /* Wait for USB-UART Device to enumerate */
             if (USBUART_GetConfiguration() != 0u) {
@@ -1154,7 +1144,9 @@ int main(void)
             }
             tkrLED(false);
             
-            // Search for nearly coincident TOF data
+            // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
+            // instrument trigger, so we have to correlate the two channels with each other and with the event
+            // by looking at the course timing information.
             uint16 timeStamp16 = (uint16)(timeStampSave & 0x0000FFFF);
             int nI=0;
             uint8 idx[TOFMAX_EVT];
@@ -1163,7 +1155,7 @@ int main(void)
                 if (iptr < 0) iptr = iptr + TOFMAX_EVT;  // Wrap around the circular buffer
                 if (!tofA.filled[iptr]) continue;        // Use only entries filled since the previous readout
                 if (timeStamp16 == tofA.clkCnt[iptr] || timeStamp16 == tofA.clkCnt[iptr]+1) {
-                    idx[nI] = iptr;                      // Only look at entries within two 5ms clock periods
+                    idx[nI] = iptr;                      // Only look at entries within two 5ms clock periods of the event time stamp
                     ++nI;
                 }
             }
@@ -1173,36 +1165,36 @@ int main(void)
             uint16 bTOF = 65535;
             int16 dtmin = 32767;
             int nJ=0;
-            for (int j=0; j<TOFMAX_EVT; ++j) {
-                int jptr = tofB.ptr - j - 1;
-                if (jptr < 0) jptr = jptr + TOFMAX_EVT;
-                if (!tofB.filled[jptr]) continue;
+            for (int j=0; j<TOFMAX_EVT; ++j) {           // Loop over the TOF hits in channel B
+                int jptr = tofB.ptr - j - 1;             // Work backwards in time, starting with the most recent measurement
+                if (jptr < 0) jptr = jptr + TOFMAX_EVT;  // Wrap around the circular buffer
+                if (!tofB.filled[jptr]) continue;        // Use only entries filled since the previous readout
+                // Look only at entries filled within two 5 ms clock periods of the event time stamp
                 if (!(tofB.clkCnt[jptr] == timeStamp16 || tofB.clkCnt[jptr] == timeStamp16-1)) continue;
                 uint32 BT = tofB.shiftReg[jptr];
-                uint16 stopB = (uint16)(BT & 0x0000FFFF);
-                uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);
-                int timej = refB*8333 + stopB;
+                uint16 stopB = (uint16)(BT & 0x0000FFFF);       // Stop time for channel B
+                uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);  // Reference clock for channel B
+                int timej = refB*8333 + stopB;                  // Full time for channel B in 10 picosecond units
                 ++nJ;
-                for (int i=0; i<nI; ++i) {
+                for (int i=0; i<nI; ++i) {                          // Loop over the channel A hits
                     int iptr = idx[i];
+                    if (abs(tofA.clkCnt[iptr] - tofB.clkCnt[jptr]) > 1) continue; // Two channels must be within +- 1 clock period
                     uint32 AT = tofA.shiftReg[iptr];
-                    uint16 stopA = (uint16)(AT & 0x0000FFFF);
-                    uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);
-                    int timei = refA*8333 + stopA;
+                    uint16 stopA = (uint16)(AT & 0x0000FFFF);       // Stop time for channel A
+                    uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);  // Reference clock for channel A
+                    int timei = refA*8333 + stopA;                  // Full time for channel A in 10 picosecond units
+                    // Here we try to handle cases in which a reference clock rolled over
                     int dt;
-                    if (tofA.clkCnt[iptr] == tofB.clkCnt[jptr]) {
-                        dt = timej - timei;
-                    } else if (tofA.clkCnt[iptr] == tofB.clkCnt[jptr] - 1) {
+                    if (refA > 49152 && refB < 16384) {
                         dt = timej - (timei - 500000000);
-                    } else if (tofA.clkCnt[iptr] - 1 == tofB.clkCnt[jptr]) {
-                        dt = (timej - 500000000) - timei;
+                    } else if (refB > 49152 && refA < 16384) {
+                        dt = (timej - 500000000) - timei; 
                     } else {
-                        if (dtmin == 32767) dtmin = 32766;
-                        continue;
+                        dt = timej - timei;
                     }
-                    if (abs(dt) < abs(dtmin)) {
+                    if (abs(dt) < abs(dtmin)) { // Keep the smallest time difference of all combinations
                         dtmin = dt;
-                        aCLK = tofA.clkCnt[iptr];
+                        aCLK = tofA.clkCnt[iptr];  // Save the clock and reference counts for debugging
                         bCLK = tofB.clkCnt[jptr];
                         aTOF = refA;
                         bTOF = refB;
@@ -1217,68 +1209,88 @@ int main(void)
             //     - Event number 4 bytes
             //     - Trigger time stamp 4 bytes
             //     - Trigger count (including deadtime) 4 bytes
-            //     - Trigger word 1 byte
+            //     - time and date 4 bytes
+            //     - Trigger word 1 byte               
             // PHA Data:
             //     - T1 2 bytes
             //     - T2 2 bytes
             //     - T3 2 bytes
             //     - T4 2 bytes
             //     - Guard 2 bytes
+            //     - extra channel 2 bytes
             // TOF Data:
             //     Time difference in units of 10 ps, 2 bytes, signed integer
+            // Tracker trigger count
+            // Tracker command count
+            // Tracker trigger pattern
+            // TOF debugging data (can be removed once not needed)
+            // Number of tracker boards
             // Tracker Data
             // Trailer "FINI"
             
             // Build the event by filling the output buffer according to the output format.
+            // Pack the time and date information into a 4-byte unsigned integer
+            uint32 timeWord = ((uint32)timeDate->Year - 2000) << 26;
+            timeWord = timeWord | ((uint32)timeDate->Month << 22);
+            timeWord = timeWord | ((uint32)timeDate->DayOfMonth << 17);
+            timeWord = timeWord | ((uint32)timeDate->Hour << 12);
+            timeWord = timeWord | ((uint32)timeDate->Min << 6);
+            timeWord = timeWord | ((uint32)timeDate->Sec); 
+            //
+            // Start the event with a 4-byte header
             dataOut[0] = 0x5A;
             dataOut[1] = 0x45;
             dataOut[2] = 0x52;
             dataOut[3] = 0x4F;
             dataOut[4] = byte16(runNumber, 0);
             dataOut[5] = byte16(runNumber, 1);
-            dataOut[6] = byte32(cntGO, 0);
+            dataOut[6] = byte32(cntGO, 0);     // Event number
             dataOut[7] = byte32(cntGO, 1);
             dataOut[8] = byte32(cntGO, 2);
             dataOut[9] = byte32(cntGO, 3);
-            dataOut[10] = byte32(timeStampSave, 0);
+            dataOut[10] = byte32(timeStampSave, 0); // Time stamp
             dataOut[11] = byte32(timeStampSave, 1);
             dataOut[12] = byte32(timeStampSave, 2);
             dataOut[13] = byte32(timeStampSave, 3);
-            dataOut[14] = byte32(cntGO1, 0);
+            dataOut[14] = byte32(cntGO1, 0);   // Trigger count
             dataOut[15] = byte32(cntGO1, 1);
             dataOut[16] = byte32(cntGO1, 2);
             dataOut[17] = byte32(cntGO1, 3);
-            dataOut[18] = trgStatus;
-            dataOut[19] = byte16(adc2_sampleArray[0], 0);   // T1
-            dataOut[20] = byte16(adc2_sampleArray[0], 1);
-            dataOut[21] = byte16(adc1_sampleArray[0], 0);   // T2
-            dataOut[22] = byte16(adc1_sampleArray[0], 1);
-            dataOut[23] = byte16(adc2_sampleArray[2], 0);   // T3
-            dataOut[24] = byte16(adc2_sampleArray[2], 1);
-            dataOut[25] = byte16(adc1_sampleArray[1], 0);   // T4
-            dataOut[26] = byte16(adc1_sampleArray[1], 1);
-            dataOut[27] = byte16(adc2_sampleArray[1], 0);   // G
-            dataOut[28] = byte16(adc2_sampleArray[1], 1);
-            dataOut[29] = byte16(adc1_sampleArray[2], 0);   // Extra
-            dataOut[30] = byte16(adc1_sampleArray[2], 1);
-            dataOut[31] = byte16(dtmin, 0);   // TOT
-            dataOut[32] = byte16(dtmin, 1);
-            dataOut[33] = byte16(tkrData.triggerCount, 0);
-            dataOut[34] = byte16(tkrData.triggerCount, 1);
-            dataOut[35] = tkrData.cmdCount;
-            dataOut[36] = tkrData.trgPattern;
-            dataOut[37] = nI;   // Number of TOF readouts since the last trigger
-            dataOut[38] = nJ; 
-            dataOut[39] = byte16(aTOF,0);
-            dataOut[40] = byte16(aTOF,1);
-            dataOut[41] = byte16(bTOF,0);
-            dataOut[42] = byte16(bTOF,1);
-            dataOut[43] = byte16(aCLK,0);
-            dataOut[44] = byte16(aCLK,1);
-            dataOut[45] = byte16(bCLK,0);
-            dataOut[46] = byte16(bCLK,1);
-            dataOut[47] = tkrData.nTkrBoards;
-            nDataReady = 48;
+            dataOut[18] = byte32(timeWord, 0); // Time and date
+            dataOut[19] = byte32(timeWord, 1);
+            dataOut[20] = byte32(timeWord, 2);
+            dataOut[21] = byte32(timeWord, 3);
+            dataOut[22] = trgStatus;
+            dataOut[23] = byte16(adc2_sampleArray[0], 0);   // T1
+            dataOut[24] = byte16(adc2_sampleArray[0], 1);
+            dataOut[25] = byte16(adc1_sampleArray[0], 0);   // T2
+            dataOut[26] = byte16(adc1_sampleArray[0], 1);
+            dataOut[27] = byte16(adc2_sampleArray[2], 0);   // T3
+            dataOut[28] = byte16(adc2_sampleArray[2], 1);
+            dataOut[29] = byte16(adc1_sampleArray[1], 0);   // T4
+            dataOut[30] = byte16(adc1_sampleArray[1], 1);
+            dataOut[31] = byte16(adc2_sampleArray[1], 0);   // G
+            dataOut[32] = byte16(adc2_sampleArray[1], 1);
+            dataOut[33] = byte16(adc1_sampleArray[2], 0);   // Extra (for test work)
+            dataOut[34] = byte16(adc1_sampleArray[2], 1);
+            dataOut[35] = byte16(dtmin, 0);   // TOT
+            dataOut[36] = byte16(dtmin, 1);
+            dataOut[37] = byte16(tkrData.triggerCount, 0);
+            dataOut[38] = byte16(tkrData.triggerCount, 1);
+            dataOut[39] = tkrData.cmdCount;
+            dataOut[40] = tkrData.trgPattern;
+            dataOut[41] = nI;   // Number of TOF readouts since the last trigger
+            dataOut[42] = nJ; 
+            dataOut[43] = byte16(aTOF,0);    // TOF chip reference clock (for debugging)
+            dataOut[44] = byte16(aTOF,1);
+            dataOut[45] = byte16(bTOF,0);
+            dataOut[46] = byte16(bTOF,1);
+            dataOut[47] = byte16(aCLK,0);    // Internal clock at time of TOF event
+            dataOut[48] = byte16(aCLK,1);
+            dataOut[49] = byte16(bCLK,0);
+            dataOut[50] = byte16(bCLK,1);
+            dataOut[51] = tkrData.nTkrBoards;
+            nDataReady = 52;
             for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
                 if (nDataReady > MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
                     addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
@@ -1292,6 +1304,7 @@ int main(void)
                 free(tkrData.boardHits[brd].hitList);
                 tkrData.boardHits[brd].nBytes = 0;
             }
+            // Four byte trailer
             dataOut[nDataReady++] = 0x46;
             dataOut[nDataReady++] = 0x49;
             dataOut[nDataReady++] = 0x4E;
@@ -1310,18 +1323,16 @@ int main(void)
             tofA.ptr = 0;
             tofB.ptr = 0;
             tkrData.nTkrBoards = 0;
-            if (cntGO == maxEvents) {
-                ch1CtrSave = Cntr8_V1_1_ReadCount();
-                ch2CtrSave = Cntr8_V1_2_ReadCount();
-                ch3CtrSave = Cntr8_V1_3_ReadCount();
-                ch4CtrSave = Cntr8_V1_4_ReadCount();
-                ch5CtrSave = Cntr8_V1_5_ReadCount();
-                ch1CountSave = ch1Count;
-                ch2CountSave = ch2Count;
-                ch3CountSave = ch3Count;
-                ch4CountSave = ch4Count;
-                ch5CountSave = ch5Count;
-            }
+            ch1CtrSave = Cntr8_V1_1_ReadCount();
+            ch2CtrSave = Cntr8_V1_2_ReadCount();
+            ch3CtrSave = Cntr8_V1_3_ReadCount();
+            ch4CtrSave = Cntr8_V1_4_ReadCount();
+            ch5CtrSave = Cntr8_V1_5_ReadCount();
+            ch1CountSave = ch1Count;
+            ch2CountSave = ch2Count;
+            ch3CountSave = ch3Count;
+            ch4CountSave = ch4Count;
+            ch5CountSave = ch5Count;
         }
         
         // Data goes out by USBUART, for bench testing, or by SPI to the main PSOC
@@ -1381,8 +1392,8 @@ int main(void)
                 }
             }
             nDataReady = 0;
-            if (eventDataReady) {
-                if (maxEvents == 0 || cntGO < maxEvents) triggerEnable(true);
+            if (eventDataReady) {   // re-enable the trigger after event data has been output
+                triggerEnable(true);
                 eventDataReady = false;
             }
             dataLED(false);
@@ -1475,7 +1486,7 @@ int main(void)
                     uint8 chipAddress;
                     // If the trigger is enabled, ignore all commands besides disable trigger, 
                     // so that nothing can interrupt the readout.
-                    if (command == '\x3D' || !isTriggerEnabled()) {
+                    if (command == '\x3D' || command == '\x44' || !isTriggerEnabled()) {
                         switch (command) { 
                             case '\x01':         // Load a threshold DAC setting
                                 switch (cmdData[0]) {
@@ -1585,7 +1596,7 @@ int main(void)
                                 // to avoid confusing the tracker logic.
                                 if (tkrCmdCode == 0x52 || tkrCmdCode == 0x53) break;
                                 tkrLED(true);
-                                UART_TKR_PutChar(cmdData[0]);
+                                UART_TKR_PutChar(cmdData[0]);   // FPGA address
                                 UART_TKR_PutChar(tkrCmdCode);
                                 uint8 nDataTKR = cmdData[2];
                                 UART_TKR_PutChar(nDataTKR);
@@ -1835,7 +1846,7 @@ int main(void)
                                 dataOut[0] = tofA.ptr;
                                 dataOut[1] = tofB.ptr;
                                 break;
-                            case '\x35':       // Read most recent TOF event from channel A or B
+                            case '\x35':       // Read most recent TOF event from channel A or B (for testing)
                                 nDataReady = 9;
                                 if (cmdData[0] == 0) {
                                     uint8 idx = tofA.ptr - 1;
@@ -1955,7 +1966,20 @@ int main(void)
                                     triggerEnable(false);
                                 }
                                 break;
-                            case '\x3C':  // Start a run for a specified number of events
+                            case '\x44':  // End a run and send out the run summary
+                                triggered = false;   // this might throw out the last event
+                                triggerEnable(false);
+                                dataOut[0] = byte32(cntGO1, 0);
+                                dataOut[1] = byte32(cntGO1, 1);
+                                dataOut[2] = byte32(cntGO1, 2);
+                                dataOut[3] = byte32(cntGO1, 3);
+                                dataOut[4] = byte32(cntGO, 0);
+                                dataOut[5] = byte32(cntGO, 1);
+                                dataOut[6] = byte32(cntGO, 2);
+                                dataOut[7] = byte32(cntGO, 3);
+                                nDataReady = 8;
+                                break;
+                            case '\x3C':  // Start a run
                                 for (int j=0; j<TOFMAX_EVT; ++j) {
                                     tofA.filled[j] = false;
                                     tofB.filled[j] = false;
@@ -1977,12 +2001,10 @@ int main(void)
                                 while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) {
                                     ShiftReg_B_ReadData();
                                 }
-                                maxEvents = cmdData[2];
-                                maxEvents = (maxEvents<<8) | cmdData[3];
+                                
                                 cntGO = 0;
                                 cntGO1 = 0;
                                 triggerEnable(true);
-                                countsSaved = false;
                                 Control_Reg_Pls_Write(PULSE_CNTR_RST);
                                 // Enable the tracker trigger
                                 tkrCmdCode = 0x65;
@@ -2044,7 +2066,7 @@ int main(void)
                                         break;
                                 }
                                 break;
-                            case '\x40':  // Read all TOF data
+                            case '\x40':  // Read all TOF data (for testing)
                                 nDataReady = 3;
                                 uint8 nA = 0;
                                 uint8 nB = 0;
@@ -2115,6 +2137,32 @@ int main(void)
                                 }
                                 tofB.ptr = 0;
                                 tofA.ptr = 0;
+                                break;
+                            case '\x45': // Set the time and date of the real-time-clock
+                                timeDate->Sec = cmdData[0];
+                                timeDate->Min = cmdData[1];
+                                timeDate->Hour = cmdData[2];
+                                timeDate->DayOfWeek = cmdData[3];
+                                timeDate->DayOfMonth = cmdData[4];
+                                timeDate->DayOfYear = cmdData[6] + cmdData[5]*256;
+                                timeDate->Month = cmdData[7];
+                                timeDate->Year = cmdData[9] + cmdData[8]*256;
+                                RTC_1_WriteTime(timeDate);
+                                //LED2_OnOff(true);
+                                break;
+                            case '\x46': // get the time and date of the real-time-clock
+                                nDataReady = 10;
+                                timeDate = RTC_1_ReadTime();
+                                dataOut[0] = timeDate->Sec;
+                                dataOut[1] = timeDate->Min;
+                                dataOut[2] = timeDate->Hour;
+                                dataOut[3] = timeDate->DayOfWeek;
+                                dataOut[4] = timeDate->DayOfMonth;
+                                dataOut[5] = timeDate->DayOfYear/256;
+                                dataOut[6] = timeDate->DayOfYear%256;
+                                dataOut[7] = timeDate->Month;
+                                dataOut[8] = timeDate->Year/256;
+                                dataOut[9] = timeDate->Year%256;
                                 break;
                         } // End of command switch
                         command = 0;
