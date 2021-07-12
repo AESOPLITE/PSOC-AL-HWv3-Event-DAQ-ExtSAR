@@ -8,6 +8,8 @@
  * CONFIDENTIAL AND PROPRIETARY INFORMATION
  * WHICH IS THE PROPERTY OF U.C. Santa Cruz.
  *
+ * Code to run in the Event PSOC on the AESOP-Lite DAQ board.
+ *
  * ========================================
 */
 #include "project.h"
@@ -18,6 +20,67 @@
 
 #define VERSION 1
 
+/*=========================================================================
+ *
+ * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
+ *              T3        G        T4        T1        T2
+ * Connector  J10/12    J2/11    J17/18    J15/16    J25/26
+ * Peak det.   p4[3]    p4[7]     p3[0]     p0[7]     p3[4]
+ * Schem pin   11         17       13         7        20
+ * ADC          2          2        1         2         1
+ * ADC Chan     2          1        1         0         0
+ * Preamp      p4[6]    p3[2]     p3[3]     p4[5]      p2[0]
+ * Schem pin    9         16       15        14        19
+ * Channel      2          1        4         3         5 
+ * TOF                              2         1   
+ * Trig bit     1         N/A       0         3         2
+ *
+ * The 4 PSOC DACs are labeled by channel number.
+ * Note that T2 is the channel with the external 12-bit DAC for setting its threshold. The digital signal goes to p2[0].
+ * T1 and T4 are connected to the two channels that go to the TOF chip.
+ * The guard signal, G, does not participate in the trigger logic but is discriminated and registered in the data.
+ *
+ *  Event output format:
+ *  Header "ZERO" in ASCII (5A, 45, 52, 4F)
+ *  Event Header:
+ *      - Run number 2 bytes
+ *      - Event number 4 bytes (counts accepted triggers)
+ *      - Trigger time stamp 4 bytes
+ *      - Trigger count (including deadtime) 4 bytes
+ *      - real time and date 4 bytes
+ *      - Trigger status word 1 byte               
+ *  PHA Data:
+ *      - T1 2 bytes
+ *      - T2 2 bytes
+ *      - T3 2 bytes
+ *      - T4 2 bytes
+ *      - Guard 2 bytes
+ *      - extra channel 2 bytes (can be removed once not needed)
+ *  TOF Data:
+ *      Time difference in units of 10 ps, 2 bytes, signed integer
+ *  Tracker trigger count 2 bytes
+ *  Tracker command count 1 byte
+ *  Tracker trigger pattern 1 byte
+ *  TOF debugging data 10 bytes (can be removed once not needed)
+ *  Number of tracker boards 1 byte
+ *  Tracker Data
+ *  Trailer "FINI" in ASCII (46, 49, 4e, 49)
+ *
+ *  The Event PSOC can take commands from the USB-UART or main PSOC UART.    
+ *    Each command is formatted as "S1234<sp>xyW" repeated 3 times, followed by <cr><lf>
+ *    where 1234 are 4 ASCII characters, each representing a nibble 
+ *    12 gives us the data byte and 34 the address byte             
+ *    data byte: {7:0} gives the command code                 
+ *    address byte: {7:6} and {1:0] give the number of data-byte "commands" to follow, 0 to 15
+ *                  {5:2} = 0x8 indicate the event PSOC        
+ *    All data arrive in up to 15 subsequent data-byte "commands" For those,
+ *    bits {7:0} of the command byte are the data for the command in progress
+ *    bits {7:6} and {1:0} give the data-byte number, 1 through 15
+ *    Subsequent commands must wait until after the correct number of data bytes has arrived
+ *
+ *    The following commands are defined:
+ *    Byte Code    Number Data Bytes            Data Byte Definition
+ */
 /* I2C mode */
 #define ACK  (1u)
 #define NACK (0u)
@@ -50,7 +113,7 @@
 #define MAX_TKR_BOARDS 8
 #define MAX_TKR_BOARD_BYTES 203     // Two leading bytes, 12 bit header, 12 chips * (12-bit header and up to 10 12-bit cluster words) + CRC byte
 #define USBFS_DEVICE (0u)
-#define BUFFER_LEN  64u //increaded from 32u so 2 full commands cn fit, it is now a circular buffer -Brian
+#define BUFFER_LEN  64u 
 #define MAX_DATA_OUT 256
 #define MXERR 64
 #define SPI_OUTPUT 0u
@@ -121,15 +184,6 @@ const uint8 RSTPEAK = '\x10';
 const uint8 TKRLED = '\x20'; 
 const uint8 DATLED = '\x40';
 
-// Input channel map, from left to right on the SMA connectors:
-// Note that channel 5, T2, has a dedicated discriminator and 12-bit threshold DAC outside of the PSOC.
-// The guard signal, G, does not participate in the trigger logic but is discriminated and registered in the data.
-// Connector  Ch  PSOC-Trg-Pin  Schem-Pin  Counter  Trg-Bit
-//    J12      2       P4[6]       9          T3      1
-//    J11      1       P3[2]      16          G    
-//    J18      4       P3[3]      15          T4      0
-//    J16      3       P4[5]      14          T1      3
-//    J26      5       P2[0]      19          T2      2      (Here the PSOC input is digital; the others are analog)
 #define trgBit_T4 = 0x01;
 #define trgBit_T3 = 0x02;
 #define trgBit_T2 = 0x04;
@@ -1208,33 +1262,7 @@ int main(void)
                     }
                 }
             }
-            
-            // Output format:
-            // Header "ZERO"
-            // Event Header:
-            //     - Run number 2 bytes
-            //     - Event number 4 bytes
-            //     - Trigger time stamp 4 bytes
-            //     - Trigger count (including deadtime) 4 bytes
-            //     - time and date 4 bytes
-            //     - Trigger word 1 byte               
-            // PHA Data:
-            //     - T1 2 bytes
-            //     - T2 2 bytes
-            //     - T3 2 bytes
-            //     - T4 2 bytes
-            //     - Guard 2 bytes
-            //     - extra channel 2 bytes
-            // TOF Data:
-            //     Time difference in units of 10 ps, 2 bytes, signed integer
-            // Tracker trigger count
-            // Tracker command count
-            // Tracker trigger pattern
-            // TOF debugging data (can be removed once not needed)
-            // Number of tracker boards
-            // Tracker Data
-            // Trailer "FINI"
-            
+
             // Build the event by filling the output buffer according to the output format.
             // Pack the time and date information into a 4-byte unsigned integer
             uint32 timeWord = ((uint32)timeDate->Year - 2000) << 26;
@@ -1406,18 +1434,6 @@ int main(void)
             dataLED(false);
         }
         
-        // Take commands from the USB-UART or main PSOC UART.    
-        // Each command is formatted as "S1234<sp>xyW" repeated 3 times, followed by <cr><lf>
-        // where 1234 are 4 ASCII characters, each representing a nibble 
-        // 12 gives us the data byte and 34 the address byte             
-        // data byte: {7:0} gives the command code                 
-        // address byte: {7:6} and {1:0] give the number of data-byte "commands" to follow, 0 to 15
-        //               {5:2} = 0x8 indicate the event PSOC        
-        // All data arrive in up to 15 subsequent data-byte "commands" For those,
-        // bits {7:0} of the command byte are the data for the command in progress
-        // bits {7:6} and {1:0} give the data-byte number, 1 through 15
-        // Subsequent commands must wait until the correct number of data bytes has arrived
-        
         // Time-out protection in case the expected data for a command are never sent
         if (!awaitingCommand) {
             if (time() - cmdStartTime > TIMEOUT) {
@@ -1431,7 +1447,7 @@ int main(void)
         uint8 count = 0; //Temporary variable to keep count of revelant new command bytes 
         if (USBUART_GetConfiguration() != 0u) {    // USB is active
             if (USBUART_DataIsReady() != 0u) { // command bytes are ready
-                uint8 tempBuffer[BUFFER_LEN]; //new buffer to get the datat from USBUART_GetAll
+                uint8 tempBuffer[BUFFER_LEN]; //new buffer to get the data from USBUART_GetAll
                 uint8 partialCount = 0; //count to end of buffer if it wraps around
                 count = USBUART_GetAll(tempBuffer); // get the bytes from USB
                 if((bufferWrite + count) > (uint8)(BUFFER_LEN)) //check if new bytes will push the cirucular buffer past boundary
@@ -1463,20 +1479,20 @@ int main(void)
             if(WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN) < count) //Check if write index moved past read by making sure the buufered bytes are at least count
             {
                 bufferRead = WRAPINC(bufferWrite, BUFFER_LEN); //buffer overflowed, discard bytes that didn't have cmd
-                //TODO error type for discarged bytes
+                //TODO error type for discarded bytes
             }
             
         }
-        count = WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN); //Count of active buffard bytes to parse
+        count = WRAP((BUFFER_LEN - bufferRead + bufferWrite), BUFFER_LEN); //Count of active buffered bytes to parse
         if (count >= 29) {// command is 29 bytes long so that is the min to parse
-            bool badCMD = false; // this flag true will stop futher checks
-            while (!(badCMD || ('S' == buffer[bufferRead])))//Find S to start the command, discard bytes untill found
+            bool badCMD = false; // this flag true will stop further checks
+            while (!(badCMD || ('S' == buffer[bufferRead])))//Find S to start the command, discard bytes until found
             {
                 if(--count < 29) //Check if command cannot exist in remaining bytes 
                 {
-                    badCMD = true; //command is bad so stop futher checks
+                    badCMD = true; //command is bad so stop further checks
                 }
-                //TODO error type for discarged bytes
+                //TODO error type for discarded bytes
                 bufferRead = WRAPINC(bufferRead, BUFFER_LEN); //increment read index
             }
             if (!badCMD) //continue checks
@@ -1506,8 +1522,8 @@ int main(void)
                 uint8 nib3 = code[buffer[WRAP(bufferRead + 3, BUFFER_LEN)]];
                 uint8 nib4 = code[buffer[WRAP(bufferRead + 4, BUFFER_LEN)]];
                 uint8 addressByte = (nib3<<4) | nib4;
-                uint8 address = (addressByte & '\x3C')>>2;
-                if (address == eventPSOCaddress) {                    
+                uint8 PSOCaddress = (addressByte & '\x3C')>>2;
+                if (PSOCaddress == eventPSOCaddress) {                    
                     uint8 nib1 = code[buffer[WRAP(bufferRead + 1, BUFFER_LEN)]];  // No check on code. Illegal characters get translated to 0.
                     uint8 nib2 = code[buffer[WRAP(bufferRead + 2, BUFFER_LEN)]];
                     uint8 dataByte = (nib1<<4) | nib2;
@@ -1875,7 +1891,7 @@ int main(void)
                                 loadI2Creg(I2C_Address_RTC , cmdData[0], cmdData[1]);
                                 break;
                             case '\x25':        // Read the watch battery voltage
-                                Bvolt = ADC_DelSig_1_CountsTo_mVolts(ADC_DelSig_1_Read16());
+                                Bvolt = ADC_DelSig_1_CountsTo_mVolts(ADC_DelSig_1_Read32());
                                 nDataReady = 2;
                                 dataOut[0] = (uint8)((Bvolt & 0xFF00)>>8);
                                 dataOut[1] = (uint8)(Bvolt & 0x00FF);
