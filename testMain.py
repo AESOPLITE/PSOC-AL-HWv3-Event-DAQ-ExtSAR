@@ -11,7 +11,7 @@ from PSOC_cmd import *
 
 address = addrMain
 
-portName = "COM5"
+portName = "COM3"
 openCOM(portName)
 
 print("Entering testMain.py")
@@ -27,9 +27,26 @@ time.sleep(0.1)
 #LED2("on", addrMain)
 #time.sleep(1)
 #LED2("off", addrMain)
-LED2("on", addrEvnt)
-time.sleep(1)
-LED2("off", addrEvnt)
+
+#time.sleep(1)
+#LED2("on", addrEvnt)
+#time.sleep(1)
+#LED2("off", addrEvnt)
+print(" ")
+print("Read the real-time clock over the i2c bus:")
+#loadRTCregister(0x07, 0x40, addrMain)
+#byte = readRTCregister(0x07, addrMain)
+#print("RTC register 0x07 = " + str(binascii.hexlify(byte)))
+#setRTCtime(addrMain)
+readRTCtime(addrMain)
+
+
+#setInternalRTCfromI2C()
+getInternalRTC(address)
+
+time.sleep(0.1)
+loadEventPSOCrtc()
+getInternalRTC(addrEvnt)
 
 ctrlOsc(1)   # turn on the external clock
 
@@ -79,14 +96,6 @@ getPressure(addrMain)
 
 Vback = readBackplaneVoltage()
 print("Backplane battery voltage = " + str(Vback) + " V")
-
-print(" ")
-print("Read the real-time clock over the i2c bus:")
-loadRTCregister(0x07, 0x40, addrMain)
-#byte = readRTCregister(0x07, addrMain)
-#print("RTC register 0x07 = " + str(binascii.hexlify(byte)))
-#setRTCtime(addrMain)
-readRTCtime(addrMain)
 
 print(" ")
 print("Set up the thresholds for the PMT channels:")
@@ -200,10 +209,10 @@ tkrGetDAC(0, 3, "threshold")
 
 triggerDelay = 6
 triggerTag = 0
-sendTkrCalStrobe(0, triggerDelay, triggerTag)
+sendTkrCalStrobe(0, triggerDelay, triggerTag, True)
 
 time.sleep(0.01)
-readCalEvent(triggerTag)
+readCalEvent(triggerTag, True)
 
 tkrGetASICconfig(0, 3)
 readErrors(address)
@@ -256,7 +265,7 @@ print("Before the run, the trigger enable status is " + str(triggerEnableStatus(
 
 print(" ")
 numEvents = 2
-runNumber = 33
+runNumber = 35
 ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numEvents)
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
