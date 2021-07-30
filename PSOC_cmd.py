@@ -748,9 +748,8 @@ def limitedRun(runNumber, numEvnts):
         if trgStatus & 0x04: tkrTrg0 = tkrTrg0 + 1
         if trgStatus & 0x08: tkrTrg1 = tkrTrg1 + 1
         if trgStatus & 0x10: pmtGrd = pmtGrd + 1
-        if abs(dtmin) < 10000.:   # nTuple output
-            strOut = '{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}\n'.format(trigger, T1, T2, T3, T4, G, Ex, tofA, tofB, dtmin, nTOFA, nTOFB, deltaTime)
-            f.write(strOut)   
+        strOut = '{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}\n'.format(trigger, T1, T2, T3, T4, G, Ex, tofA, tofB, dtmin, nTOFA, nTOFB, deltaTime)
+        f.write(strOut)   
         TOFavg = TOFavg + float(dtmin)
         TOFavg2 = TOFavg2 + float(dtmin)*float(dtmin)
         ADCavg[0] = ADCavg[0] + T1
