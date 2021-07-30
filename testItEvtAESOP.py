@@ -11,8 +11,8 @@ from PSOC_cmd import *
 
 asicReset = True
 # Set the number of events to acquire:
-numberEvents = 20000
-runNumber = 38
+numberEvents = 80000
+runNumber = 69
 
 portName = "COM7"
 openCOM(portName)
@@ -41,7 +41,8 @@ for channel in range(1,3):
 
 #Set the thresholds for the PMTs
 #Order is G, T3, T1, T4, T2
-pmtThresh = [3,4,4,4,60]
+#pmtThresh = [3,4,4,4,60]  #PSM: ORIGINAL VALUES 18 July 2021 DO NOT DELETE THIS LINE
+pmtThresh = [3,4,4,3,60]
 ch5Thresh = pmtThresh[4]
 print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
 setPmtDAC(5, ch5Thresh, address)
@@ -213,7 +214,12 @@ if nTkrBoards > 0:
     getLyrTrgCnt(4)
 
 #Set the main trigger mask
-mask = 0x04    # T1 & T3 & T4
+#Order is T1 T2 T3 T4
+mask = 0x06    # T1 & T3 & T4 now T1 & T4 -B
+#mask = 0x07    # single T1
+#mask = 0x0b    # single T2
+#mask = 0x0d    # single T3
+#mask = 0x0e    # single T4
 print("Setting the first trigger mask to " + str(mask))
 setTriggerMask(1, mask)
 print("Get the trigger mask")
@@ -227,7 +233,7 @@ setTriggerWindow(16)
 prescale = 4
 print("Setting the PMT trigger prescale to " + str(prescale))
 setTriggerPrescale("PMT", prescale)
-mask = 0x0A    # T1 & T3 prescaled
+mask = 0x00    # T1 & T3 prescaled now All -B
 print("Setting the second trigger mask to " + str(mask))
 setTriggerMask(2, mask)
 print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
@@ -246,6 +252,7 @@ print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 # printed in an ASCII format.
 # The gnuplot program is needed for viewing the event plots.
 ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numberEvents)
+f2 = open("dataOutput_run" + str(runNumber) + ".txt", "a")
 
 #Print some end of run summary stuff
 print("Ending the run at " + time.strftime("%c"))
@@ -257,18 +264,32 @@ print("    T4 = " + str(ADC[3]) + " +- " + str(Sigma[3]))
 print("     G = " + str(ADC[4]) + " +- " + str(Sigma[4]))
 print("    Ex = " + str(ADC[5]) + " +- " + str(Sigma[5]))
 print("    TOF = " + str(TOF) + " +- " + str(sigmaTOF))
+
+f2.write("Ending the run at " + time.strftime("%c")+"\n")
+f2.write("Average ADC values:"+"\n")
+f2.write("     T1: " + str(ADC[0]) + " +- " + str(Sigma[0])+"\n")
+f2.write("     T2: " + str(ADC[1]) + " +- " + str(Sigma[1])+"\n")
+f2.write("     T3: " + str(ADC[2]) + " +- " + str(Sigma[2])+"\n")
+f2.write("     T4: " + str(ADC[3]) + " +- " + str(Sigma[3])+"\n")
+f2.write("      G: " + str(ADC[4]) + " +- " + str(Sigma[4])+"\n")
+f2.write("     Ex: " + str(ADC[5]) + " +- " + str(Sigma[5])+"\n")
+f2.write("   TOF2: " + str(TOF) + " +- " + str(sigmaTOF)+"\n")
+
 chName = ["G","T3","T1","T4","T2"]
 for ch in range(5):    #Get the singles counts from each of the 5 PMTs
     cnt = getEndOfRunChannelCount(ch+1)
     print("Counter for channel " + chName[ch] + " = " + str(cnt))
+    f2.write("Counterforchannel: " + chName[ch] + " = " + str(cnt)+"\n")
 
 readErrors(address)
 
 if nTkrBoards > 0:
     print("Tracker FPGA configuration = " + str(tkrGetFPGAconfig(0)))
+    f2.write("TrackerFPGAconfiguration: " + str(tkrGetFPGAconfig(0))+"\n")
     if asicReset: tkrAsicPowerOff()
     tkrTriggerDisable()
 
+f2.close()
 readErrors(address)
 
 closeCOM()
