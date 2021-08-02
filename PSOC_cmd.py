@@ -835,7 +835,6 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     if (bytes2int(byteList[0]) != nBytes): 
         print("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary.")  
         f2.write("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary."+"\n")  
->>>>>>> no-tracker-option
     go0 = bytes2int(byteList[3])
     go1 = bytes2int(byteList[4])
     go2 = bytes2int(byteList[5])
