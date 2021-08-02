@@ -808,7 +808,6 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     f2.write("limitedRun: EOR expecting " + str(nBytes) + " bytes coming back.\n")
     byteList = []
     for i in range(nPackets):
-<<<<<<< HEAD
         if i == 0:
             ret = ser.read(3)
             if ret != b'\xDC\x00\xFF':
@@ -820,7 +819,6 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))        
     if (bytes2int(byteList[0]) != nBytes): print("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary.")  
-=======
         ret = ser.read(3)
         if ret != b'\xDC\x00\xFF':
             print("limitedRun: invalid header returned: " + str(ret))
