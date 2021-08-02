@@ -251,7 +251,7 @@ print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 # plus an nTuple file with PMT readings, and a text output file with most of the information per event
 # printed in an ASCII format.
 # The gnuplot program is needed for viewing the event plots.
-ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numberEvents)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numberEvents, False)
 f2 = open("dataOutput_run" + str(runNumber) + ".txt", "a")
 
 #Print some end of run summary stuff
