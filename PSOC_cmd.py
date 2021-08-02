@@ -621,9 +621,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     print("limitedRun: starting run number " + str(runNumber) + " for " + str(numEvnts) + " events")
     if not readTracker: print("            The tracking detector will not be read out")
     f = open("nTuple_run" + str(runNumber) + ".txt", "w")
-    if outputEvents:
-        f2 = open("dataOutput_run" + str(runNumber) + ".txt", "w")
-        f2.write("Starting run " + str(runNumber) + " on " + time.strftime("%c") + "\n") 
+    # if outputEvents:
+    f2 = open("dataOutput_run" + str(runNumber) + ".txt", "w")
+    f2.write("Starting run " + str(runNumber) + " on " + time.strftime("%c") + "\n") 
     print("limitedRun: trigger enable status = " + str(triggerEnableStatus()))
     time.sleep(0.1)
     pmtTrg1 = 0
@@ -819,17 +819,17 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))        
     if (bytes2int(byteList[0]) != nBytes): print("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary.")  
-        ret = ser.read(3)
-        if ret != b'\xDC\x00\xFF':
-            print("limitedRun: invalid header returned: " + str(ret))
-            f2.write("limitedRun: invalid header returned: " + str(ret) +"\n")            
-        byteList.append(ser.read())
-        byteList.append(ser.read())
-        byteList.append(ser.read())
-        ret = ser.read(3)
-        if ret != b'\xFF\x00\xFF':
-            print("limitedRun: invalid trailer returned: " + str(ret))  
-            f2.write("limitedRun: invalid trailer returned: " + str(ret)+"\n")            
+    ret = ser.read(3)
+    if ret != b'\xDC\x00\xFF':
+        print("limitedRun: invalid header returned: " + str(ret))
+        f2.write("limitedRun: invalid header returned: " + str(ret) +"\n")            
+    byteList.append(ser.read())
+    byteList.append(ser.read())
+    byteList.append(ser.read())
+    ret = ser.read(3)
+    if ret != b'\xFF\x00\xFF':
+        print("limitedRun: invalid trailer returned: " + str(ret))  
+        f2.write("limitedRun: invalid trailer returned: " + str(ret)+"\n")            
     if (bytes2int(byteList[0]) != nBytes): 
         print("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary.")  
         f2.write("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary."+"\n")  

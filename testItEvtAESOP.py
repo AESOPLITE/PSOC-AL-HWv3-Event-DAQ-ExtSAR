@@ -11,8 +11,8 @@ from PSOC_cmd import *
 
 asicReset = True
 # Set the number of events to acquire:
-numberEvents = 80000
-runNumber = 69
+numberEvents = 80#000
+runNumber = 4 #69
 
 portName = "COM7"
 openCOM(portName)
