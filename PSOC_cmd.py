@@ -412,25 +412,25 @@ def tkrReadi2cReg(FPGA,i2cAddress):
   
   ret = ser.read(3)
   if ret != b'\xDC\x00\xFF':
-    print("tkrReadi2cReg: invalid header returned: " + str(ret))
+      print("tkrReadi2cReg: invalid header returned: " + str(ret))
   nBytes = bytes2int(ser.read(1))
   #print("tkrReadi2cReg: number of bytes returned = " + str(nBytes))
   ser.read(2)
-  ret = ser.read(3)
-  if ret != b'\xFF\x00\xFF':
-    print("tkrReadi2cReg: invalid trailer returned: " + str(ret))      
+  #ret = ser.read(3)
+  #if ret != b'\xFF\x00\xFF':
+  #  print("tkrReadi2cReg: invalid trailer returned: " + str(ret))      
   results = []
   for packet in range(2):
-      ret = ser.read(3)
-      if ret != b'\xDC\x00\xFF':
-          print("tkrReadi2cReg: invalid header returned: " + str(ret))
+      #ret = ser.read(3)
+      #if ret != b'\xDC\x00\xFF':
+      #    print("tkrReadi2cReg: invalid header returned: " + str(ret))
       for chunk in range(3):
           ret = ser.read(1)
           results.append(ret)
           #print("tkrReadi2cReg: byte " + str(chunk) + " in packet " + str(packet) + " = " + str(ret))
-      ret = ser.read(3)
-      if ret != b'\xFF\x00\xFF':
-          print("tkrReadi2cReg: invalid trailer returned: " + str(ret))    
+  ret = ser.read(3)
+  if ret != b'\xFF\x00\xFF':
+      print("tkrReadi2cReg: invalid trailer returned: " + str(ret))    
   result = getBinaryString(results[1:3])
   return result
 
@@ -506,15 +506,16 @@ def sendTkrCalStrobe(FPGA, trgDelay, trgTag, verbose):
     if verbose: print("sendTkrCalStrobe: expecting " + str(nBytes) + " bytes coming back from the tracker.")
     byteList = []
     for i in range(nPackets):
-        ret = ser.read(3)
-        if ret != b'\xDC\x00\xFF':
-            print("sendTkrCalStrobe: invalid header returned: " + str(ret))
+        if i == 0:
+            ret = ser.read(3)
+            if ret != b'\xDC\x00\xFF':
+                print("sendTkrCalStrobe: invalid header returned: " + str(ret))
         byteList.append(ser.read())
         byteList.append(ser.read())
         byteList.append(ser.read())
-        ret = ser.read(3)
-        if ret != b'\xFF\x00\xFF':
-            print("sendTkrCalStrobe: invalid trailer returned: " + str(ret))        
+    ret = ser.read(3)
+    if ret != b'\xFF\x00\xFF':
+        print("sendTkrCalStrobe: invalid trailer returned: " + str(ret))        
     if (bytes2int(byteList[0]) != 9): print("sendTkrCalStrobe: wrong number " + str(byteList[0].hex()) + " of bytes returned")
     i=0
     if verbose:
@@ -553,9 +554,9 @@ def readCalEvent(trgTag, verbose):
     nData = bytes2int(ret)
     if verbose: print("ReadCalEvent: expecting " + str(nData) + " bytes of data for this event.")
     ser.read(2)
-    ret = ser.read(3)
-    if ret != b'\xFF\x00\xFF':
-        print("ReadCalEvent: invalid trailer returned: " + str(ret))  
+    #ret = ser.read(3)
+    #if ret != b'\xFF\x00\xFF':
+    #    print("ReadCalEvent: invalid trailer returned: " + str(ret))  
     R = nData % 3
     nPackets = int(nData/3)
     if (R != 0): nPackets = nPackets + 1
@@ -564,9 +565,9 @@ def readCalEvent(trgTag, verbose):
     if verbose: print("ReadCalEvent: reading " + str(nData) + " data bytes in " + str(nPackets) + " packets")
     debug = False
     for i in range(nPackets):
-        ret = ser.read(3)
-        if ret != b'\xDC\x00\xFF':
-            print("ReadCalEvent: invalid header returned: " + str(ret))
+        #ret = ser.read(3)
+        #if ret != b'\xDC\x00\xFF':
+        #    print("ReadCalEvent: invalid header returned: " + str(ret))
         byte1 = ser.read()
         if debug: print("   Packet " + str(i) + ", byte 1 = " + str(bytes2int(byte1)) + " decimal, " + str(byte1.hex()) + " hex")
         dataList.append(bytes2int(byte1))
@@ -579,9 +580,9 @@ def readCalEvent(trgTag, verbose):
         if debug: print("   Packet " + str(i) + ", byte 3 = " + str(bytes2int(byte3)) + " decimal, " + str(byte3.hex()) + " hex")
         dataList.append(bytes2int(byte3))
         byteList.append(byte3)
-        ret = ser.read(3)
-        if ret != b'\xFF\x00\xFF':
-            print("readCalEvent: invalid trailer returned: " + str(ret)) 
+    ret = ser.read(3)
+    if ret != b'\xFF\x00\xFF':
+        print("readCalEvent: invalid trailer returned: " + str(ret)) 
 
     iPtr = 4
     numBoards = dataList[iPtr]
@@ -654,9 +655,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         ret = ser.read(1)
         nData = bytes2int(ret)
         ser.read(2)
-        ret = ser.read(3)
-        if ret != b'\xFF\x00\xFF':
-            print("limitedRun: invalid trailer returned: " + str(ret))  
+        #ret = ser.read(3)
+        #if ret != b'\xFF\x00\xFF':
+        #    print("limitedRun: invalid trailer returned: " + str(ret))  
         R = nData % 3
         nPackets = int(nData/3)
         if (R != 0): nPackets = nPackets + 1
@@ -664,9 +665,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         byteList = []
         if verbose: print("limitedRun: reading " + str(nData) + " data bytes in " + str(nPackets) + " packets")
         for i in range(nPackets):
-            ret = ser.read(3)
-            if ret != b'\xDC\x00\xFF':
-                print("limitedRun: invalid header returned: " + str(ret))
+            #ret = ser.read(3)
+            #if ret != b'\xDC\x00\xFF':
+            #    print("limitedRun: invalid header returned: " + str(ret))
             byte1 = ser.read()
             if verbose: print("   Packet " + str(i) + ", byte 1 = " + str(bytes2int(byte1)) + " decimal, " + str(byte1.hex()) + " hex")
             dataList.append(bytes2int(byte1))
@@ -679,9 +680,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
             if verbose: print("   Packet " + str(i) + ", byte 3 = " + str(bytes2int(byte3)) + " decimal, " + str(byte3.hex()) + " hex")
             dataList.append(bytes2int(byte3))
             byteList.append(byte3)
-            ret = ser.read(3)
-            if ret != b'\xFF\x00\xFF':
-                print("limitedRun: invalid trailer returned: " + str(ret)) 
+        ret = ser.read(3)
+        if ret != b'\xFF\x00\xFF':
+            print("limitedRun: invalid trailer returned: " + str(ret)) 
         run = dataList[4]*256 + dataList[5]
         trigger = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
         cntGo1 = dataList[14]*16777216 + dataList[15]*65536 + dataList[16]*256 + dataList[17]
@@ -802,15 +803,16 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     print("limitedRun: EOR expecting " + str(nBytes) + " bytes coming back.")
     byteList = []
     for i in range(nPackets):
-        ret = ser.read(3)
-        if ret != b'\xDC\x00\xFF':
-            print("limitedRun: invalid header returned: " + str(ret))
+        if i == 0:
+            ret = ser.read(3)
+            if ret != b'\xDC\x00\xFF':
+                print("limitedRun: invalid header returned: " + str(ret))
         byteList.append(ser.read())
         byteList.append(ser.read())
         byteList.append(ser.read())
-        ret = ser.read(3)
-        if ret != b'\xFF\x00\xFF':
-            print("limitedRun: invalid trailer returned: " + str(ret))        
+    ret = ser.read(3)
+    if ret != b'\xFF\x00\xFF':
+        print("limitedRun: invalid trailer returned: " + str(ret))        
     if (bytes2int(byteList[0]) != nBytes): print("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary.")  
     go0 = bytes2int(byteList[3])
     go1 = bytes2int(byteList[4])
@@ -1245,16 +1247,16 @@ def getInternalRTC(address):
     nData = bytes2int(ret)
     #print("getInternalRTC: expecting " + str(nData) + " bytes of data.")
     ser.read(2)
-    ret = ser.read(3)
-    if ret != b'\xFF\x00\xFF':
-        print("getInternalRTC: invalid trailer returned: " + str(ret))
+    #ret = ser.read(3)
+    #if ret != b'\xFF\x00\xFF':
+    #    print("getInternalRTC: invalid trailer returned: " + str(ret))
     nPackets = 4
     byteList = []
     for ipkt in range(nPackets):
-        ret = ser.read(3)
+        #ret = ser.read(3)
         #print(str(ret))
-        if ret != b'\xDC\x00\xFF': 
-            print("getInternalRTC " + str(ipkt) + ": incorrect header returned: " + str(ret)) 
+        #if ret != b'\xDC\x00\xFF': 
+        #    print("getInternalRTC " + str(ipkt) + ": incorrect header returned: " + str(ret)) 
         byte = ser.read(1)
         #print(str(byte))
         byteList.append(bytes2int(byte))
@@ -1264,10 +1266,10 @@ def getInternalRTC(address):
         byte = ser.read(1)
         #print(str(byte))
         byteList.append(bytes2int(byte))
-        ret = ser.read(3)
-        #print(str(ret))
-        if ret != b'\xFF\x00\xFF':
-            print("getInternalRTC " + str(ipkt) + ": invalid trailer returned: " + str(ret))
+    ret = ser.read(3)
+    #print(str(ret))
+    if ret != b'\xFF\x00\xFF':
+        print("getInternalRTC " + str(ipkt) + ": invalid trailer returned: " + str(ret))
 
     #for i in range(10):
     #    print("    Byte " + str(i) + " is " + str(byteList[i]))    
@@ -1348,23 +1350,23 @@ def readErrors(address):
             #print("Byte "+str(i)+" returned to readErrors: " + str(binascii.hexlify(ret)))
             if i == 0: nData = bytes2int(ret)
         print("readErrors for PSOC address " + str(address) + ": number of data bytes = " + str(nData))           
-        ret = ser.read(3)
-        if ret != b'\xFF\x00\xFF':
-            print("readErrors: invalid trailer returned: " + str(ret))
+        #ret = ser.read(3)
+        #if ret != b'\xFF\x00\xFF':
+        #    print("readErrors: invalid trailer returned: " + str(ret))
         nPackets = int((nData-1)/3) + 1;
         for packet in range(nPackets):
-            ret = ser.read(3)
-            if ret != b'\xDC\x00\xFF':
-                print("readErrors: invalid header returned: " + str(ret))
+            #ret = ser.read(3)
+            #if ret != b'\xDC\x00\xFF':
+            #    print("readErrors: invalid header returned: " + str(ret))
             ret = ser.read(1)
             print("Error code returned to readErrors is " + str(bytes2int(ret)))  
             ret = ser.read(1)
             print("    First information byte = " + str(binascii.hexlify(ret)))
             ret = ser.read(1)
             print("    Second information byte = " + str(binascii.hexlify(ret)))
-            ret = ser.read(3)
-            if ret != b'\xFF\x00\xFF':
-                print("readErrors: invalid trailer returned: " + str(ret))
+        ret = ser.read(3)
+        if ret != b'\xFF\x00\xFF':
+            print("readErrors: invalid trailer returned: " + str(ret))
     else:
         print("readErrors: invalid header returned: " + str(ret))
 
@@ -1450,12 +1452,12 @@ def readAllTOFdata(address):
     nData = bytes2int(ser.read(1))
     print("readAllTOFdata: number of bytes in event = " + str(nData))
     ser.read(2)
-    ret = ser.read(3)
-    if ret != b'\xFF\x00\xFF':
-        print("readAllTOFdata: invalid trailer returned: " + str(ret))
-    ret = ser.read(3)
-    if ret != b'\xDC\x00\xFF':
-        print("readAllTOFdata: invalid header returned: " + str(ret))
+    #ret = ser.read(3)
+    #if ret != b'\xFF\x00\xFF':
+    #    print("readAllTOFdata: invalid trailer returned: " + str(ret))
+    #ret = ser.read(3)
+    #if ret != b'\xDC\x00\xFF':
+    #    print("readAllTOFdata: invalid header returned: " + str(ret))
     nA = bytes2int(ser.read(1))
     print("readAllTOFdata: number of A-channel hits = " + str(nA))
     nB = bytes2int(ser.read(1))     
@@ -1464,13 +1466,13 @@ def readAllTOFdata(address):
     print("readAllTOFdata: 3rd byte = " + str(b3))
     if (b3 == 2):
         print("    readAllTOFdata: the TOF data were truncated")
-    ret = ser.read(3)
-    if ret != b'\xFF\x00\xFF':
-        print("readAllTOFdata: invalid trailer returned: " + str(ret))
+    #ret = ser.read(3)
+    #if ret != b'\xFF\x00\xFF':
+    #    print("readAllTOFdata: invalid trailer returned: " + str(ret))
     for i in range(nA):
-        ret = ser.read(3)
-        if ret != b'\xDC\x00\xFF':
-            print("    readAllTOFdata: invalid header returned: " + str(ret))
+        #ret = ser.read(3)
+        #if ret != b'\xDC\x00\xFF':
+        #    print("    readAllTOFdata: invalid header returned: " + str(ret))
         refIdx = bytes2int(ser.read(2))
         stp0 = bytes2int(ser.read(1))       
         ret = ser.read(3)
@@ -1481,30 +1483,30 @@ def readAllTOFdata(address):
             print("    readAllTOFdata: invalid header returned: " + str(ret))
         stop = stp0*256 + bytes2int(ser.read(1))
         clkCnt = bytes2int(ser.read(2))             
-        ret = ser.read(3)
-        if ret != b'\xFF\x00\xFF':
-            print("readAllTOFdata: invalid trailer returned: " + str(ret))
+        #ret = ser.read(3)
+        #if ret != b'\xFF\x00\xFF':
+        #    print("readAllTOFdata: invalid trailer returned: " + str(ret))
         timeA = refIdx*8333 + stop;
         print("    Channel A hit " + str(i) + ": ref=" + str(refIdx) + ", stop=" + str(stop) + ", time=" + str(timeA) + ",  clock count = " + str(clkCnt))
     for i in range(nB):
-        ret = ser.read(3)
-        if ret != b'\xDC\x00\xFF':
-            print("    readAllTOFdata: invalid header returned: " + str(ret))
+        #ret = ser.read(3)
+        #if ret != b'\xDC\x00\xFF':
+        #    print("    readAllTOFdata: invalid header returned: " + str(ret))
         refIdx = bytes2int(ser.read(2))
         stp0 = bytes2int(ser.read(1))       
         ret = ser.read(3)
         if ret != b'\xFF\x00\xFF':
             print("readAllTOFdata: invalid trailer returned: " + str(ret))
-        ret = ser.read(3)
-        if ret != b'\xDC\x00\xFF':
-            print("    readAllTOFdata: invalid header returned: " + str(ret))
         stop = stp0*256 + bytes2int(ser.read(1))
         clkCnt = bytes2int(ser.read(2))             
         ret = ser.read(3)
         if ret != b'\xFF\x00\xFF':
             print("readAllTOFdata: invalid trailer returned: " + str(ret))
         timeB = refIdx*8333 + stop;
-        print("    Channel B hit " + str(i) + ": ref=" + str(refIdx) + ", stop=" + str(stop) + ": time=" + str(timeB) + ",  clock count = " + str(clkCnt))        
+        print("    Channel B hit " + str(i) + ": ref=" + str(refIdx) + ", stop=" + str(stop) + ": time=" + str(timeB) + ",  clock count = " + str(clkCnt))    
+    ret = ser.read(3)
+    if ret != b'\xDC\x00\xFF':
+        print("    readAllTOFdata: invalid header returned: " + str(ret))		
     print("     ")
             
 def readTOFevent(address, channel):
@@ -1519,30 +1521,30 @@ def readTOFevent(address, channel):
     ret = ser.read(1)
     print("    readTOFevent: number of data bytes = " + str(bytes2int(ret)))
     ret = ser.read(2)       
-    ret = ser.read(3)
-    if ret != b'\xFF\x00\xFF':
-        print("readTOFevent: invalid trailer returned: " + str(ret))    
-    ret = ser.read(3)
-    if ret != b'\xDC\x00\xFF':
-        print("readTOFevent: invalid header returned: " + str(ret))
+    #ret = ser.read(3)
+    #if ret != b'\xFF\x00\xFF':
+    #    print("readTOFevent: invalid trailer returned: " + str(ret))    
+    #ret = ser.read(3)
+    #if ret != b'\xDC\x00\xFF':
+    #    print("readTOFevent: invalid header returned: " + str(ret))
     ref = bytes2int(ser.read(2))
     print("    readTOFevent: reference index = " + str(ref))
     ret = ser.read(1)       
-    ret = ser.read(3)
-    if ret != b'\xFF\x00\xFF':
-        print("readTOFevent: invalid trailer returned: " + str(ret))
-    ret = ser.read(3)
-    if ret != b'\xDC\x00\xFF':
-        print("readTOFevent: invalid header returned: " + str(ret))
+    #ret = ser.read(3)
+    #if ret != b'\xFF\x00\xFF':
+    #    print("readTOFevent: invalid trailer returned: " + str(ret))
+    #ret = ser.read(3)
+    #if ret != b'\xDC\x00\xFF':
+    #    print("readTOFevent: invalid header returned: " + str(ret))
     tim = bytes2int(ser.read(2))
     print("    readTOFevent: stop time = " + str(tim))
     ret = ser.read(1)       
-    ret = ser.read(3)
-    if ret != b'\xFF\x00\xFF':
-        print("readTOFevent: invalid trailer returned: " + str(ret))
-    ret = ser.read(3)
-    if ret != b'\xDC\x00\xFF':
-        print("readTOFevent: invalid header returned: " + str(ret))
+    #ret = ser.read(3)
+    #if ret != b'\xFF\x00\xFF':
+    #    print("readTOFevent: invalid trailer returned: " + str(ret))
+    #ret = ser.read(3)
+    #if ret != b'\xDC\x00\xFF':
+    #    print("readTOFevent: invalid header returned: " + str(ret))
     clk = bytes2int(ser.read(2))
     print("    readTOFevent: clock count = " + str(clk))
     idx = bytes2int(ser.read(1))
@@ -1567,20 +1569,20 @@ def readTofConfig():
     print("readTofConfig: number of data bytes = " + str(bytes2int(ret)))
     ret = ser.read(2)
     #print("readTofConfig: ret = " + str(ret))
-    ret = ser.read(3)
-    if ret != b'\xFF\x00\xFF':
-        print("readTofConfig: invalid trailer returned: " + str(ret)) 
+    #ret = ser.read(3)
+    #if ret != b'\xFF\x00\xFF':
+    #    print("readTofConfig: invalid trailer returned: " + str(ret)) 
     for packet in range(6):
-        ret = ser.read(3)
+        #ret = ser.read(3)
         #print("readTofConfig: ret = " + str(ret))
-        if ret != b'\xDC\x00\xFF':
-            print("readTofConfig: invalid header returned: " + str(ret))
+        #if ret != b'\xDC\x00\xFF':
+        #    print("readTofConfig: invalid header returned: " + str(ret))
         for i in range(3):
             ret = ser.read(1)
             print("Byte "+str(i)+" returned by SPI from the TOF chip config reg: " + str(binascii.hexlify(ret)))  
-        ret = ser.read(3)
-        if ret != b'\xFF\x00\xFF':
-            print("readTofConfig: invalid trailer returned: " + str(ret)) 
+    ret = ser.read(3)
+    if ret != b'\xFF\x00\xFF':
+        print("readTofConfig: invalid trailer returned: " + str(ret)) 
 
 # Receive and check the echo from a tracker command
 def getTkrEcho():
@@ -1755,7 +1757,7 @@ def getTkrHousekeeping():
     ret = ser.read(3)
     if ret != b'\xDC\x00\xFF':
         print("getTkrHousekeeping: invalid header returned: " + str(ret))    
-        if ret == b'\xdb\x00\xff':
+        if ret == b'\xDB\x00\xFF':
             ret = ser.read(1)
             print("   next byte = " + str(ret))
             ret = ser.read(1)
@@ -1770,22 +1772,22 @@ def getTkrHousekeeping():
     nData = bytes2int(ser.read(1))
     #print("getTkrHousekeeping: nData= " + str(nData))
     ser.read(2)
-    ret = ser.read(3)
-    if ret != b'\xFF\x00\xFF':
-        print("getTkrHousekeeping: invalid trailer returned: " + str(ret))  
+    #ret = ser.read(3)
+    #if ret != b'\xFF\x00\xFF':
+    #    print("getTkrHousekeeping: invalid trailer returned: " + str(ret))  
     nPackets = int((nData - 1)/3) + 1
     returnStuff = []
     for packet in range(nPackets):
         #print("getTkrHousekeeping: read packet " + str(packet))
-        ret = ser.read(3)
-        if ret != b'\xDC\x00\xFF':
-            print("getTkrHousekeeping, packet " + str(packet) + ": invalid header returned: " + str(ret))
+        #ret = ser.read(3)
+        #if ret != b'\xDC\x00\xFF':
+        #    print("getTkrHousekeeping, packet " + str(packet) + ": invalid header returned: " + str(ret))
         returnStuff.append(ser.read(1))
         returnStuff.append(ser.read(1))
         returnStuff.append(ser.read(1))
-        ret = ser.read(3)
-        if ret != b'\xFF\x00\xFF':
-            print("getTkrHousekeeping, packet " + str(packet) + ": invalid trailer returned: " + str(ret))
+    ret = ser.read(3)
+    if ret != b'\xFF\x00\xFF':
+        print("getTkrHousekeeping, packet " + str(packet) + ": invalid trailer returned: " + str(ret))
     #for junk in returnStuff:
     #    print("getTkrHousekeeping: byte = " + str(binascii.hexlify(junk)))
     return returnStuff

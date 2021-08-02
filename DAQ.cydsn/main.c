@@ -1597,27 +1597,29 @@ int main(void)
                 dataPacket[5] = 0;
                 if (outputMode == USBUART_OUTPUT) {
                     while(USBUART_CDCIsReady() == 0u);
-                    USBUART_PutData(dataPacket, 9);  
+                    USBUART_PutData(dataPacket, 6);  
                 } else {
                     set_SPI_SSN(SSN_Main, true);
-                    for (int i=0; i<9; ++i) {
+                    for (int i=0; i<6; ++i) {
                         SPIM_WriteTxData(dataPacket[i]);
                     }
                 }     
                 for (int i=0; i<nPackets; ++i) {
+                    uint8 numBytes = 3;
                     if (i == nPackets-1) {
                         if (3*i+1 >= nDataReady) dataOut[3*i+1] = 0xEE;
                         if (3*i+2 >= nDataReady) dataOut[3*i+2] = 0xFF;
+                        numBytes = 6;
                     }
                     dataPacket[3] = dataOut[3*i];
                     dataPacket[4] = dataOut[3*i+1];
                     dataPacket[5] = dataOut[3*i+2]; 
                     if (outputMode == USBUART_OUTPUT) {
                         while(USBUART_CDCIsReady() == 0u);
-                        USBUART_PutData(dataPacket, 9);   
+                        USBUART_PutData(&dataPacket[3], numBytes);   
                     } else {                        
                         set_SPI_SSN(SSN_Main, false);
-                        for (int i=0; i<9; ++i) {
+                        for (int i=3; i<3+numBytes; ++i) {
                             SPIM_WriteTxData(dataPacket[i]);
                         }
                     }
