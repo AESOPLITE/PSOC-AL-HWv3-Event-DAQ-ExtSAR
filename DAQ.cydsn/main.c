@@ -244,6 +244,7 @@ struct TkrData {
     } boardHits[MAX_TKR_BOARDS];
 } tkrData;
 uint8 numTkrBrds;
+bool readTracker;
 
 struct Error {
     uint8 errorCode;
@@ -534,7 +535,6 @@ uint8 tkr_getByte(uint32 startTime, uint8 flag) {
         if (timeElapsed > TKR_READ_TIMEOUT) {
             uint8 temp = (uint8)(timeElapsed & 0x000000ff);
             addError(ERR_TKR_READ_TIMEOUT, temp, flag);
-            LED2_OnOff(true);
             return 0x00;
         }
     }
@@ -1018,6 +1018,7 @@ int main(void)
     nDataReady = 0;
     clkCnt = 0;
     nTkrHouseKeeping = 0;
+    readTracker = false;
     
     runNumber = 0;
     timeStamp = time();
@@ -1128,7 +1129,6 @@ int main(void)
     
     ADC_SAR_1_Start();
     ADC_SAR_2_Start();
-    ADC_DelSig_1_Start();
  
     UART_TKR_Start();
     UART_CMD_Start();
@@ -1278,7 +1278,7 @@ int main(void)
     isr_Ch5_Enable();
     isr_GO1_Enable();
     
-    numTkrBrds = MAX_TKR_BOARDS;
+    numTkrBrds = 1; //MAX_TKR_BOARDS;
     bool eventDataReady = false;
     bool awaitingCommand = true;
     time_t cmdStartTime;
@@ -1322,32 +1322,34 @@ int main(void)
             // This check generally works the first try and can maybe be removed in the long run.
             uint8 tkrDataReady = 0;
             uint8 nTry =0;
-            while (tkrDataReady != 0x59) {
-                tkrCmdCode = 0x57;
-                while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                UART_TKR_WriteTxData(0x00);    // Address byte
-                while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                UART_TKR_WriteTxData(tkrCmdCode);    // Check status
-                while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                UART_TKR_WriteTxData(0x00);    // Number of data bytes
-                getTrackerData(TKR_HOUSE_DATA);
-                if (nTkrHouseKeeping > 0) {
-                    nTkrHouseKeeping = 0;    // Keep the housekeeping data from being sent out to the world
-                    if (tkrHouseKeeping[0] == 0x59) {
-                        tkrDataReady = 0x59;
-                        break;
-                    } else if (tkrHouseKeeping[0] == 0x4E) {
-                        tkrDataReady = 0x4E;
-                    } else {
-                        addError(ERR_TKR_BAD_STATUS, tkrHouseKeeping[0], nTry);
+            if (readTracker) {
+                while (tkrDataReady != 0x59) {
+                    tkrCmdCode = 0x57;
+                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                    UART_TKR_WriteTxData(0x00);    // Address byte
+                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                    UART_TKR_WriteTxData(tkrCmdCode);    // Check status
+                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                    UART_TKR_WriteTxData(0x00);    // Number of data bytes
+                    getTrackerData(TKR_HOUSE_DATA);
+                    if (nTkrHouseKeeping > 0) {
+                        nTkrHouseKeeping = 0;    // Keep the housekeeping data from being sent out to the world
+                        if (tkrHouseKeeping[0] == 0x59) {
+                            tkrDataReady = 0x59;
+                            break;
+                        } else if (tkrHouseKeeping[0] == 0x4E) {
+                            tkrDataReady = 0x4E;
+                        } else {
+                            addError(ERR_TKR_BAD_STATUS, tkrHouseKeeping[0], nTry);
+                        }
                     }
-                }
-                nTry++;
-                if (nTry > 9) {
-                    addError(ERR_TKR_BAD_STATUS, tkrHouseKeeping[0], nTry+1);
-                    break;
-                }
-            }           
+                    nTry++;
+                    if (nTry > 9) {
+                        addError(ERR_TKR_BAD_STATUS, tkrHouseKeeping[0], nTry+1);
+                        break;
+                    }
+                }           
+            }
             if (tkrDataReady == 0x59) {
                 // Start the read of the Tracker data by sending a read-event command
                 tkrLED(true);
@@ -1477,16 +1479,21 @@ int main(void)
             dataOut[20] = byte32(timeWord, 2);
             dataOut[21] = byte32(timeWord, 3);
             dataOut[22] = trgStatus;
-            dataOut[23] = byte16(adc2_sampleArray[0], 0);   // T1
-            dataOut[24] = byte16(adc2_sampleArray[0], 1);
-            dataOut[25] = byte16(adc1_sampleArray[0], 0);   // T2
-            dataOut[26] = byte16(adc1_sampleArray[0], 1);
-            dataOut[27] = byte16(adc2_sampleArray[2], 0);   // T3
-            dataOut[28] = byte16(adc2_sampleArray[2], 1);
-            dataOut[29] = byte16(adc1_sampleArray[1], 0);   // T4
-            dataOut[30] = byte16(adc1_sampleArray[1], 1);
-            dataOut[31] = byte16(adc2_sampleArray[1], 0);   // G
-            dataOut[32] = byte16(adc2_sampleArray[1], 1);
+            uint16 T1mV = adc2_sampleArray[2]; //ADC_SAR_2_CountsTo_mVolts(adc2_sampleArray[2]);
+            uint16 T2mV = adc1_sampleArray[0]; //ADC_SAR_1_CountsTo_mVolts(adc1_sampleArray[0]);
+            uint16 T3mV = adc2_sampleArray[0]; //ADC_SAR_2_CountsTo_mVolts(adc2_sampleArray[0]);
+            uint16 T4mV = adc1_sampleArray[1]; //ADC_SAR_1_CountsTo_mVolts(adc1_sampleArray[1]);
+            uint16 GmV =  adc2_sampleArray[1]; //ADC_SAR_2_CountsTo_mVolts(adc2_sampleArray[1]);
+            dataOut[23] = byte16(T1mV, 0);   // T1
+            dataOut[24] = byte16(T1mV, 1);
+            dataOut[25] = byte16(T2mV, 0);   // T2
+            dataOut[26] = byte16(T2mV, 1);
+            dataOut[27] = byte16(T3mV, 0);   // T3
+            dataOut[28] = byte16(T3mV, 1);
+            dataOut[29] = byte16(T4mV, 0);   // T4
+            dataOut[30] = byte16(T4mV, 1);
+            dataOut[31] = byte16(GmV, 0);   // G
+            dataOut[32] = byte16(GmV, 1);
             dataOut[33] = byte16(adc1_sampleArray[2], 0);   // Extra (for test work)
             dataOut[34] = byte16(adc1_sampleArray[2], 1);
             dataOut[35] = byte16(dtmin, 0);   // TOT
@@ -1590,27 +1597,29 @@ int main(void)
                 dataPacket[5] = 0;
                 if (outputMode == USBUART_OUTPUT) {
                     while(USBUART_CDCIsReady() == 0u);
-                    USBUART_PutData(dataPacket, 9);  
+                    USBUART_PutData(dataPacket, 6);  
                 } else {
                     set_SPI_SSN(SSN_Main, true);
-                    for (int i=0; i<9; ++i) {
+                    for (int i=0; i<6; ++i) {
                         SPIM_WriteTxData(dataPacket[i]);
                     }
                 }     
                 for (int i=0; i<nPackets; ++i) {
+                    uint8 numBytes = 3;
                     if (i == nPackets-1) {
                         if (3*i+1 >= nDataReady) dataOut[3*i+1] = 0xEE;
                         if (3*i+2 >= nDataReady) dataOut[3*i+2] = 0xFF;
+                        numBytes = 6;
                     }
                     dataPacket[3] = dataOut[3*i];
                     dataPacket[4] = dataOut[3*i+1];
                     dataPacket[5] = dataOut[3*i+2]; 
                     if (outputMode == USBUART_OUTPUT) {
                         while(USBUART_CDCIsReady() == 0u);
-                        USBUART_PutData(dataPacket, 9);   
+                        USBUART_PutData(&dataPacket[3], numBytes);   
                     } else {                        
                         set_SPI_SSN(SSN_Main, false);
-                        for (int i=0; i<9; ++i) {
+                        for (int i=3; i<3+numBytes; ++i) {
                             SPIM_WriteTxData(dataPacket[i]);
                         }
                     }
@@ -1691,7 +1700,6 @@ int main(void)
                     awaitingCommand = true;
                     uint16 DACsetting12;
                     uint32 tStart;
-                    int16 Bvolt;
                     uint8 DACaddress = 0;
                     uint16 thrSetting;
                     uint8 nCalClusters;
@@ -2032,12 +2040,6 @@ int main(void)
                             case '\x24':        // Write an RTC register
                                 loadI2Creg(I2C_Address_RTC , cmdData[0], cmdData[1]);
                                 break;
-                            case '\x25':        // Read the watch battery voltage
-                                Bvolt = ADC_DelSig_1_CountsTo_mVolts(ADC_DelSig_1_Read32());
-                                nDataReady = 2;
-                                dataOut[0] = (uint8)((Bvolt & 0xFF00)>>8);
-                                dataOut[1] = (uint8)(Bvolt & 0x00FF);
-                                break;
                             case '\x26':       // Read a barometer register
                                 readI2Creg(1, I2C_Address_Barometer, cmdData[0], dataOut);
                                 nDataReady = 1;
@@ -2213,6 +2215,7 @@ int main(void)
                                 ch5Count = 0;
                                 runNumber = cmdData[0];
                                 runNumber = (runNumber<<8) | cmdData[1];
+                                readTracker = (cmdData[2] == 1);
                                 // Make sure that the TOT FIFOs are empty
                                 while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) {
                                     ShiftReg_A_ReadData();
@@ -2226,17 +2229,19 @@ int main(void)
                                 triggerEnable(true);
                                 Control_Reg_Pls_Write(PULSE_CNTR_RST);
                                 // Enable the tracker trigger
-                                tkrCmdCode = 0x65;
-                                while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                                UART_TKR_WriteTxData(0x00);    // Address byte
-                                while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                                UART_TKR_WriteTxData(tkrCmdCode);    // Trigger enable
-                                while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                                UART_TKR_WriteTxData(0x00);    // Number of data bytes
-                                uint8 rc = getTrackerData(TKR_ECHO_DATA);   // Get the echo. Note that any delay put before this results in
-                                                                            // the first few bytes of the echo getting missed. Don't know why.
-                                if (rc != 0) {
-                                    addError(ERR_TKR_TRG_ENABLE, dataOut[2], rc);;
+                                if (readTracker) {
+                                    tkrCmdCode = 0x65;
+                                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                                    UART_TKR_WriteTxData(0x00);    // Address byte
+                                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                                    UART_TKR_WriteTxData(tkrCmdCode);    // Trigger enable
+                                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                                    UART_TKR_WriteTxData(0x00);    // Number of data bytes
+                                    uint8 rc = getTrackerData(TKR_ECHO_DATA);   // Get the echo. Note that any delay put before this results in
+                                                                                // the first few bytes of the echo getting missed. Don't know why.
+                                    if (rc != 0) {
+                                        addError(ERR_TKR_TRG_ENABLE, dataOut[2], rc);;
+                                    }
                                 }
                                 nDataReady = 0;  // Don't send the echo back to the UART
                                 break;
