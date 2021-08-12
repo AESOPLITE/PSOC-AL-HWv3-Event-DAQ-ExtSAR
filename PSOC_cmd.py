@@ -621,9 +621,15 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     print("limitedRun: starting run number " + str(runNumber) + " for " + str(numEvnts) + " events")
     if not readTracker: print("            The tracking detector will not be read out")
     f = open("nTuple_run" + str(runNumber) + ".txt", "w")
+<<<<<<< HEAD
     if outputEvents:
         f2 = open("dataOutput_run" + str(runNumber) + ".txt", "w")
         f2.write("Starting run " + str(runNumber) + " on " + time.strftime("%c") + "\n") 
+=======
+    # if outputEvents:
+    f2 = open("dataOutput_run" + str(runNumber) + ".txt", "w")
+    f2.write("Starting run " + str(runNumber) + " on " + time.strftime("%c") + "\n") 
+>>>>>>> single-header-event
     print("limitedRun: trigger enable status = " + str(triggerEnableStatus()))
     time.sleep(0.1)
     pmtTrg1 = 0
@@ -736,6 +742,8 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
             iPtr = 52
             FPGAs = []
             stripHits = []
+            #PSM July 26 2021: Commented the loop below to avoid most of the crashes due to tracker (hopefully this works)
+            """
             for brd in range(nTkrLyrs):
                 brdNum = dataList[iPtr]
                 iPtr = iPtr + 1
@@ -753,15 +761,24 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
                 numHits = numHits + len(strips)
                 FPGAs.append(FPGA)
                 stripHits.append(strips)
+<<<<<<< HEAD
             if nPlotted < nToPlot: 
                 plotTkrEvnt(run, trigger, FPGAs, stripHits)
                 nPlotted = nPlotted + 1
+=======
+            if event%100==0: plotTkrEvnt(run, trigger, FPGAs, stripHits) #one plot per 100 events -B
+            """
+>>>>>>> single-header-event
         if trgStatus & 0x01: pmtTrg1 = pmtTrg1 + 1
         if trgStatus & 0x02: pmtTrg2 = pmtTrg2 + 1
         if trgStatus & 0x04: tkrTrg0 = tkrTrg0 + 1
         if trgStatus & 0x08: tkrTrg1 = tkrTrg1 + 1
         if trgStatus & 0x10: pmtGrd = pmtGrd + 1
+<<<<<<< HEAD
         strOut = '{} {} {} {} {} {} {} {} {} {} {} {} {}\n'.format(trigger, T1, T2, T3, T4, G, Ex, tofA, tofB, dtmin, nTOFA, nTOFB, deltaTime)
+=======
+        strOut = '{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}\n'.format(trigger, T1, T2, T3, T4, G, Ex, tofA, tofB, dtmin, nTOFA, nTOFB, deltaTime)
+>>>>>>> single-header-event
         f.write(strOut)   
         TOFavg = TOFavg + float(dtmin)
         TOFavg2 = TOFavg2 + float(dtmin)*float(dtmin)
@@ -778,6 +795,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         ADCavg2[4] = ADCavg2[4] + G*G
         ADCavg2[5] = ADCavg2[5] + Ex*Ex
         # Output all of the data to an ASCII file
+<<<<<<< HEAD
         if outputEvents:
             timeStr = str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year)
             f2.write("Event {:d}: {} {:s}\n".format(trigger, timeStamp, timeStr))
@@ -788,12 +806,27 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
                 for strip in hits:
                     f2.write(" {} ".format(strip))
                 f2.write("\n")
+=======
+        timeStr = str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year)
+        f2.write("Event {:d}: {} {:s}\n".format(trigger, timeStamp, timeStr))
+        f2.write("  Trigger: " + str(trigger) + " accepted, " + str(cntGo1) + " generated.  Data List length = " + str(len(dataList)) + "\n")
+        f2.write("  Tstatus: " + str(hex(trgStatus)) + "\n")
+        f2.write("  ADC: {}, {}, {}, {}, {}\n".format(T1, T2, T3, T4, G))
+        f2.write("  TOF: {}  nA={}  nB={}  refA={}  refB={}  clkA={}  clkB={} \n".format(dtmin, nTOFA, nTOFB, tofA, tofB, clkA, clkB))
+        for lyr, hits in zip(FPGAs,stripHits):
+            f2.write("    Lyr {}:".format(lyr))
+            for strip in hits:
+                f2.write(" {} ".format(strip))
+            f2.write("\n")
+>>>>>>> single-header-event
 
     endTime = time.time()
     runTime = endTime - startTime
     print("Elapsed time for the run = " + str(runTime) + " seconds")
+    f2.write("Elapsedtimefortherun: " + str(runTime) + " seconds\n")
     timeSum = timeSum/float(numEvnts - 1)
     print("Average time between event time stamps = " + str(timeSum))
+    f2.write("Averagetimebetweeneventtimestamps: " + str(timeSum)+"\n")
     
     # Tell the Event PSOC to stop the run
     cmdHeader = mkCmdHdr(0, 0x44, addrEvnt)
@@ -801,6 +834,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     nBytes = 8
     nPackets = 4
     print("limitedRun: EOR expecting " + str(nBytes) + " bytes coming back.")
+    f2.write("limitedRun: EOR expecting " + str(nBytes) + " bytes coming back.\n")
     byteList = []
     for i in range(nPackets):
         if i == 0:
@@ -814,6 +848,20 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))        
     if (bytes2int(byteList[0]) != nBytes): print("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary.")  
+    ret = ser.read(3)
+    if ret != b'\xDC\x00\xFF':
+        print("limitedRun: invalid header returned: " + str(ret))
+        f2.write("limitedRun: invalid header returned: " + str(ret) +"\n")            
+    byteList.append(ser.read())
+    byteList.append(ser.read())
+    byteList.append(ser.read())
+    ret = ser.read(3)
+    if ret != b'\xFF\x00\xFF':
+        print("limitedRun: invalid trailer returned: " + str(ret))  
+        f2.write("limitedRun: invalid trailer returned: " + str(ret)+"\n")            
+    if (bytes2int(byteList[0]) != nBytes): 
+        print("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary.")  
+        f2.write("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary."+"\n")  
     go0 = bytes2int(byteList[3])
     go1 = bytes2int(byteList[4])
     go2 = bytes2int(byteList[5])
@@ -831,23 +879,40 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     TOFavg2 = TOFavg2/float(numEvnts)
     numHitsAvg = numHits/float(numEvnts)
     print("Average number of hits per event = " + str(numHitsAvg))
+    f2.write("Averagenumberofhitsperevent: " + str(numHitsAvg)+"\n")
     sigmaTOF = math.sqrt(TOFavg2 - TOFavg*TOFavg)
     for ch in range(6):
         ADCavg[ch] = ADCavg[ch]/float(numEvnts)
         ADCavg2[ch] = ADCavg2[ch]/float(numEvnts)
         Sigma[ch] = math.sqrt(ADCavg2[ch] - ADCavg[ch]*ADCavg[ch])
+<<<<<<< HEAD
     f.close()
     if outputEvents: f2.close()
+=======
+>>>>>>> single-header-event
     print("Number of triggers generated = " + str(cntGo1))
+    f2.write("Numberoftriggersgenerated: " + str(cntGo1)+"\n")
     print("Number of triggers accepted = " + str(cntGo))
+    f2.write("Numberoftriggersaccepted: " + str(cntGo)+"\n")
     live = cntGo/float(cntGo1)
     print("Live time fraction = " + str(live))
+    f2.write("Livetimefraction: " + str(live)+"\n")
     print("Number of primary PMT triggers captured = " + str(pmtTrg1))
+    f2.write("NumberofprimaryPMTtriggerscaptured: " + str(pmtTrg1)+"\n")
     print("Number of secondary PMT triggers captured = " + str(pmtTrg2))
+    f2.write("NumberofsecondaryPMTtriggerscaptured: " + str(pmtTrg2)+"\n")
     print("Number of tracker-0 triggers captured = " + str(tkrTrg0))
+    f2.write("Numberoftracker-0triggerscaptured: " + str(tkrTrg0)+"\n")
     print("Number of tracker-1 triggers captured = " + str(tkrTrg1))
+    f2.write("Numberoftracker-1triggerscaptured: " + str(tkrTrg1)+"\n")
     print("Number of triggers with guard fired = " + str(pmtGrd))
+    f2.write("Numberoftriggerswithguardfired: " + str(pmtGrd)+"\n")
     print("Number of bad tracker events = " + str(nBadTkr))
+    f2.write("Numberofbadtrackerevents: " + str(nBadTkr)+"\n")
+
+    f.close()
+    f2.close()
+
     return ADCavg, Sigma, TOFavg, sigmaTOF
 
 def plotTkrEvnt(run, event, layers, hitList):
