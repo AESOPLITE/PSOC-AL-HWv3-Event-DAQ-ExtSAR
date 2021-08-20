@@ -787,12 +787,13 @@ void tkrLED(bool on) {
     }
 }
 
+// Function to send a command to the tracker that has no data bytes
 void sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
     tkrLED(true);
     tkrCmdCode = code;
-    UART_TKR_PutChar(FPGA);   // FPGA address
+    UART_TKR_PutChar(FPGA);         // FPGA address
     UART_TKR_PutChar(tkrCmdCode);   // Command code
-    UART_TKR_PutChar(0);      // No data bytes
+    UART_TKR_PutChar(0);            // No data bytes
 
     // Wait around for the data to transmit
     uint32 tStart = time();
@@ -804,9 +805,11 @@ void sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
         }
     }                                
     // Now look for the echo coming back from the Tracker.
-    int rc = getTrackerData(TKR_ECHO_DATA);
-    if (rc != 0) {
-        addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
+    if (tkrCmdCode != 0x67 && tkrCmdCode != 0x6C) {
+        int rc = getTrackerData(TKR_ECHO_DATA);
+        if (rc != 0) {
+            addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
+        }
     }
     nDataReady = 0;  // Suppress the echo from being send out to the world
     tkrLED(false);
@@ -824,7 +827,7 @@ void readASICconfig(uint8 FPGA, uint8 chip) {
     tkrCmdCode = 0x22; // Config read command code 
     UART_TKR_PutChar(FPGA);   // FPGA address
     UART_TKR_PutChar(tkrCmdCode);   
-    UART_TKR_PutChar(1);      // One data bytes
+    UART_TKR_PutChar(1);      // One data byte
     UART_TKR_PutChar(chip);   // ASIC address for the data byte
 
     // Wait around for the data to transmit
@@ -837,21 +840,20 @@ void readASICconfig(uint8 FPGA, uint8 chip) {
         }
     }                                
     // Now look for the housekeeping data coming back from the Tracker.
-    int rc = getTrackerData(TKR_HOUSE_DATA);
-    if (rc != 0) {
-        addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
-    }
+    getASICdata();
     tkrLED(false);
 }
 
 void calibrateInputTiming(uint8 FPGA) {
     sendSimpleTrackerCmd(FPGA, 0x81);      // Tell the input circuits to self calibrate
+    CyDelay(1);
     for (uint8 chip=0; chip<12; ++chip) {  // Each ASIC communication path to the FPGA gets calibrated in turn
         for (uint8 i=0; i<5; ++i) {        // Read the configuration register several times to provide data transitions for calibration
             readASICconfig(FPGA, chip);
-            nTkrHouseKeeping = 0;          // Throw away the resulting data so it doesn't get out to the world
+            nDataReady = 0;          // Throw away the resulting data so it doesn't get out to the world
         }
     }
+    CyDelay(2);
     sendSimpleTrackerCmd(FPGA, 0x82);      // Tell the input circuit to set its delay to the calibrated value
 }
 
@@ -2391,8 +2393,12 @@ int main(void)
                             case '\x47': // Reset the tracker state machines
                                 resetAllTrackerLogic();
                                 break;
-                            case '\x48': // Calibrate the input timing on every Tracker FPGA board
-                                calibrateAllInputTiming();
+                            case '\x48': // Calibrate the input timing on one or every Tracker FPGA board
+                                if (cmdData[0] > 7) {
+                                    calibrateAllInputTiming();
+                                } else {
+                                    calibrateInputTiming(cmdData[0]);
+                                }
                                 break;
                         } // End of command switch
                         command = 0;
