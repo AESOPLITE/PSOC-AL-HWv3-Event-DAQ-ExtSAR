@@ -11,8 +11,9 @@ from PSOC_cmd import *
 
 asicReset = True
 # Set the number of events to acquire:
-numberEvents = 80000
+numberEvents = 100
 runNumber = 69
+numberOfRuns = 3
 
 portName = "COM7"
 openCOM(portName)
@@ -246,51 +247,53 @@ time.sleep(0.3)
 print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
-# Run a fixed number of events.
-# This program opens a file for each event for a single-event plot (can be commented out)
-# plus an nTuple file with PMT readings, and a text output file with most of the information per event
-# printed in an ASCII format.
-# The gnuplot program is needed for viewing the event plots.
-ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numberEvents, False)
-f2 = open("dataOutput_run" + str(runNumber) + ".txt", "a")
+for x in range(numberOfRuns) :
+    # Run a fixed number of events.
+    # This program opens a file for each event for a single-event plot (can be commented out)
+    # plus an nTuple file with PMT readings, and a text output file with most of the information per event
+    # printed in an ASCII format.
+    # The gnuplot program is needed for viewing the event plots.
+    ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numberEvents, False)
+    f2 = open("dataOutput_run" + str(runNumber) + ".txt", "a")
 
-#Print some end of run summary stuff
-print("Ending the run at " + time.strftime("%c"))
-print("Average ADC values:")
-print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
-print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
-print("    T3 = " + str(ADC[2]) + " +- " + str(Sigma[2]))
-print("    T4 = " + str(ADC[3]) + " +- " + str(Sigma[3]))
-print("     G = " + str(ADC[4]) + " +- " + str(Sigma[4]))
-print("    Ex = " + str(ADC[5]) + " +- " + str(Sigma[5]))
-print("    TOF = " + str(TOF) + " +- " + str(sigmaTOF))
+    #Print some end of run summary stuff
+    print("Ending the run at " + time.strftime("%c"))
+    print("Average ADC values:")
+    print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
+    print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
+    print("    T3 = " + str(ADC[2]) + " +- " + str(Sigma[2]))
+    print("    T4 = " + str(ADC[3]) + " +- " + str(Sigma[3]))
+    print("     G = " + str(ADC[4]) + " +- " + str(Sigma[4]))
+    print("    Ex = " + str(ADC[5]) + " +- " + str(Sigma[5]))
+    print("    TOF = " + str(TOF) + " +- " + str(sigmaTOF))
 
-f2.write("Ending the run at " + time.strftime("%c")+"\n")
-f2.write("Average ADC values:"+"\n")
-f2.write("     T1: " + str(ADC[0]) + " +- " + str(Sigma[0])+"\n")
-f2.write("     T2: " + str(ADC[1]) + " +- " + str(Sigma[1])+"\n")
-f2.write("     T3: " + str(ADC[2]) + " +- " + str(Sigma[2])+"\n")
-f2.write("     T4: " + str(ADC[3]) + " +- " + str(Sigma[3])+"\n")
-f2.write("      G: " + str(ADC[4]) + " +- " + str(Sigma[4])+"\n")
-f2.write("     Ex: " + str(ADC[5]) + " +- " + str(Sigma[5])+"\n")
-f2.write("   TOF2: " + str(TOF) + " +- " + str(sigmaTOF)+"\n")
+    f2.write("Ending the run at " + time.strftime("%c")+"\n")
+    f2.write("Average ADC values:"+"\n")
+    f2.write("     T1: " + str(ADC[0]) + " +- " + str(Sigma[0])+"\n")
+    f2.write("     T2: " + str(ADC[1]) + " +- " + str(Sigma[1])+"\n")
+    f2.write("     T3: " + str(ADC[2]) + " +- " + str(Sigma[2])+"\n")
+    f2.write("     T4: " + str(ADC[3]) + " +- " + str(Sigma[3])+"\n")
+    f2.write("      G: " + str(ADC[4]) + " +- " + str(Sigma[4])+"\n")
+    f2.write("     Ex: " + str(ADC[5]) + " +- " + str(Sigma[5])+"\n")
+    f2.write("   TOF2: " + str(TOF) + " +- " + str(sigmaTOF)+"\n")
 
-chName = ["G","T3","T1","T4","T2"]
-for ch in range(5):    #Get the singles counts from each of the 5 PMTs
-    cnt = getEndOfRunChannelCount(ch+1)
-    print("Counter for channel " + chName[ch] + " = " + str(cnt))
-    f2.write("Counterforchannel: " + chName[ch] + " = " + str(cnt)+"\n")
+    chName = ["G","T3","T1","T4","T2"]
+    for ch in range(5):    #Get the singles counts from each of the 5 PMTs
+        cnt = getEndOfRunChannelCount(ch+1)
+        print("Counter for channel " + chName[ch] + " = " + str(cnt))
+        f2.write("Counterforchannel: " + chName[ch] + " = " + str(cnt)+"\n")
 
-readErrors(address)
+    readErrors(address)
 
-if nTkrBoards > 0:
-    print("Tracker FPGA configuration = " + str(tkrGetFPGAconfig(0)))
-    f2.write("TrackerFPGAconfiguration: " + str(tkrGetFPGAconfig(0))+"\n")
-    if asicReset: tkrAsicPowerOff()
-    tkrTriggerDisable()
+    if nTkrBoards > 0:
+        print("Tracker FPGA configuration = " + str(tkrGetFPGAconfig(0)))
+        f2.write("TrackerFPGAconfiguration: " + str(tkrGetFPGAconfig(0))+"\n")
+        if asicReset: tkrAsicPowerOff()
+        tkrTriggerDisable()
 
-f2.close()
-readErrors(address)
+    f2.close()
+    readErrors(address)
+    runNumber = runNumber + 1
 
 closeCOM()
 
