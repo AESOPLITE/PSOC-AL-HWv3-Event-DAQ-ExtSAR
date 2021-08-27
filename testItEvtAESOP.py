@@ -43,7 +43,7 @@ for channel in range(1,3):
 #Set the thresholds for the PMTs
 #Order is G, T3, T1, T4, T2
 #pmtThresh = [3,4,4,4,60]  #PSM: ORIGINAL VALUES 18 July 2021 DO NOT DELETE THIS LINE
-pmtThresh = [3,4,4,3,60]
+pmtThresh = [3,5,2,2,60]
 ch5Thresh = pmtThresh[4]
 print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
 setPmtDAC(5, ch5Thresh, address)
@@ -221,6 +221,11 @@ mask = 0x06    # T1 & T3 & T4 now T1 & T4 -B
 #mask = 0x0b    # single T2
 #mask = 0x0d    # single T3
 #mask = 0x0e    # single T4
+#mask = 0x05    # single T1&T3
+#mask = 0x04    # single T1&T3&T4
+#mask = 0x03    # single T1&T2
+#mask = 0x01    # single T1&T2&T3
+
 print("Setting the first trigger mask to " + str(mask))
 setTriggerMask(1, mask)
 print("Get the trigger mask")
