@@ -20,9 +20,9 @@ address = 8   # Address of the event PSOC
 #time.sleep(1)
 #LED2("off", address)
 
-setInternalRTC(address)
-time.sleep(0.1)
-getInternalRTC(address)
+#setInternalRTC(address)
+#time.sleep(0.1)
+#getInternalRTC(address)
 
 setTofDAC(1, 64, address)   
 setTofDAC(2, 64, address)
@@ -47,6 +47,7 @@ setPmtDAC(5, ch5Thresh, address)
 print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
 
 readTofConfig()
+#sys.exit("abort")
 
 #ret = ser.read()
 #print(ret)
@@ -55,7 +56,7 @@ boards = [0]
 nBoards = len(boards)
 if nBoards > 0:
     tkrFPGAreset(0x00)
-
+    
     readErrors(address)
     #sys.exit("abort")
 
@@ -73,6 +74,8 @@ if nBoards > 0:
 
     if asicReset: tkrAsicSoftReset(0x1F)
 
+    calibrateAllFPGAinputTiming()
+		
     tkrTrigEndStat(1, 1)
     tkrTrigEndStat(0, 1)
     tkrSetDualTrig(0, 0)
@@ -190,7 +193,11 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
-for i in range(2):
+for brd in boards:
+    tkrSetDAC(brd, 31, "threshold", 9 , "low")
+    tkrGetDAC(brd, 3, "threshold")
+
+for i in range(1):
     print("send reset pulse")
     logicReset(addrEvnt)
     time.sleep(0.3)
@@ -199,7 +206,7 @@ print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
-ADC, Sigma, TOF, sigmaTOF = limitedRun(46, 10, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(47, 4, True)
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
 print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))

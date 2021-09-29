@@ -95,7 +95,7 @@
 #define TIMEOUT 200u 
 
 /* Packet IDs */
-#define FIX_HEAD ('\xDB')
+#define FIX_HEAD ('\xDB')  // This one is no longer used, because the command echo was added to the data return
 #define VAR_HEAD ('\xDC')
 
 #if defined (__GNUC__)
@@ -151,6 +151,7 @@
 #define ERR_TKR_TOO_BIG 26u
 #define ERR_TKR_LYR_ORDER 27u
 #define ERR_TRK_WRONG_DATA_TYPE 28u
+#define ERR_CMD_BUF_OVERFLOW 29u
 
 #define TKR_EVT_DATA 0xD3
 #define TKR_HOUSE_DATA 0xC7
@@ -179,11 +180,11 @@ const uint8 I2C_Address_Barometer = '\x70';
 const uint8 I2C_Address_RTC = '\x6F';
 
 // Masks for DC control register
-const uint8 LED1 = '\x08';
-const uint8 LED2 = '\x10';
+const uint8 LED1 = '\x01';
+const uint8 LED2 = '\x02';
+const uint8 TKRLED = '\x04'; 
+const uint8 DATLED = '\x08';
 const uint8 RSTPEAK = '\x10';
-const uint8 TKRLED = '\x20'; 
-const uint8 DATLED = '\x40';
 
 #define trgBit_T4 = 0x01;
 #define trgBit_T3 = 0x02;
@@ -197,20 +198,29 @@ const uint8 DATLED = '\x40';
 #define PULSE_CNTR_RST 0x08
 
 // Slave addresses for the SPI interface
-const uint8 SSN_TOF = 2;
 const uint8 SSN_Main = 1;
+const uint8 SSN_TOF  = 2;
 
-const uint8 triggerEnable_Mask = '\x04';
-const uint8 SSN_Mask = '\xFC';
+const uint8 triggerEnable_Mask = '\x01';
+const uint8 SSN_Mask = '\xF3';
 
 // Command codes for the TOF chip
 const uint8 TOF_enable = 0x18;
 const uint8 powerOnRESET = 0x30;
 const uint8 writeConfig = 0x80;
 const uint8 readConfig = 0x40;
-const uint8 readResults =  0x60;
+const uint8 readResults =  0x60;   // Not used
 
 RTC_1_TIME_DATE* timeDate;
+
+// Circular buffer for commands from the Main PSOC
+#define CMD_LENGTH 29u
+#define MX_CMDS 32u
+struct MainPSOCcmds {
+    uint8 buf[CMD_LENGTH];
+    uint8 nBytes;
+} cmd_buffer[MX_CMDS];
+uint8 cmdWritePtr, cmdReadPtr;
 
 // TOF circular data buffers
 struct TOF {
@@ -281,11 +291,11 @@ uint16 runNumber;
 #define DMA_DST_BASE (CYDEV_SRAM_BASE)
 
 void LED2_OnOff(bool on) {
-    uint8 status = Control_Reg_SSN_Read() & ~LED2;
+    uint8 status = Control_Reg_LED_Read() & ~LED2;
     if (on) {
-        Control_Reg_SSN_Write(status | LED2);
+        Control_Reg_LED_Write(status | LED2);
     } else {
-        Control_Reg_SSN_Write(status);
+        Control_Reg_LED_Write(status);
     }
 }
 
@@ -424,7 +434,7 @@ uint8 readDAC(uint8 I2C_Address, uint16* rvalue) {
 }
 
 bool isTriggerEnabled() {
-    uint8 regValue = Control_Reg_SSN_Read();
+    uint8 regValue = Control_Reg_Trg_Read();
     return (regValue & triggerEnable_Mask);
 }
 
@@ -448,25 +458,28 @@ uint8 getTriggerMask(char trigger) {
 }
 
 // Control of the SPI slave address. The slave select is active low.
-// Note that the TOF chip needs to go high, for reset, before each SPI transaction.
+// **** Note that the TOF chip needs to go high, for reset, before each SPI transaction. ****
 void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
     // SSN = SSN_Main = 1 for main PSOC
     // SSN = SSN_TOF  = 2 for TOF chip
     // SSN = 0 (or anything else) to deselect all slaves
     while (!(SPIM_ReadTxStatus() & SPIM_STS_SPI_IDLE));
-    uint8 regValue = Control_Reg_SSN_Read() & SSN_Mask;
-    Control_Reg_SSN_Write(regValue | (SSN_Main | SSN_TOF));
-    if (SSN == SSN_TOF) {
-        Control_Reg_SSN_Write(regValue | SSN_Main);
-    } else if (SSN == SSN_Main) {
-        Control_Reg_SSN_Write(regValue | SSN_TOF);
+    //uint8 regValue = Control_Reg_SSN_Read() & SSN_Mask;
+    if (SSN == SSN_Main) {
+        Control_Reg_SSN_Write(0xFE);    // The SPI chip select is active low
+    } else if (SSN==SSN_TOF) {
+        Control_Reg_SSN_Write(0xFF);    // This resets the TOF chip to get it ready for a transaction
+        Control_Reg_SSN_Write(0xFD);    // The SPI chip select is active low
+    } else {
+        Control_Reg_SSN_Write(0xFF);
     }
+
     if (clearBuffer) SPIM_ClearTxBuffer();
 }
 
 // Control of the trigger enable bit
 void triggerEnable(bool enable) {
-    uint8 regValue = Control_Reg_SSN_Read() & ~triggerEnable_Mask;
+    uint8 regValue = Control_Reg_Trg_Read() & ~triggerEnable_Mask;
     if (enable) {
         // Reset the TOF chip time reference. It also gets reset every 5 ms by interrupt.
         //Control_Reg_Pls_Write(PULSE_TOF_RESET);
@@ -477,11 +490,10 @@ void triggerEnable(bool enable) {
         //SPIM_WriteTxData(0x05);
         
         // Enable the master trigger
-        Control_Reg_SSN_Write(regValue | triggerEnable_Mask);  
+        Control_Reg_Trg_Write(regValue | triggerEnable_Mask);  
     } else {
-        //LED2_OnOff(false);
         // Disable the master trigger
-        Control_Reg_SSN_Write(regValue);
+        Control_Reg_Trg_Write(regValue);
         
         // Stop the TOF chip acquisition by disabling both channels
         //set_SPI_SSN(SSN_TOF, true);
@@ -500,7 +512,8 @@ uint8 byte16(uint16 word, int byte) {
 }
 
 void logicReset() {
-    //LED2_OnOff(true);
+    int InterruptState = CyEnterCriticalSection();
+    LED2_OnOff(true);
     int state = isr_clk200_GetState();
     isr_clk200_Disable();
     int stateTrg = isr_GO1_GetState();
@@ -518,13 +531,14 @@ void logicReset() {
     CyDelay(20);
     if (stateTrg) isr_GO1_Enable();
     if (state) isr_clk200_Enable();
-    //LED2_OnOff(false);
+    LED2_OnOff(false);
     for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
         if (tkrData.boardHits[brd].nBytes > 0) {
             tkrData.boardHits[brd].nBytes = 0;
             free(tkrData.boardHits[brd].hitList);
         }
     }
+    CyExitCriticalSection(InterruptState);
 }
 
 // Get a byte of data from the Tracker UART, with a time-out in case nothing is coming.
@@ -780,8 +794,8 @@ int getTrackerData(uint8 idExpected) {
 
 void tkrLED(bool on) {
     if (on) {
-        uint8 status = Control_Reg_SSN_Read() & ~TKRLED;
-        Control_Reg_SSN_Write(status | TKRLED);
+        uint8 status = Control_Reg_LED_Read() & ~TKRLED;
+        Control_Reg_LED_Write(status | TKRLED);
     } else {
         Timer_1_Start();
     }
@@ -864,6 +878,15 @@ void calibrateAllInputTiming() {
     }
 }
 
+uint8 ptrNext(uint8 ptr) {
+    if (ptr < MX_CMDS-1) {
+        return ptr + 1;
+    } else {
+        return 0;
+    }
+}
+
+// Read out the shift register when a TOF stop event arrives for channel A
 CY_ISR(Store_A)
 {
     if (ShiftReg_A_GetIntStatus() == ShiftReg_A_STORE) {
@@ -874,9 +897,7 @@ CY_ISR(Store_A)
             tofA.filled[tofA.ptr] = true;
             tofA.ptr++;
             if (tofA.ptr >= TOFMAX_EVT) tofA.ptr = 0;
-            if (outputTOF) {    
-                //LED2_OnOff(true);
-                //trgLEDoff = true;
+            if (outputTOF) {    // Send data directly to the PC for this special debugging mode
                 uint8 oReg[7];
                 oReg[0] = 0xAA;
                 oReg[1] = (AT & 0x0000FF00)>>8;
@@ -893,20 +914,18 @@ CY_ISR(Store_A)
     }
 }
 
+// Read out the shift register when a TOF stop event arrives for channel B
 CY_ISR(Store_B)
 {
     if (ShiftReg_B_GetIntStatus() == ShiftReg_B_STORE) { 
         while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) {
             uint32 BT = ShiftReg_B_ReadData();
             tofB.shiftReg[tofB.ptr] = BT;
-//            tofB.stop[tofB.ptr] = (uint16)(BT & 0x0000FFFF);
-//            tofB.ref[tofB.ptr] = (uint16)((BT & 0xFFFF0000)>>16);
             tofB.clkCnt[tofB.ptr] = (uint16)time();
             tofB.filled[tofB.ptr] = true;
             tofB.ptr++;
             if (tofB.ptr >= TOFMAX_EVT) tofB.ptr = 0;
-            if (outputTOF) {  
-                //LED2_OnOff(true);
+            if (outputTOF) {  // Send data directly to the PC for this special debugging mode
                 Timer_1_Start();
                 uint8 oReg[7];
                 oReg[0] = 0xBB;
@@ -924,25 +943,28 @@ CY_ISR(Store_B)
     }
 }
 
+// Turn off an LED once the interval timer has timed out (this is just to make the LED stay on long enough to be visible)
 CY_ISR(intTimer) {
-    uint8 status = Control_Reg_SSN_Read();
+    uint8 status = Control_Reg_LED_Read();
     status = status & ~DATLED;
     status = status & ~TKRLED;
     //status = status & ~LED2;
-    Control_Reg_SSN_Write(status);
+    Control_Reg_LED_Write(status);
     Timer_1_Stop();
 }
 
-CY_ISR(clk200) {  // Interrupt every second
+// Increment the internal clock count every second, and also make the LED blink
+CY_ISR(clk200) {       // Interrupt every second (200 ticks of the 5ms period clock)
     clkCnt += 200;     // Increment the clock counter used for time stamps
-    uint8 status = Control_Reg_SSN_Read();
+    uint8 status = Control_Reg_LED_Read();
     uint8 blink = status & LED1;
     if (blink == 0x00) blink = LED1;
     else blink = 0x00;
     status = (status & ~LED1) | blink;
-    Control_Reg_SSN_Write(status);
+    Control_Reg_LED_Write(status);
 }
 
+// Interrupts to keep count of PMT singles rates. These interrupt every time the 8-bit hardware counter turns over.
 CY_ISR(isrCh1)
 {
     ch1Count++;
@@ -968,7 +990,25 @@ CY_ISR(isrCh5)
     ch5Count++;
 }
 
-CY_ISR(isrGO1)    // GO signal (system trigger). Start the full event readout if trigger is enabled.
+// Receive and store commands from the Main PSOC via the UART
+CY_ISR(isrUART) {
+    while (UART_CMD_GetRxBufferSize() > 0 && cmdWritePtr != cmdReadPtr) {
+        cmd_buffer[cmdWritePtr].buf[cmd_buffer[cmdWritePtr].nBytes] = UART_CMD_GetByte();
+        cmd_buffer[cmdWritePtr].nBytes++;
+        if (cmd_buffer[cmdWritePtr].nBytes == CMD_LENGTH) {  // This command is fully received
+            if (cmdReadPtr >= MX_CMDS) cmdReadPtr = cmdWritePtr;
+            cmdWritePtr = ptrNext(cmdWritePtr);
+            if (cmdWritePtr == cmdReadPtr) {  // This will almost surely make a mess if it happens!
+                addError(ERR_CMD_BUF_OVERFLOW, cmdWritePtr, 0);
+            } else {
+                cmd_buffer[cmdWritePtr].nBytes = 0;
+            }
+        }
+    }
+}
+
+// GO signal (system trigger). Start the full event readout if trigger is enabled.
+CY_ISR(isrGO1)    
 {
     if (isTriggerEnabled()) {
         // Disable the trigger until the event readout has been completed
@@ -976,9 +1016,8 @@ CY_ISR(isrGO1)    // GO signal (system trigger). Start the full event readout if
         trgStatus = Status_Reg_Trg_Read();
         cntGO++;
         triggered = true;
-        timeStamp = time();
-        timeDate = RTC_1_ReadTime();
-        //LED2_OnOff(true);
+        timeStamp = time();            
+        LED2_OnOff(true);
         Timer_1_Start();
     }
     cntGO1++;     // Count all GO signals during a run, even if the trigger is not enabled.
@@ -990,8 +1029,8 @@ CY_ISR(isrGO1)    // GO signal (system trigger). Start the full event readout if
 void dataLED(bool on) {
     uint8 status;
     if (on) {
-        status = Control_Reg_SSN_Read() & ~DATLED;
-        Control_Reg_SSN_Write(status | DATLED);
+        status = Control_Reg_LED_Read() & ~DATLED;
+        Control_Reg_LED_Write(status | DATLED);
     } else {
         Timer_1_Start();
     }
@@ -1007,6 +1046,7 @@ void setCoincidenceWindow(uint8 dt) {
 
 int main(void)
 {     
+    uint8 outputMode = USBUART_OUTPUT;    
     triggered = false;
     tkrData.nTkrBoards = 0;
     tofA.ptr = 0;
@@ -1052,11 +1092,15 @@ int main(void)
     
     // Buffer for output of a 3-byte data packet. Set the invariant parts of the header and trailer bytes.
     uint8 dataPacket[9];
+    dataPacket[0] = VAR_HEAD;
     dataPacket[1] = '\x00';
     dataPacket[2] = '\xFF';
     dataPacket[6] = '\xFF';
     dataPacket[7] = '\x00';
     dataPacket[8] = '\xFF';
+    uint8 Padding[2];
+    Padding[0] = '\x01';
+    Padding[1] = '\x02';
     
     // General hardware logic reset (not including the tracker), and reset of counters
     logicReset();
@@ -1065,15 +1109,31 @@ int main(void)
 
     /* Initialize interrupts */
     isr_timer_StartEx(intTimer);
+    isr_timer_Disable();
     isr_clk200_StartEx(clk200);
+    isr_clk200_Disable();
     isr_Store_A_StartEx(Store_A);
+    isr_Store_A_Disable();
     isr_Store_B_StartEx(Store_B);
+    isr_Store_B_Disable();
     isr_Ch1_StartEx(isrCh1);
+    isr_Ch1_Disable();
     isr_Ch2_StartEx(isrCh2);
+    isr_Ch2_Disable();
     isr_Ch3_StartEx(isrCh3);
+    isr_Ch3_Disable();
     isr_Ch4_StartEx(isrCh4);
+    isr_Ch4_Disable();
     isr_Ch5_StartEx(isrCh5);
-    isr_GO1_StartEx(isrGO1);   
+    isr_Ch5_Disable();
+    isr_GO1_StartEx(isrGO1);
+    isr_GO1_Disable();
+    isr_UART_StartEx(isrUART);
+    isr_UART_Disable();
+    
+    cmdReadPtr = 255;
+    cmdWritePtr = 0;
+    for (uint i=0; i<MX_CMDS; ++i) cmd_buffer[i].nBytes = 0;
     
     /* Start up the various hardware components */
     I2C_2_Start();
@@ -1104,7 +1164,6 @@ int main(void)
     
     SPIM_Start();
     
-    uint8 outputMode = USBUART_OUTPUT;    
     USBUART_Start(USBFS_DEVICE, USBUART_3V_OPERATION);
     
     Comp_Ch1_Start();
@@ -1134,8 +1193,6 @@ int main(void)
  
     UART_TKR_Start();
     UART_CMD_Start();
-    int command = 0;
-    int dCnt = 0;
 
     // Start counters buried inside of the edge detectors for the trigger inputs
     TrigWindow_V1_1_Count7_1_Start();
@@ -1254,7 +1311,10 @@ int main(void)
     
     int cmdCountGLB = 0;               // Count of all command packets received
     int cmdCount = 0;                  // Count of all event PSOC commands received
+    uint8 command = 0;                 // Most recent command code
     uint8 cmdData[MAX_CMD_DATA];       // Data sent with commands
+    uint8 nDataBytes = 0;              // Number of data bytes in the current command
+    int dCnt = 0;                      // To count the number of data bytes received
     int nCmdTimeOut = 0;
     const uint8 eventPSOCaddress = '\x08';
     
@@ -1264,29 +1324,40 @@ int main(void)
     setTriggerMask('e',0x01);
     setTriggerMask('p',0x05);
 
-    // Enable interrupts and configure TOF shift register interrupt signals
+    // Set interrupt priorities, enable interrupts and configure TOF shift register interrupt signals
+    isr_UART_SetPriority(6);
+    isr_UART_Enable();     
+    isr_timer_SetPriority(7);
     isr_timer_Enable();
-    isr_clk200_Enable();
-    isr_Store_A_Enable();
-    ShiftReg_A_EnableInt();
-    ShiftReg_A_SetIntMode(ShiftReg_A_STORE_INT_EN);
+    isr_clk200_SetPriority(7);
+    isr_clk200_Enable(); 
+    isr_Store_A_SetPriority(5);
+    isr_Store_A_Enable();   
+    ShiftReg_A_EnableInt();  
+    ShiftReg_A_SetIntMode(ShiftReg_A_STORE_INT_EN);  // This can hang up indefinitely if the TOF chip is not set up properly
+    isr_Store_B_SetPriority(5);
     isr_Store_B_Enable();
     ShiftReg_B_EnableInt();
-    ShiftReg_B_SetIntMode(ShiftReg_B_STORE_INT_EN);    
+    ShiftReg_B_SetIntMode(ShiftReg_B_STORE_INT_EN);  // This can hang up indefinitely if the TOF chip is not set up properly 
+    isr_Ch1_SetPriority(7);
     isr_Ch1_Enable();
+    isr_Ch2_SetPriority(7);
     isr_Ch2_Enable();
+    isr_Ch3_SetPriority(7);
     isr_Ch3_Enable();
+    isr_Ch4_SetPriority(7);
     isr_Ch4_Enable();
+    isr_Ch5_SetPriority(7);
     isr_Ch5_Enable();
+    isr_GO1_SetPriority(5);
     isr_GO1_Enable();
-    
+
     numTkrBrds = 1; //MAX_TKR_BOARDS;
     bool eventDataReady = false;
-    bool awaitingCommand = true;
-    time_t cmdStartTime;
-    uint8 nDataBytes = 0;
+    bool awaitingCommand = true;   // The system is ready to accept a new command when true
+    time_t cmdStartTime = time();
     uint8 rc;
-    bool cmdDone = false;
+    bool cmdDone = false;    // If true, A command has been fully received but data have not yet been sent back
     set_SPI_SSN(0, false);   // Deselect all SPI slaves
     //uint32 cmdTime = time();
     triggerEnable(false);
@@ -1307,10 +1378,10 @@ int main(void)
 //        }
 
         // Build an event and send it out each time a GO is received
-        if (triggered) {
+        if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress
             uint32 timeStampSave = timeStamp;  // Store current count so it cannot change via interrupt
+            timeDate = RTC_1_ReadTime();
             triggered = false;
-            //LED2_OnOff(true);
             // Read the digitized PMT data after waiting for the digitizers to finish
             uint t0 = time();
             while (!(Status_Reg_M_Read() & 0x08)) {   // Wait here for the done signal
@@ -1393,6 +1464,7 @@ int main(void)
             // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
             // instrument trigger, so we have to correlate the two channels with each other and with the event
             // by looking at the course timing information.
+            int InterruptState = CyEnterCriticalSection();
             uint16 timeStamp16 = (uint16)(timeStampSave & 0x0000FFFF);
             int nI=0;
             uint8 idx[TOFMAX_EVT];
@@ -1447,7 +1519,8 @@ int main(void)
                     }
                 }
             }
-                       
+            CyExitCriticalSection(InterruptState);
+            
             // Build the event by filling the output buffer according to the output format.
             // Pack the time and date information into a 4-byte unsigned integer
             uint32 timeWord = ((uint32)timeDate->Year - 2000) << 26;
@@ -1550,12 +1623,15 @@ int main(void)
             adc2_sampleArray[0] = 0;
             adc2_sampleArray[1] = 0;
             adc2_sampleArray[2] = 0;
+            InterruptState = CyEnterCriticalSection();
             for (int j=0; j<TOFMAX_EVT; ++j) {
                 tofA.filled[j] = false;
                 tofB.filled[j] = false;
             }
             tofA.ptr = 0;
             tofB.ptr = 0;
+            CyExitCriticalSection(InterruptState);
+            
             tkrData.nTkrBoards = 0;
             ch1CtrSave = Cntr8_V1_1_ReadCount();
             ch2CtrSave = Cntr8_V1_2_ReadCount();
@@ -1576,28 +1652,19 @@ int main(void)
         // Variable length packet: the first byte in the first packet gives the number of bytes to follow.
         //                         The last packet gets padded with 0 for bytes not used.
         
-        if (nDataReady > 0) {
-            dataLED(true);
-            if (nDataReady <= 3) {
-                dataPacket[0] = FIX_HEAD;
-                dataPacket[3] = dataOut[0];
-                dataPacket[4] = dataOut[1];
-                dataPacket[5] = dataOut[2];
-                if (outputMode == USBUART_OUTPUT) {
-                    while (USBUART_CDCIsReady() == 0u);  // Wait for the UART to be ready
-                    USBUART_PutData(dataPacket, 9);   
-                } else {
-                    set_SPI_SSN(SSN_Main, true);
-                    SPIM_PutArray(dataPacket, 9);
-                    //for (int i=0; i<9; ++i) SPIM_WriteTxData(dataPacket[i]);
+        if (nDataReady > 0 || cmdDone) {
+            if (nDataReady > 0) {    // Send out a command echo only if there are also data to send
+                dataLED(true);
+                dataPacket[3] = nDataReady + nDataBytes;
+                uint16 nPadding = 3 - (nDataBytes + nDataReady)%3;
+                if (nPadding == 3) nPadding = 0;
+                if (!cmdDone) { // Output is event data, not a command response
+                    dataPacket[4] = 0xDD;
+                } else {              // Output directly responding to a command
+                    dataPacket[4] = command;               
                 }
-            } else {
-                int nPackets = (nDataReady - 1)/3 + 1;
-                dataPacket[0] = VAR_HEAD;
-                dataPacket[3] = nDataReady;
-                dataPacket[4] = 0;
-                dataPacket[5] = 0;
-                if (outputMode == USBUART_OUTPUT) {
+                dataPacket[5] = nDataBytes;
+                if (outputMode == USBUART_OUTPUT) {  // Output the header
                     while(USBUART_CDCIsReady() == 0u);
                     USBUART_PutData(dataPacket, 6);  
                 } else {
@@ -1605,40 +1672,78 @@ int main(void)
                     for (int i=0; i<6; ++i) {
                         SPIM_WriteTxData(dataPacket[i]);
                     }
-                }     
-                for (int i=0; i<nPackets; ++i) {
-                    uint8 numBytes = 3;
-                    if (i == nPackets-1) {
-                        if (3*i+1 >= nDataReady) dataOut[3*i+1] = 0xEE;
-                        if (3*i+2 >= nDataReady) dataOut[3*i+2] = 0xFF;
-                        numBytes = 6;
-                    }
-                    dataPacket[3] = dataOut[3*i];
-                    dataPacket[4] = dataOut[3*i+1];
-                    dataPacket[5] = dataOut[3*i+2]; 
-                    if (outputMode == USBUART_OUTPUT) {
+                    set_SPI_SSN(0, false);
+                }
+                if (nDataBytes > 0) {
+                    if (outputMode == USBUART_OUTPUT) {  // Output the command data echo
                         while(USBUART_CDCIsReady() == 0u);
-                        USBUART_PutData(&dataPacket[3], numBytes);   
-                    } else {                        
+                        USBUART_PutData(cmdData, nDataBytes);
+                    } else {
                         set_SPI_SSN(SSN_Main, false);
-                        for (int i=3; i<3+numBytes; ++i) {
-                            SPIM_WriteTxData(dataPacket[i]);
+                        for (int i=0; i<nDataBytes; ++i) {
+                            SPIM_WriteTxData(cmdData[i]);
                         }
+                        set_SPI_SSN(0, false);  
                     }
                 }
+                if (outputMode == USBUART_OUTPUT) {    // output the data 
+                    uint16 bytesRemaining = nDataReady;
+                    const uint16 mxSend = 64;
+                    int offset = 0;
+                    while (bytesRemaining > 0) {
+                        while(USBUART_CDCIsReady() == 0u);
+                        if (bytesRemaining > mxSend) {
+                            USBUART_PutData(&dataOut[offset], mxSend);
+                            offset += mxSend;
+                            bytesRemaining -= mxSend;
+                        } else {
+                            USBUART_PutData(&dataOut[offset], bytesRemaining); 
+                            bytesRemaining = 0;
+                        }
+                    }
+                    if (nPadding > 0) {
+                        while(USBUART_CDCIsReady() == 0u);
+                        USBUART_PutData(Padding, nPadding);
+                    }
+                    while(USBUART_CDCIsReady() == 0u);
+                    USBUART_PutData(&dataPacket[6], 3);  
+                } else {                        
+                    set_SPI_SSN(SSN_Main, false);
+                    for (int i=0; i<nDataReady; ++i) {
+                        SPIM_WriteTxData(dataPacket[i]);
+                    }
+                    for (int i=0; i<nPadding; ++i) {
+                        SPIM_WriteTxData(Padding[i]);
+                    }
+                    for (int i=6; i<9; ++i) {
+                        SPIM_WriteTxData(dataPacket[i]);
+                    }
+                    set_SPI_SSN(0, false);
+                }
+                nDataReady = 0;
+                if (eventDataReady) {   // re-enable the trigger after event data has been output
+                    LED2_OnOff(false);
+                    triggerEnable(true);
+                    eventDataReady = false;
+                }
+                if (cmdDone) {  // The command is completely finished once the echo and data have gone out
+                    nDataBytes = 0;
+                    awaitingCommand = true;
+                    cmdDone = false;
+                }
+                dataLED(false);
+            } else {            // Don't send an echo if the command doesn't result in data. Command is finished.
+                awaitingCommand = true;
+                cmdDone = false;
             }
-            nDataReady = 0;
-            if (eventDataReady) {   // re-enable the trigger after event data has been output
-                triggerEnable(true);
-                eventDataReady = false;
-            }
-            dataLED(false);
         }
         
         // Time-out protection in case the expected data for a command are never sent
         if (!awaitingCommand) {
             if (time() - cmdStartTime > TIMEOUT) {
                 awaitingCommand = true;
+                cmdDone = false;
+                nDataBytes = 0;     // Hopefully this will just flush the bad command
                 nCmdTimeOut++;
             }
         }        
@@ -1646,28 +1751,68 @@ int main(void)
         // Get a 9-byte command input from the UART or USB-UART
         // The two should not be used at the same time (no reason for that, anyway)
         int count = 0;
-        if (USBUART_GetConfiguration() != 0u) {    // Command from USB
-            if (USBUART_DataIsReady() != 0u) {
-                count = USBUART_GetAll(buffer);
+        if (nDataReady == 0) { // Don't interpret a new command if data are still going out
+            if (USBUART_GetConfiguration() != 0u) {    // Command from USB-UART
+                if (USBUART_DataIsReady() != 0u) {
+                    count = USBUART_GetAll(buffer);
+                }
+            }
+            if (count == 0 && cmdReadPtr < MX_CMDS) { // Command from UART 
+                //int InterruptState = CyEnterCriticalSection();
+                isr_UART_Disable();
+                count = CMD_LENGTH;
+                for (int i=0; i<count; ++i) {
+                    buffer[i] = cmd_buffer[cmdReadPtr].buf[i];
+                }
+                cmd_buffer[cmdReadPtr].nBytes = 0;
+                if (ptrNext(cmdReadPtr) != cmdWritePtr) {
+                    cmdReadPtr = ptrNext(cmdReadPtr);
+                } else {
+                    cmdReadPtr = 255;
+                }
+                isr_UART_Enable();
+                //CyExitCriticalSection(InterruptState);
             }
         }
-        if (count == 0 && UART_CMD_GetRxBufferSize() >= 29) {   // Command from UART 
-            count = 29;
-            for (int i=0; i<count; ++i) {
-                buffer[i] = UART_CMD_ReadRxData();
-            }
-        }
-        if (count == 29) {
+        if (count == CMD_LENGTH) {
             bool badCMD = false;
             for (int i=0; i<9; ++i) {   // Check that all 3 command copies are identical
                 if (buffer[i] != buffer[i+9] || buffer[i] != buffer[i+18]) {
-                    addError(ERR_BAD_CMD, code[buffer[i]], i);
                     badCMD = true;
                     break;
                 }
+            }  
+            if (badCMD) {
+                badCMD = false;
+                for (int i=0; i<9; ++i) {   // Check that first two command copies are identical
+                    if (buffer[i] != buffer[i+9]) {
+                        badCMD = true;
+                        break;
+                    }
+                }
+                if (badCMD) {
+                    badCMD = false;
+                    for (int i=0; i<9; ++i) {   // Check that first and third command copies are identical
+                        if (buffer[i] != buffer[i+18]) {
+                            badCMD = true;
+                            break;
+                        }
+                    }
+                    if (badCMD) {
+                        badCMD = false;
+                        for (int i=0; i<9; ++i) {   // Check that last two command copies are identical
+                            if (buffer[i+9] != buffer[i+18]) {
+                                badCMD = true;
+                                addError(ERR_BAD_CMD, code[buffer[i+9]], i);
+                                break;
+                            }
+                        }
+                        if (!badCMD) for (int i=0; i<9; ++i) buffer[i] = buffer[i+9];
+                    }
+                }
             }
             if (!badCMD && buffer[0] == 'S' && buffer[8] == 'W') {
-                cmdCountGLB++;
+                if (awaitingCommand) cmdCountGLB++;
                 //cmdTime = time();
                 uint8 nib3 = code[buffer[3]];
                 uint8 nib4 = code[buffer[4]];
@@ -1677,7 +1822,7 @@ int main(void)
                     uint8 nib1 = code[buffer[1]];  // No check on code. Illegal characters get translated to 0.
                     uint8 nib2 = code[buffer[2]];
                     uint8 dataByte = (nib1<<4) | nib2;
-                    if (awaitingCommand) {
+                    if (awaitingCommand) {         // This is the start of a new command
                         awaitingCommand = false;
                         cmdStartTime = time();
                         cmdCount++;
@@ -1685,7 +1830,7 @@ int main(void)
                         nDataBytes = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
                         command = dataByte;
                         if (nDataBytes == 0) cmdDone = true;
-                    } else {
+                    } else {                       // Receiving data from a command in progress
                         uint8 byteCnt = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
                         if (byteCnt != 0) {
                             cmdData[byteCnt-1] = dataByte;
@@ -1697,9 +1842,12 @@ int main(void)
                         }
                     }
                 }
-                if (cmdDone) {
+                if (cmdDone && badCMD) {
                     cmdDone = false;
-                    awaitingCommand = true;
+                    awaitingCommand = true;  // Abort a bad command
+                    nDataBytes = 0;
+                }
+                if (cmdDone && !badCMD) {
                     uint16 DACsetting12;
                     uint32 tStart;
                     uint8 DACaddress = 0;
@@ -1786,7 +1934,7 @@ int main(void)
                                     addError(ERR_TOF_DAC_LOAD, rc, DACaddress);
                                 }
                                 break;
-                            case '\x05':        // Read the TOF DAC settings
+                            case '\x05':        // Read the TOF DAC settings                               
                                 if (cmdData[0] == 1) {
                                     DACaddress = I2C_Address_TOF_DAC1;
                                 } else if (cmdData[0] == 2) {
@@ -1996,6 +2144,7 @@ int main(void)
                             case '\x0C':        // Reset the TOF chip
                                 set_SPI_SSN(SSN_TOF, true);
                                 SPIM_WriteTxData(powerOnRESET);
+                                set_SPI_SSN(0, false);
                                 break;
                             case '\x0D':        // Modify TOF configuration (disable trigger first)
                                 if (cmdData[0] < TOFSIZE) {
@@ -2006,13 +2155,14 @@ int main(void)
                                         SPIM_WriteTxData(tofConfig[i]);
                                     }
                                     CyDelay(1);
+                                    set_SPI_SSN(0, false);
                                 }
                                 break;
                             case '\x0E':        // Read the TOF IC configuration
                                 SPIM_ClearRxBuffer();
                                 set_SPI_SSN(SSN_TOF, true);
-                                SPIM_WriteTxData(readConfig);
-                                //CyDelay(1);
+                                CyDelay(1);
+                                SPIM_WriteTxData(readConfig);                                
                                 while (SPIM_GetRxBufferSize() == 0) SPIM_WriteTxData(0x00);
                                 SPIM_ReadRxData();    // The first byte read back is always garbage.
                                 for (int bt=0; bt<TOFSIZE; ++bt) {
@@ -2071,7 +2221,8 @@ int main(void)
                                 break;
                             case '\x35':       // Read most recent TOF event from channel A or B (for testing)
                                 nDataReady = 9;
-                                if (cmdData[0] == 0) {
+                                int InterruptState = CyEnterCriticalSection();
+                                if (cmdData[0] == 0) {                                    
                                     uint8 idx = tofA.ptr - 1;
                                     if (idx < 0) idx = idx + TOFMAX_EVT;
                                     if (tofA.filled[idx]) {
@@ -2126,6 +2277,7 @@ int main(void)
                                         tofA.ptr = 0;
                                     }
                                 }
+                                CyExitCriticalSection(InterruptState);
                                 break; 
                             case '\x36':     // Set a trigger mask
                                 if (cmdData[0] == 1) {
@@ -2203,6 +2355,7 @@ int main(void)
                                 nDataReady = 8;
                                 break;
                             case '\x3C':  // Start a run
+                                InterruptState = CyEnterCriticalSection();
                                 for (int j=0; j<TOFMAX_EVT; ++j) {
                                     tofA.filled[j] = false;
                                     tofB.filled[j] = false;
@@ -2210,6 +2363,7 @@ int main(void)
                                 clkCnt = 0;
                                 tofA.ptr = 0;
                                 tofB.ptr = 0;
+                                CyExitCriticalSection(InterruptState);
                                 ch1Count = 0;
                                 ch2Count = 0;
                                 ch3Count = 0;
@@ -2296,6 +2450,7 @@ int main(void)
                                 nDataReady = 3;
                                 uint8 nA = 0;
                                 uint8 nB = 0;
+                                InterruptState = CyEnterCriticalSection();
                                 for (int i=0; i<TOFMAX_EVT; ++i) {
                                     if (tofA.filled[i]) ++nA;
                                     if (tofB.filled[i]) ++nB;
@@ -2311,7 +2466,6 @@ int main(void)
                                 int iptr = tofA.ptr;
                                 int jptr = tofB.ptr;
                                 uint8 cnt = 0;
-                                //LED2_OnOff(true);
                                 for (int i=0; i<TOFMAX_EVT; ++i) {
                                     if (!tofA.filled[i]) continue;
                                     --iptr;
@@ -2363,6 +2517,7 @@ int main(void)
                                 }
                                 tofB.ptr = 0;
                                 tofA.ptr = 0;
+                                CyExitCriticalSection(InterruptState);
                                 break;
                             case '\x45': // Set the time and date of the real-time-clock
                                 timeDate->Sec = cmdData[0];
@@ -2374,7 +2529,6 @@ int main(void)
                                 timeDate->Month = cmdData[7];
                                 timeDate->Year = cmdData[9] + cmdData[8]*256;
                                 RTC_1_WriteTime(timeDate);
-                                //LED2_OnOff(true);
                                 break;
                             case '\x46': // get the time and date of the real-time-clock
                                 nDataReady = 10;
@@ -2401,7 +2555,6 @@ int main(void)
                                 }
                                 break;
                         } // End of command switch
-                        command = 0;
                     } else { // Log an error if the user is sending spurious commands while the trigger is enabled
                         addError(ERR_CMD_IGNORE, command, 0);
                     }
