@@ -90,7 +90,8 @@ def mkDataByte(dataByte, address, byteID):
    end2 = LF.to_bytes(1,'big')   # LF
    return cmd1 + cmd1 + cmd1 + end1 + end2
 
-def getData(address):
+# def getData(address):
+def getData(): #address doesnt seem to be used anymore -B
     ret = b''
     for i in range(36):  #Sometimes the read starts with blank bytes, so search for the header
         ret = ser.read(1)
@@ -100,7 +101,9 @@ def getData(address):
             print("getData: expected 'DC' but received " + str(ret))
     if ret != b'\xDC':
         print("getData: failed to find the header 'DC'")
-        return b''
+        raise IOError("getData: failed to find the header 'DC'") #raise this exception that can be caught in differnt scripts or commands. Returnig something just creates problems later.
+        # return b''
+
     ret = ser.read(2)
     #print("getData: remainder of header = " + str(ret))
     if ret != b'\x00\xFF':
@@ -215,7 +218,7 @@ def LED2(onOFF, PSOCaddress):
 def logicReset(PSOCaddress):
     cmdHeader = mkCmdHdr(0, 0x38, PSOCaddress)
     ser.write(cmdHeader)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     count = bytes2int(dataBytes[0])*65536 + bytes2int(dataBytes[1])*256 + bytes2int(dataBytes[2])
     print("logicReset: the logic of PSOC " + str(PSOCaddress) + " was reset at clkCnt= " + str(count))
         
@@ -496,7 +499,7 @@ def tkrReadi2cReg(FPGA,i2cAddress):
   data4 = mkDataByte(i2cAddress, address, 4)
   ser.write(data4)
   time.sleep(0.1)
-  cmd,cmdData,dataBytes = getData(address)  
+  cmd,cmdData,dataBytes = getData()  
   result = getBinaryString(dataBytes[1:3])
   return result
 
@@ -570,7 +573,7 @@ def sendTkrCalStrobe(FPGA, trgDelay, trgTag, verbose):
     nBytes = 9
     if verbose: print("sendTkrCalStrobe: expecting " + str(nBytes) + " bytes coming back from the tracker.")
 
-    command,cmdDataBytes,byteList = getData(addrEvnt)
+    command,cmdDataBytes,byteList = getData()
     
     if (len(byteList) != 9): print("sendTkrCalStrobe: wrong number " + str(len(bytesList)) + " of bytes returned")
     i=0
@@ -602,7 +605,7 @@ def readCalEvent(trgTag, verbose):
     if verbose: print("readCalEvent: reading back calibration strobe data for tag " + str(trgTag))
     # Wait for an event to show up
  
-    command,cmdDataBytes,dataList = getData(addrEvnt)
+    command,cmdDataBytes,dataList = getData()
 	
     iPtr = 4
     numBoards = bytes2int(dataList[iPtr])
@@ -911,7 +914,7 @@ def getChannelCount(channel):
     ser.write(cmdHeader)
     data1 = mkDataByte(channel, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     count = bytes2int(dataBytes[0])
     return count
     
@@ -922,7 +925,7 @@ def getEndOfRunChannelCount(channel):
     ser.write(cmdHeader)
     data1 = mkDataByte(channel, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     count = bytes2int(dataBytes[0])
     return count
 
@@ -948,7 +951,7 @@ def getTriggerMask(maskNumber):
     ser.write(cmdHeader)
     data1 = mkDataByte(maskNumber, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     mask = bytes2int(dataBytes[0])
     return mask
     
@@ -996,7 +999,7 @@ def readPmtDAC(channel, address):
     ser.write(cmdHeader)
     data1 = mkDataByte(channel, address, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData(address)
+    cmd,cmdData,dataBytes = getData()
     if (channel == 5):
         value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     else:
@@ -1006,7 +1009,7 @@ def readPmtDAC(channel, address):
 def triggerEnableStatus():
     cmdHeader = mkCmdHdr(0, 0x3D, addrEvnt)
     ser.write(cmdHeader)
-    cmd,cmdData,dataBytes = getData(addrEvnt)
+    cmd,cmdData,dataBytes = getData()
     return bytes2int(dataBytes[0])        
 
 # Load a 12-bit DAC for the TOF threshold
@@ -1039,7 +1042,7 @@ def readTofDAC(channel, address):
     #print("readTofDAC: data = " + str(data1))
     ser.write(data1)
     time.sleep(0.1)
-    cmd,cmdBytes,dataBytes = getData(address)
+    cmd,cmdBytes,dataBytes = getData()
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     #print("value="+str(value))
     return value
@@ -1050,7 +1053,7 @@ def readBusVoltage(i2cAddress, PSOCaddress):
     ser.write(cmdHeader)
     data1 = mkDataByte(i2cAddress, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     #print("value="+str(value))
     return (value * 1.25)/1000.
@@ -1061,7 +1064,7 @@ def readCurrent(i2cAddress, address):
     ser.write(cmdHeader)
     data1 = mkDataByte(i2cAddress, address, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData(address)
+    cmd,cmdData,dataBytes = getData()
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     #print("value="+str(value))
     return (value * 0.03)
@@ -1070,7 +1073,7 @@ def readCurrent(i2cAddress, address):
 def readTemperature(address):
     cmdHeader = mkCmdHdr(0, 0x22, address)
     ser.write(cmdHeader)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     value = bytes2int(dataBytes[0] + dataBytes[1]) >> 4
     #print("value="+str(value))
     return (value*0.0625)
@@ -1099,7 +1102,7 @@ def readBarometerReg(regAddress, PSOCaddress):
     ser.write(cmdHeader)
     data1 = mkDataByte(regAddress, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     #print("readBarometerReg: byte = " + str(binascii.hexlify(byte1)))
     return bytes2int(dataBytes[0])
     
@@ -1109,7 +1112,7 @@ def readRTCregister(regAddress, PSOCaddress):
     ser.write(cmdHeader)
     data1 = mkDataByte(regAddress, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     #print("readRTCregister: byte = " + str(binascii.hexlify(dataBytes[0])))
     return dataBytes[0]
 
@@ -1288,7 +1291,7 @@ def readRTCtime(address):
 def readErrors(address):
     cmdHeader = mkCmdHdr(0, 0x03, address)
     ser.write(cmdHeader)
-    cmd,cmdData,dataBytes = getData(address)
+    cmd,cmdData,dataBytes = getData()
     nData = len(dataBytes)
     if nData == 3 and bytes2int(dataBytes[0])==0:
         print("readErrors for PSOC address " + str(address) + ": no errors encountered.")
@@ -1309,7 +1312,7 @@ def readBackplaneVoltage():
     cmdHeader = mkCmdHdr(0, 0x25, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     value = bytes2int(databytes[0])*256 + bytes2int(dataBytes[1])
     return value/1000.
 
@@ -1318,7 +1321,7 @@ def readBatteryVoltage():
     cmdHeader = mkCmdHdr(0, 0x25, addrEvnt)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     value = bytes2int(databytes[0])*256 + bytes2int(dataBytes[1])
     print("readBatteryVoltage: result = " + str(value) + " mV")
     return value/1000.
@@ -1327,7 +1330,7 @@ def readNumTOF(address):
     cmdHeader = mkCmdHdr(0, 0x34, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     valueA = bytes2int(dataBytes[0])
     print("readNumTOF: channel-A TOF pointer = " + str(valueA))
     valueB = bytes2int(dataBytes[1])
@@ -1338,7 +1341,7 @@ def readSAR_ADC(address):
     cmdHeader = mkCmdHdr(0, 0x33, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     value = bytes2int(databytes[0])*256 + bytes2int(dataBytes[1])
     return value*3.3/4096.
 
@@ -1346,7 +1349,7 @@ def readAllTOFdata(address):
     cmdHeader = mkCmdHdr(0, 0x40, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData(PSOCaddress)
+    cmd,cmdData,dataBytes = getData()
     nA = bytes2int(dataBytes[0])
     print("readAllTOFdata: number of A-channel hits = " + str(nA))
     nB = bytes2int(dataBytes[1])     
@@ -1425,14 +1428,14 @@ def readTofConfig():
     cmdHeader = mkCmdHdr(0, 0x0E, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData(address)
+    cmd,cmdData,dataBytes = getData()
     for i in range(len(dataBytes)):
         ret = dataBytes[i]
         print("Byte "+str(i)+" returned by SPI from the TOF chip config reg: " + str(binascii.hexlify(ret)))  
 
 # Receive and check the echo from a tracker command
 def getTkrEcho():
-    cmd,cmdData,dataBytes = getData(addrEvnt)
+    cmd,cmdData,dataBytes = getData()
     cmdCount = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     #print("getTkrEcho: command count = " + str(cmdCount))
     cmdCode = dataBytes[2]
@@ -1594,7 +1597,7 @@ def tkrAsicPowerOn():
 
 # Get housekeeping data sent back from the tracker
 def getTkrHousekeeping():
-    command,cmdDataBytes,dataBytes = getData(addrEvnt)
+    command,cmdDataBytes,dataBytes = getData()
     return dataBytes
 
 def tkrGetCodeVersion(FPGA):
