@@ -17,6 +17,9 @@ numberOfRuns = 10
 portName = "COM7"
 address = 8   # Address of the event PSOC
 
+exCaught = 0 #count the number of exceptions handled -B
+exitOnEx = True #exit on all exceptions, not just critical ones -b
+
 try: #try and catch exceptions during setup -B
 
     openCOM(portName)
@@ -29,44 +32,61 @@ try: #try and catch exceptions during setup -B
 
     #This is supposed to set the real time clock, but it fails the first time after rebooting the PSOC
     setInternalRTC(address)  
+except IOError as err:
+    print("IO Error # {0} during RTC set: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+    exCaught += 1 #count the number of exceptions handled -B
+    sys.exit("critical error") #exit on exception -B
+try:
     time.sleep(0.1)
     getInternalRTC(address)
 
     #The watch battery voltage drains too fast. It is for the i2c real time clock.
     print("The watch battery voltage is " + str(readBatteryVoltage()) + " V")
+except IOError as err:
+    print("IO Error # {0} during RTC echo: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+    exCaught += 1 #count the number of exceptions handled -B
+    if exitOnEx: sys.exit("critical error") #exit on exception -b
+try:
     #Set the thresholds for the PMTs
     #Order is G, T3, T1, T4, T2
     #pmtThresh = [3,4,4,4,60]  #PSM: ORIGINAL VALUES 18 July 2021 DO NOT DELETE THIS LINE
-    pmtThresh = [3,5,2,2,60]
-    ch5Thresh = pmtThresh[4]
-    print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
-    setPmtDAC(5, ch5Thresh, address)
+    # pmtThresh = [3,5,2,2,60]
+    # ch5Thresh = pmtThresh[4]
+    # print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
+    # setPmtDAC(5, ch5Thresh, address)
 
 
     setTofDAC(1, 49, address)   
     setTofDAC(2, 49, address)
-    for channel in range(1,3):
-        print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
     #Set the thresholds for the PMTs
     #Order is G, T3, T1, T4, T2
     #pmtThresh = [3,4,4,4,60]  #PSM: ORIGINAL VALUES 18 July 2021 DO NOT DELETE THIS LINE
     pmtThresh = [3,4,4,3,60]
     ch5Thresh = pmtThresh[4]
-    print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
-    setPmtDAC(5, ch5Thresh, address)
+    # print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
+    # setPmtDAC(5, ch5Thresh, address)
 
-    print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
-    time.sleep(0.2)
+    # print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
+    # time.sleep(0.2)
     #For some bizarre reason, this reads back as zero when read the second time, but it really is still set
-    print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
+    # print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
     for chan in range(1,5):
         setPmtDAC(chan, pmtThresh[chan-1], addrEvnt)
         time.sleep(0.1)
+except IOError as err:
+    print("IO Error # {0} during DAC set: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+    exCaught += 1 #count the number of exceptions handled -B
+    sys.exit("critical error") #exit on exception -b
+try:
+    for channel in range(1,3):
+        print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
+    for chan in range(1,5):
         print("Channel " + str(chan) + " PMT DAC was set to " + str(readPmtDAC(chan, addrEvnt)) + " counts")
+        time.sleep(0.1)
 
-    print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
-    setPmtDAC(5, ch5Thresh, address)
+    # print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
+    # setPmtDAC(5, ch5Thresh, address)
 
     print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
 
@@ -76,6 +96,11 @@ try: #try and catch exceptions during setup -B
     #ret = ser.read()
     #print(ret)
 
+except IOError as err:
+    print("IO Error # {0} during DAC echo: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+    exCaught += 1 #count the number of exceptions handled -B
+    if exitOnEx: sys.exit("critical error") #exit on exception -b
+try:
     boards = [0,1,2,3,4,5,6,7]
     nTkrBoards = len(boards)
     if nTkrBoards > 0:
@@ -221,6 +246,11 @@ try: #try and catch exceptions during setup -B
         #for brd in boards:
             # Measure the trigger noise count
         getLyrTrgCnt(4)
+except IOError as err:
+    print("IO Error # {0} during tracker setup: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+    exCaught += 1 #count the number of exceptions handled -B
+    if exitOnEx: sys.exit("critical error") #exit on exception -b
+try:
 
     #Set the main trigger mask
     #Order is T1 T2 T3 T4
@@ -231,8 +261,6 @@ try: #try and catch exceptions during setup -B
     #mask = 0x0e    # single T4
     print("Setting the first trigger mask to " + str(mask))
     setTriggerMask(1, mask)
-    print("Get the trigger mask")
-    print("The first trigger mask is set to  " + str(hex(getTriggerMask(1))))
 
     #This sets the size of the coincidence window in clock cycles
     setTriggerWindow(16)
@@ -245,8 +273,20 @@ try: #try and catch exceptions during setup -B
     mask = 0x00    # T1 & T3 prescaled now All -B
     print("Setting the second trigger mask to " + str(mask))
     setTriggerMask(2, mask)
+except IOError as err:
+    print("IO Error # {0} during trigger set: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+    exCaught += 1 #count the number of exceptions handled -B
+    sys.exit("critical error") #exit on exception -b
+try:
+    print("Get the trigger mask")
+    print("The first trigger mask is set to  " + str(hex(getTriggerMask(1))))
     print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 
+except IOError as err:
+    print("IO Error # {0} during trigger echo: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+    exCaught += 1 #count the number of exceptions handled -B
+    if exitOnEx : sys.exit("critical error") #exit on exception -b
+try:
     #Quick test of a counter
     print("Count on channel 2 = " + str(getChannelCount(2)))
     print("send reset pulse")
@@ -255,7 +295,9 @@ try: #try and catch exceptions during setup -B
     print("Count on channel 2 = " + str(getChannelCount(2)))
     print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 except IOError as err:
-    print("IO Error during setup: {0}".format(err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+    print("IO Error # {0} during final quick check: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+    exCaught += 1 #count the number of exceptions handled -B
+    if exitOnEx : sys.exit("critical error") #exit on all exception -b
 
 for x in range(numberOfRuns) :
     # Run a fixed number of events.
