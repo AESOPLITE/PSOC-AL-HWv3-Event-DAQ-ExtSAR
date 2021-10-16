@@ -11,14 +11,14 @@ from PSOC_cmd import *
 
 asicReset = True
 # Set the number of events to acquire:
-numberEvents = 5000
-runNumber = 212
+numberEvents = 100
+runNumber = 213
 numberOfRuns = 10
 portName = "COM7"
 address = 8   # Address of the event PSOC
 
 exCaught = 0 #count the number of exceptions handled -B
-exitOnEx = True #exit on all exceptions, not just critical ones -b
+exitOnEx = False #exit on all exceptions, not just critical ones -b
 
 try: #try and catch exceptions during setup -B
 
@@ -254,7 +254,8 @@ try:
 
     #Set the main trigger mask
     #Order is T1 T2 T3 T4
-    mask = 0x06    # T1 & T3 & T4 now T1 & T4 -B
+    mask = 0x0C    # T1 & T3 DEBUG -B
+    # mask = 0x06    # T1 & T3 & T4 now T1 & T4 -B
     #mask = 0x07    # single T1
     #mask = 0x0b    # single T2
     #mask = 0x0d    # single T3
