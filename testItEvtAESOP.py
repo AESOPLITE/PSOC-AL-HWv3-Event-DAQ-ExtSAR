@@ -12,7 +12,7 @@ from PSOC_cmd import *
 asicReset = True
 # Set the number of events to acquire:
 numberEvents = 100
-runNumber = 213
+runNumber = 227
 numberOfRuns = 10
 portName = "COM7"
 address = 8   # Address of the event PSOC
@@ -258,7 +258,7 @@ try:
     # mask = 0x06    # T1 & T3 & T4 now T1 & T4 -B
     #mask = 0x07    # single T1
     #mask = 0x0b    # single T2
-    #mask = 0x0d    # single T3
+    # mask = 0x0d    # single T3
     #mask = 0x0e    # single T4
     print("Setting the first trigger mask to " + str(mask))
     setTriggerMask(1, mask)
