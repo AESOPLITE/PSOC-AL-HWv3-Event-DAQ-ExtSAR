@@ -12,7 +12,7 @@ from PSOC_cmd import *
 asicReset = True
 # Set the number of events to acquire:
 numberEvents = 100
-runNumber = 227
+runNumber = 252
 numberOfRuns = 10
 portName = "COM7"
 address = 8   # Address of the event PSOC

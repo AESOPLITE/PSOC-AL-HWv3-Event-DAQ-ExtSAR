@@ -819,9 +819,11 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     endTime = time.time()
     runTime = endTime - startTime
     print("Elapsed time for the run = " + str(runTime) + " seconds")
+    if outputEvents: f2.write("Elapsedtimefortherun: " + str(runTime) + " seconds\n")
     timeSum = timeSum/float(numEvnts - 1)
     print("Average time between event time stamps = " + str(timeSum))
-    
+    if outputEvents: f2.write("Averagetimebetweeneventtimestamps: " + str(timeSum)+"\n")
+
     # Tell the Event PSOC to stop the run
     cmdHeader = mkCmdHdr(0, 0x44, addrEvnt)
     ser.write(cmdHeader)
@@ -858,23 +860,33 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     TOFavg2 = TOFavg2/float(numEvnts)
     numHitsAvg = numHits/float(numEvnts)
     print("Average number of hits per event = " + str(numHitsAvg))
+    if outputEvents: f2.write("Averagenumberofhitsperevent: " + str(numHitsAvg)+"\n")
     sigmaTOF = math.sqrt(TOFavg2 - TOFavg*TOFavg)
     for ch in range(6):
         ADCavg[ch] = ADCavg[ch]/float(numEvnts)
         ADCavg2[ch] = ADCavg2[ch]/float(numEvnts)
         Sigma[ch] = math.sqrt(ADCavg2[ch] - ADCavg[ch]*ADCavg[ch])
     f.close()
-    if outputEvents: f2.close()
     print("Number of triggers generated = " + str(cntGo1))
+    if outputEvents: f2.write("Numberoftriggersgenerated: " + str(cntGo1)+"\n")
     print("Number of triggers accepted = " + str(cntGo))
+    if outputEvents: f2.write("Numberoftriggersaccepted: " + str(cntGo)+"\n")
     live = cntGo/float(cntGo1)
     print("Live time fraction = " + str(live))
+    if outputEvents: f2.write("Livetimefraction: " + str(live)+"\n")
     print("Number of primary PMT triggers captured = " + str(pmtTrg1))
+    if outputEvents: f2.write("NumberofprimaryPMTtriggerscaptured: " + str(pmtTrg1)+"\n")
     print("Number of secondary PMT triggers captured = " + str(pmtTrg2))
+    if outputEvents: f2.write("NumberofsecondaryPMTtriggerscaptured: " + str(pmtTrg2)+"\n")
     print("Number of tracker-0 triggers captured = " + str(tkrTrg0))
+    if outputEvents: f2.write("Numberoftracker-0triggerscaptured: " + str(tkrTrg0)+"\n")
     print("Number of tracker-1 triggers captured = " + str(tkrTrg1))
+    if outputEvents: f2.write("Numberoftracker-1triggerscaptured: " + str(tkrTrg1)+"\n")
     print("Number of triggers with guard fired = " + str(pmtGrd))
+    if outputEvents: f2.write("Numberoftriggerswithguardfired: " + str(pmtGrd)+"\n")
     print("Number of bad tracker events = " + str(nBadTkr))
+    if outputEvents: f2.write("Numberofbadtrackerevents: " + str(nBadTkr)+"\n")
+    if outputEvents: f2.close()
     return ADCavg, Sigma, TOFavg, sigmaTOF
 
 def plotTkrEvnt(run, event, layers, hitList):
