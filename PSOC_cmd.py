@@ -669,7 +669,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         cnt = 0
         while True:
             ret = ser.read(1)
-            if cnt%10 == 0:
+            if cnt%1 == 0: #want to see all out of place bytes -B
                 print("limitedRun " + str(cnt) + ": looking for start of event. Received byte " + str(ret))
             if ret == b'\xDC': break
             time.sleep(0.1)
@@ -833,9 +833,18 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     byteList = []
     for i in range(nPackets):
         if i == 0:
-            ret = ser.read(3)
-            if ret != b'\xDC\x00\xFF':
-                print("limitedRun: invalid header returned: " + str(ret))
+            while True:
+                ret = ser.read(1) #changing to 1 byte instead of 3 -B
+                
+                print("limitedRun " + str(cnt) + ": looking for header. Received byte " + str(ret))
+                if ret == b'\xDC': break
+                time.sleep(0.1)
+            ret = ser.read(2)
+            if ret != b'\x00\xFF':
+                print("bad header found: b'\\xdc' " + str(ret))
+            # ret = ser.read(3)
+            # if ret != b'\xDC\x00\xFF':
+            #     print("limitedRun: invalid header returned: " + str(ret))
         byteList.append(ser.read())
         byteList.append(ser.read())
         byteList.append(ser.read())
