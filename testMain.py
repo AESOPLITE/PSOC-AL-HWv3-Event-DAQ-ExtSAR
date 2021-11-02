@@ -2,6 +2,7 @@ import serial
 import time
 import numpy
 import binascii
+import sys
 
 # Address = 8 for the event PSOC, 10 for the main PSOC
 addrMain = 10
@@ -11,7 +12,7 @@ from PSOC_cmd import *
 
 address = addrMain
 
-portName = "COM3"
+portName = "COM4"
 openCOM(portName)
 
 print("Entering testMain.py")
@@ -29,19 +30,27 @@ time.sleep(0.1)
 #LED2("off", addrMain)
 
 #time.sleep(1)
-#LED2("on", addrEvnt)
-#time.sleep(1)
-#LED2("off", addrEvnt)
+LED2("on", addrEvnt)
+time.sleep(1)
+LED2("off", addrEvnt)
+
+print(" ")
+print("Set up the thresholds for the PMT channels:")
+setTofDAC(1, 30, addrEvnt)
+setTofDAC(2, 30, addrEvnt)
+for channel in range(1,3):
+    print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, addrEvnt)) + " counts.")
+
 print(" ")
 print("Read the real-time clock over the i2c bus:")
 #loadRTCregister(0x07, 0x40, addrMain)
 #byte = readRTCregister(0x07, addrMain)
 #print("RTC register 0x07 = " + str(binascii.hexlify(byte)))
 #setRTCtime(addrMain)
+#time.sleep(1)
 readRTCtime(addrMain)
 
-
-#setInternalRTCfromI2C()
+setInternalRTCfromI2C()
 getInternalRTC(address)
 
 time.sleep(0.1)
@@ -91,6 +100,8 @@ print("Tracker bias voltage = " + str(voltage) + " V")
 
 temp = readTemperature(addrMain)
 print("Board temperature = " + str(temp) + " degrees Celsius")
+
+#sys.exit("abort")
 
 getPressure(addrMain)
 

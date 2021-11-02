@@ -22,14 +22,14 @@ address = 8   # Address of the event PSOC
 
 #setInternalRTC(address)
 #time.sleep(0.1)
-#getInternalRTC(address)
+getInternalRTC(address)
 
 setTofDAC(1, 64, address)   
 setTofDAC(2, 64, address)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
-pmtThresh = [4,4,4,4,20]
+pmtThresh = [6,6,6,6,90]
 ch5Thresh = pmtThresh[4]
 print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
 setPmtDAC(5, ch5Thresh, address)

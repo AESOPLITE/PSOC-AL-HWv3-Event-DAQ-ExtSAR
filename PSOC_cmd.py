@@ -90,8 +90,7 @@ def mkDataByte(dataByte, address, byteID):
    end2 = LF.to_bytes(1,'big')   # LF
    return cmd1 + cmd1 + cmd1 + end1 + end2
 
-# def getData(address):
-def getData(): #address doesnt seem to be used anymore -B
+def getData(): 
     ret = b''
     for i in range(36):  #Sometimes the read starts with blank bytes, so search for the header
         ret = ser.read(1)
@@ -101,8 +100,7 @@ def getData(): #address doesnt seem to be used anymore -B
             print("getData: expected 'DC' but received " + str(ret))
     if ret != b'\xDC':
         print("getData: failed to find the header 'DC'")
-        raise IOError("getData: failed to find the header 'DC'") #raise this exception that can be caught in differnt scripts or commands. Returnig something just creates problems later.
-        # return b''
+        raise IOError("getData: failed to find the header 'DC'")
 
     ret = ser.read(2)
     #print("getData: remainder of header = " + str(ret))
@@ -695,15 +693,15 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
             #if ret != b'\xDC\x00\xFF':
             #    print("limitedRun: invalid header returned: " + str(ret))
             byte1 = ser.read()
-            if verbose: print("   Packet " + str(i) + ", byte 1 = " + str(bytes2int(byte1)) + " decimal, " + str(byte1.hex()) + " hex")
+            #if verbose: print("   Packet " + str(i) + ", byte 1 = " + str(bytes2int(byte1)) + " decimal, " + str(byte1.hex()) + " hex")
             dataList.append(bytes2int(byte1))
             byteList.append(byte1)
             byte2 = ser.read()
-            if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(byte2)) + " decimal, " + str(byte2.hex()) + " hex")
+            #if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(byte2)) + " decimal, " + str(byte2.hex()) + " hex")
             dataList.append(bytes2int(byte2))
             byteList.append(byte2)
             byte3 = ser.read()
-            if verbose: print("   Packet " + str(i) + ", byte 3 = " + str(bytes2int(byte3)) + " decimal, " + str(byte3.hex()) + " hex")
+            #if verbose: print("   Packet " + str(i) + ", byte 3 = " + str(bytes2int(byte3)) + " decimal, " + str(byte3.hex()) + " hex")
             dataList.append(bytes2int(byte3))
             byteList.append(byte3)
         ret = ser.read(3)
@@ -722,8 +720,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         minute = (timeDate & 0x00000FC0) >> 6
         second = (timeDate & 0x0000003F)
         deltaTime = timeStamp - lastTime
+        deltaTimeSec = deltaTime * (1./200.)
         if event > 0:
-            if verbose: print("    Time since the previous event = " + str(deltaTime))
+            if verbose: print("    Time since the previous event = " + str(deltaTime) + " counts, or " + str(deltaTimeSec) + " seconds")
             timeSum += deltaTime
         lastTime = timeStamp
         T1 = dataList[23]*256 + dataList[24]
@@ -820,7 +819,8 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     runTime = endTime - startTime
     print("Elapsed time for the run = " + str(runTime) + " seconds")
     timeSum = timeSum/float(numEvnts - 1)
-    print("Average time between event time stamps = " + str(timeSum))
+    timeSumSec = timeSum*(1./200.)
+    print("Average time between event time stamps = " + str(timeSum) + " counts = " + str(timeSumSec) + " seconds")
     
     # Tell the Event PSOC to stop the run
     cmdHeader = mkCmdHdr(0, 0x44, addrEvnt)
@@ -915,7 +915,8 @@ def getChannelCount(channel):
     data1 = mkDataByte(channel, PSOCaddress, 1)
     ser.write(data1)
     cmd,cmdData,dataBytes = getData()
-    count = bytes2int(dataBytes[0])
+	# The hardware counter period is 255, not 256, hence the 255 in this expression
+    count = (bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1]))*255 + bytes2int(dataBytes[2])
     return count
     
 # Read the PMT channel counts from end of run
@@ -926,7 +927,7 @@ def getEndOfRunChannelCount(channel):
     data1 = mkDataByte(channel, PSOCaddress, 1)
     ser.write(data1)
     cmd,cmdData,dataBytes = getData()
-    count = bytes2int(dataBytes[0])
+    count = (bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1]))*255 + bytes2int(dataBytes[2])
     return count
 
 # Set up the Event PSOC trigger masks
@@ -1313,16 +1314,17 @@ def readBackplaneVoltage():
     ser.write(cmdHeader)
     time.sleep(0.1)
     cmd,cmdData,dataBytes = getData()
-    value = bytes2int(databytes[0])*256 + bytes2int(dataBytes[1])
+    value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     return value/1000.
 
 # Read back the voltage of the watch battery (used by the RTC), digitized by the event PSOC Sigma-Delta ADC
+# Don't use this. It is being eliminated in the new boards, as it drained the battery.
 def readBatteryVoltage():
     cmdHeader = mkCmdHdr(0, 0x25, addrEvnt)
     ser.write(cmdHeader)
     time.sleep(0.1)
     cmd,cmdData,dataBytes = getData()
-    value = bytes2int(databytes[0])*256 + bytes2int(dataBytes[1])
+    value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     print("readBatteryVoltage: result = " + str(value) + " mV")
     return value/1000.
 
@@ -1342,7 +1344,7 @@ def readSAR_ADC(address):
     ser.write(cmdHeader)
     time.sleep(0.1)
     cmd,cmdData,dataBytes = getData()
-    value = bytes2int(databytes[0])*256 + bytes2int(dataBytes[1])
+    value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     return value*3.3/4096.
 
 def readAllTOFdata(address):

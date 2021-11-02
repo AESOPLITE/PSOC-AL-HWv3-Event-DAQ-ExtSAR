@@ -1147,10 +1147,7 @@ int main(void)
     // i.e. once each second, it interrupts the CPU, which then increments a 1 Hz count. The time() function adds the two
     // counts together to get a time tag that increments every 5 ms. Note that the main purpose of the 200 Hz clock is to
     // send a hardware reset to the time-of-flight chip every 5 ms, so that we know exactly when its counting starts.
-    //Counter_1_Start();
-    //Counter_1_WritePeriod(199);  // Should count from 0 to 199, for a period of 200
-    //Counter_1_SetCaptureMode(Counter_1__B_COUNTER__SOFTWARE_CONTROL);
-    Cntr8_Timer_WritePeriod(199);
+    Cntr8_Timer_WritePeriod(200);
     
     // Counter for the delay time to wait before resetting the peak detectors.
     Count7_3_Start();
@@ -1358,7 +1355,7 @@ int main(void)
     time_t cmdStartTime = time();
     uint8 rc;
     bool cmdDone = false;    // If true, A command has been fully received but data have not yet been sent back
-    set_SPI_SSN(0, false);   // Deselect all SPI slaves
+    set_SPI_SSN(0, true);   // Deselect all SPI slaves
     //uint32 cmdTime = time();
     triggerEnable(false);
     for(;;)
@@ -1646,11 +1643,8 @@ int main(void)
         }
         
         // Data goes out by USBUART, for bench testing, or by SPI to the main PSOC
-        // Format: 3 byte aligned packeckets with a 3 byte header (ID byte followed by 0x00FF) 
+        // Format: 3 byte aligned packeckets with a 3 byte header (0xDC00FF) 
         //         and 3 byte EOR (0xFF00FF)
-        //         We use two different ID bytes: one for a fixed-length 3-byte packet; another for variable length
-        // Variable length packet: the first byte in the first packet gives the number of bytes to follow.
-        //                         The last packet gets padded with 0 for bytes not used.
         
         if (nDataReady > 0 || cmdDone) {
             if (nDataReady > 0) {    // Send out a command echo only if there are also data to send
@@ -1710,7 +1704,7 @@ int main(void)
                 } else {                        
                     set_SPI_SSN(SSN_Main, false);
                     for (int i=0; i<nDataReady; ++i) {
-                        SPIM_WriteTxData(dataPacket[i]);
+                        SPIM_WriteTxData(dataOut[i]);
                     }
                     for (int i=0; i<nPadding; ++i) {
                         SPIM_WriteTxData(Padding[i]);
@@ -1923,11 +1917,11 @@ int main(void)
                                 break;
                             case '\x04':        // Load the TOF DACs
                                 if (cmdData[0] == 1) {
-                                    DACaddress = I2C_Address_TOF_DAC1;
-                                } else if (cmdData[0] == 2) {
+                                    DACaddress = I2C_Address_TOF_DAC1;                                    
+                                } else if (cmdData[0] == 2) {                                    
                                     DACaddress = I2C_Address_TOF_DAC2;
                                 } else break;
-                                uint16 thrSetting = (uint16)cmdData[1];
+                                uint16 thrSetting = (uint16)cmdData[1];                                
                                 thrSetting = (thrSetting<<8) | (uint16)cmdData[2];
                                 rc = loadDAC(DACaddress, thrSetting);
                                 if (rc != 0) {
