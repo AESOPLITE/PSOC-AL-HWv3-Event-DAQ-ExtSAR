@@ -11,16 +11,17 @@ from PSOC_cmd import *
 
 asicReset = True
 # Set the number of events to acquire:
-numberEvents = 80000
-runNumber = 69
+numberEvents = 5000
+runNumber = 212
+numberOfRuns = 10
+portName = "COM7"
+address = 8   # Address of the event PSOC
 
 try: #try and catch exceptions during setup -B
-    portName = "COM7"
+
     openCOM(portName)
 
     print("Entering testItEvtAESOP.py at " + time.strftime("%c"))
-
-    address = 8   # Address of the event PSOC
 
     #LED2("on", address)
     #time.sleep(1)
@@ -33,6 +34,13 @@ try: #try and catch exceptions during setup -B
 
     #The watch battery voltage drains too fast. It is for the i2c real time clock.
     print("The watch battery voltage is " + str(readBatteryVoltage()) + " V")
+    #Set the thresholds for the PMTs
+    #Order is G, T3, T1, T4, T2
+    #pmtThresh = [3,4,4,4,60]  #PSM: ORIGINAL VALUES 18 July 2021 DO NOT DELETE THIS LINE
+    pmtThresh = [3,5,2,2,60]
+    ch5Thresh = pmtThresh[4]
+    print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
+    setPmtDAC(5, ch5Thresh, address)
 
 
     setTofDAC(1, 49, address)   
@@ -248,51 +256,54 @@ try: #try and catch exceptions during setup -B
     print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 except IOError as err:
     print("IO Error during setup: {0}".format(err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
-# Run a fixed number of events.
-# This program opens a file for each event for a single-event plot (can be commented out)
-# plus an nTuple file with PMT readings, and a text output file with most of the information per event
-# printed in an ASCII format.
-# The gnuplot program is needed for viewing the event plots.
-ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numberEvents, False)
-f2 = open("dataOutput_run" + str(runNumber) + ".txt", "a")
 
-#Print some end of run summary stuff
-print("Ending the run at " + time.strftime("%c"))
-print("Average ADC values:")
-print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
-print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
-print("    T3 = " + str(ADC[2]) + " +- " + str(Sigma[2]))
-print("    T4 = " + str(ADC[3]) + " +- " + str(Sigma[3]))
-print("     G = " + str(ADC[4]) + " +- " + str(Sigma[4]))
-print("    Ex = " + str(ADC[5]) + " +- " + str(Sigma[5]))
-print("    TOF = " + str(TOF) + " +- " + str(sigmaTOF))
+for x in range(numberOfRuns) :
+    # Run a fixed number of events.
+    # This program opens a file for each event for a single-event plot (can be commented out)
+    # plus an nTuple file with PMT readings, and a text output file with most of the information per event
+    # printed in an ASCII format.
+    # The gnuplot program is needed for viewing the event plots.
+    ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numberEvents, False)
+    f2 = open("dataOutput_run" + str(runNumber) + ".txt", "a")
 
-f2.write("Ending the run at " + time.strftime("%c")+"\n")
-f2.write("Average ADC values:"+"\n")
-f2.write("     T1: " + str(ADC[0]) + " +- " + str(Sigma[0])+"\n")
-f2.write("     T2: " + str(ADC[1]) + " +- " + str(Sigma[1])+"\n")
-f2.write("     T3: " + str(ADC[2]) + " +- " + str(Sigma[2])+"\n")
-f2.write("     T4: " + str(ADC[3]) + " +- " + str(Sigma[3])+"\n")
-f2.write("      G: " + str(ADC[4]) + " +- " + str(Sigma[4])+"\n")
-f2.write("     Ex: " + str(ADC[5]) + " +- " + str(Sigma[5])+"\n")
-f2.write("   TOF2: " + str(TOF) + " +- " + str(sigmaTOF)+"\n")
+    #Print some end of run summary stuff
+    print("Ending the run at " + time.strftime("%c"))
+    print("Average ADC values:")
+    print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
+    print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
+    print("    T3 = " + str(ADC[2]) + " +- " + str(Sigma[2]))
+    print("    T4 = " + str(ADC[3]) + " +- " + str(Sigma[3]))
+    print("     G = " + str(ADC[4]) + " +- " + str(Sigma[4]))
+    print("    Ex = " + str(ADC[5]) + " +- " + str(Sigma[5]))
+    print("    TOF = " + str(TOF) + " +- " + str(sigmaTOF))
 
-chName = ["G","T3","T1","T4","T2"]
-for ch in range(5):    #Get the singles counts from each of the 5 PMTs
-    cnt = getEndOfRunChannelCount(ch+1)
-    print("Counter for channel " + chName[ch] + " = " + str(cnt))
-    f2.write("Counterforchannel: " + chName[ch] + " = " + str(cnt)+"\n")
+    f2.write("Ending the run at " + time.strftime("%c")+"\n")
+    f2.write("Average ADC values:"+"\n")
+    f2.write("     T1: " + str(ADC[0]) + " +- " + str(Sigma[0])+"\n")
+    f2.write("     T2: " + str(ADC[1]) + " +- " + str(Sigma[1])+"\n")
+    f2.write("     T3: " + str(ADC[2]) + " +- " + str(Sigma[2])+"\n")
+    f2.write("     T4: " + str(ADC[3]) + " +- " + str(Sigma[3])+"\n")
+    f2.write("      G: " + str(ADC[4]) + " +- " + str(Sigma[4])+"\n")
+    f2.write("     Ex: " + str(ADC[5]) + " +- " + str(Sigma[5])+"\n")
+    f2.write("   TOF2: " + str(TOF) + " +- " + str(sigmaTOF)+"\n")
 
-readErrors(address)
+    chName = ["G","T3","T1","T4","T2"]
+    for ch in range(5):    #Get the singles counts from each of the 5 PMTs
+        cnt = getEndOfRunChannelCount(ch+1)
+        print("Counter for channel " + chName[ch] + " = " + str(cnt))
+        f2.write("Counterforchannel: " + chName[ch] + " = " + str(cnt)+"\n")
 
-if nTkrBoards > 0:
-    print("Tracker FPGA configuration = " + str(tkrGetFPGAconfig(0)))
-    f2.write("TrackerFPGAconfiguration: " + str(tkrGetFPGAconfig(0))+"\n")
-    if asicReset: tkrAsicPowerOff()
-    tkrTriggerDisable()
+    readErrors(address)
 
-f2.close()
-readErrors(address)
+    if nTkrBoards > 0:
+        print("Tracker FPGA configuration = " + str(tkrGetFPGAconfig(0)))
+        f2.write("TrackerFPGAconfiguration: " + str(tkrGetFPGAconfig(0))+"\n")
+        if asicReset: tkrAsicPowerOff()
+        tkrTriggerDisable()
+
+    f2.close()
+    readErrors(address)
+    runNumber = runNumber + 1
 
 closeCOM()
 
