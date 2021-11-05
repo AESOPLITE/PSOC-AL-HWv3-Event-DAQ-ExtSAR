@@ -822,9 +822,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     timeSum = timeSum/float(numEvnts - 1)
     timeSumSec = timeSum*(1./200.)
     print("Average time between event time stamps = " + str(timeSum) + " counts = " + str(timeSumSec) + " seconds")
-    if outputEvents: f2.write("Average time between event time stamps = " + str(timeSum) + " counts = " + str(timeSumSec) + " seconds")
+    # if outputEvents: f2.write("Average time between event time stamps = " + str(timeSum) + " counts = " + str(timeSumSec) + " seconds")
     
-    print("Average time between event time stamps = " + str(timeSum))
+    # print("Average time between event time stamps = " + str(timeSum))
     if outputEvents: f2.write("Averagetimebetweeneventtimestamps: " + str(timeSum)+"\n")
 
     # Tell the Event PSOC to stop the run
