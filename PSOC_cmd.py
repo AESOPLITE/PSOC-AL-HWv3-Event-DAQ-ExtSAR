@@ -807,6 +807,8 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         if outputEvents:
             timeStr = str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year)
             f2.write("Event {:d}: {} {:s}   rc={}\n".format(trigger, timeStamp, timeStr, rc))
+            f2.write("  Trigger: " + str(trigger) + " accepted, " + str(cntGo1) + " generated.  Data List length = " + str(len(dataList)) + "\n")
+            f2.write("  Tstatus: " + str(hex(trgStatus)) + "\n")
             f2.write("  ADC: {}, {}, {}, {}, {}\n".format(T1, T2, T3, T4, G))
             f2.write("  TOF: {}  nA={}  nB={}  refA={}  refB={}  clkA={}  clkB={} \n".format(dtmin, nTOFA, nTOFB, tofA, tofB, clkA, clkB))
             for lyr, hits in zip(FPGAs,stripHits):

@@ -11,9 +11,9 @@ from PSOC_cmd import *
 
 asicReset = True
 # Set the number of events to acquire:
-numberEvents = 100
-runNumber = 252
-numberOfRuns = 10
+numberEvents = 1000
+runNumber = 320
+numberOfRuns = 3
 portName = "COM7"
 address = 8   # Address of the event PSOC
 
@@ -254,8 +254,8 @@ try:
 
     #Set the main trigger mask
     #Order is T1 T2 T3 T4
-    mask = 0x0C    # T1 & T3 DEBUG -B
-    # mask = 0x06    # T1 & T3 & T4 now T1 & T4 -B
+    #mask = 0x0C    # T1 & T3 DEBUG -B
+    mask = 0x06    # T1 & T3 & T4 now T1 & T4 -B
     #mask = 0x07    # single T1
     #mask = 0x0b    # single T2
     # mask = 0x0d    # single T3
@@ -306,46 +306,95 @@ for x in range(numberOfRuns) :
     # plus an nTuple file with PMT readings, and a text output file with most of the information per event
     # printed in an ASCII format.
     # The gnuplot program is needed for viewing the event plots.
-    ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numberEvents, False)
-    f2 = open("dataOutput_run" + str(runNumber) + ".txt", "a")
+    try:
+        ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numberEvents, True) #true reads out tracker vaules
+        f2 = open("dataOutput_run" + str(runNumber) + ".txt", "a")
 
-    #Print some end of run summary stuff
-    print("Ending the run at " + time.strftime("%c"))
-    print("Average ADC values:")
-    print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
-    print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
-    print("    T3 = " + str(ADC[2]) + " +- " + str(Sigma[2]))
-    print("    T4 = " + str(ADC[3]) + " +- " + str(Sigma[3]))
-    print("     G = " + str(ADC[4]) + " +- " + str(Sigma[4]))
-    print("    Ex = " + str(ADC[5]) + " +- " + str(Sigma[5]))
-    print("    TOF = " + str(TOF) + " +- " + str(sigmaTOF))
+        #Print some end of run summary stuff
+        print("Ending the run at " + time.strftime("%c"))
+        print("Average ADC values:")
+        print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
+        print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
+        print("    T3 = " + str(ADC[2]) + " +- " + str(Sigma[2]))
+        print("    T4 = " + str(ADC[3]) + " +- " + str(Sigma[3]))
+        print("     G = " + str(ADC[4]) + " +- " + str(Sigma[4]))
+        print("    Ex = " + str(ADC[5]) + " +- " + str(Sigma[5]))
+        print("    TOF = " + str(TOF) + " +- " + str(sigmaTOF))
 
-    f2.write("Ending the run at " + time.strftime("%c")+"\n")
-    f2.write("Average ADC values:"+"\n")
-    f2.write("     T1: " + str(ADC[0]) + " +- " + str(Sigma[0])+"\n")
-    f2.write("     T2: " + str(ADC[1]) + " +- " + str(Sigma[1])+"\n")
-    f2.write("     T3: " + str(ADC[2]) + " +- " + str(Sigma[2])+"\n")
-    f2.write("     T4: " + str(ADC[3]) + " +- " + str(Sigma[3])+"\n")
-    f2.write("      G: " + str(ADC[4]) + " +- " + str(Sigma[4])+"\n")
-    f2.write("     Ex: " + str(ADC[5]) + " +- " + str(Sigma[5])+"\n")
-    f2.write("   TOF2: " + str(TOF) + " +- " + str(sigmaTOF)+"\n")
-
+        f2.write("Ending the run at " + time.strftime("%c")+"\n")
+        f2.write("Average ADC values:"+"\n")
+        f2.write("     T1: " + str(ADC[0]) + " +- " + str(Sigma[0])+"\n")
+        f2.write("     T2: " + str(ADC[1]) + " +- " + str(Sigma[1])+"\n")
+        f2.write("     T3: " + str(ADC[2]) + " +- " + str(Sigma[2])+"\n")
+        f2.write("     T4: " + str(ADC[3]) + " +- " + str(Sigma[3])+"\n")
+        f2.write("      G: " + str(ADC[4]) + " +- " + str(Sigma[4])+"\n")
+        f2.write("     Ex: " + str(ADC[5]) + " +- " + str(Sigma[5])+"\n")
+        f2.write("   TOF2: " + str(TOF) + " +- " + str(sigmaTOF)+"\n")
+    except IOError as err:
+        print("IO Error # {0} during limitedRun: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+        exCaught += 1 #count the number of exceptions handled -B
+        if exitOnEx : sys.exit("critical error") #exit on all exception -b
+    except IndexError as err:
+        print("Index Error # {0} during limitedRun: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+        exCaught += 1 #count the number of exceptions handled -B
+        if exitOnEx : sys.exit("critical error") #exit on all exception -b
+    except ValueError as err:
+        print("Value Error # {0} during limitedRun: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+        exCaught += 1 #count the number of exceptions handled -B
+        if exitOnEx : sys.exit("critical error") #exit on all exception -b
+    try:
+        f2 = open("dataOutput_run" + str(runNumber) + ".txt", "a") # added open in case of error, might need to check -B
+    except IOError as err:
+            print("IO Error # {0} during file open: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+            exCaught += 1 #count the number of exceptions handled -B
+            if exitOnEx : sys.exit("critical error") #exit on all exception -b
     chName = ["G","T3","T1","T4","T2"]
     for ch in range(5):    #Get the singles counts from each of the 5 PMTs
-        cnt = getEndOfRunChannelCount(ch+1)
-        print("Counter for channel " + chName[ch] + " = " + str(cnt))
-        f2.write("Counterforchannel: " + chName[ch] + " = " + str(cnt)+"\n")
+        try:
+            cnt = getEndOfRunChannelCount(ch+1)
+            print("Counter for channel " + chName[ch] + " = " + str(cnt))
+            f2.write("Counterforchannel: " + chName[ch] + " = " + str(cnt)+"\n")
+        except IOError as err:
+            print("IO Error # {0} during Channel {1} Count: {2}".format(exCaught, ch, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+            exCaught += 1 #count the number of exceptions handled -B
+            if exitOnEx: sys.exit("critical error") #exit on exception -B
 
-    readErrors(address)
+    try:
+        readErrors(address)
+    except IOError as err:
+        print("IO Error # {0} ironically during Read Errors: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+        exCaught += 1 #count the number of exceptions handled -B
+        if exitOnEx: sys.exit("critical error") #exit on exception -B
 
     if nTkrBoards > 0:
-        print("Tracker FPGA configuration = " + str(tkrGetFPGAconfig(0)))
-        f2.write("TrackerFPGAconfiguration: " + str(tkrGetFPGAconfig(0))+"\n")
-        if asicReset: tkrAsicPowerOff()
-        tkrTriggerDisable()
+        fpgaConfig = "error"
+        try:
+            fpgaConfig = tkrGetFPGAconfig(0)
+        except IOError as err:
+            print("IO Error # {0} during Read FPGA Config: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+            exCaught += 1 #count the number of exceptions handled -B
+            if exitOnEx : sys.exit("critical error") #exit on all exception -b
+        except IndexError as err:
+            print("Index Error # {0} during Read FPGA Config: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+            exCaught += 1 #count the number of exceptions handled -B
+            if exitOnEx : sys.exit("critical error") #exit on all exception -b
+        print("Tracker FPGA configuration = " + str(fpgaConfig))
+        f2.write("TrackerFPGAconfiguration: " + str(fpgaConfig +"\n"))
+        try:
+            if asicReset: tkrAsicPowerOff()
+            tkrTriggerDisable()
+        except IOError as err:
+            print("IO Error # {0} during Power off: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+            exCaught += 1 #count the number of exceptions handled -B
+            if exitOnEx: sys.exit("critical error") #exit on exception -B
 
-    f2.close()
-    readErrors(address)
+    try:
+        f2.close()
+        readErrors(address)
+    except IOError as err:
+        print("IO Error # {0} ironically during Read Errors: {1}".format(exCaught, err)) #just print for now but might need to end. would be better to break the setup inot critical setup and less important commands and handle the errors accordingly -B 
+        exCaught += 1 #count the number of exceptions handled -B
+        if exitOnEx: sys.exit("critical error") #exit on exception -B
     runNumber = runNumber + 1
 
 closeCOM()
