@@ -12,7 +12,7 @@
 // ========================================
 `include "cypress.v"
 //`#end` -- edit above this line, do not edit this line
-// Generated on 01/14/2021 at 13:35
+// Generated on 12/12/2021 at 14:21
 // Component: SignalCrop_v1
 module SignalCrop_v1 (
 	output  RstCtr,
@@ -22,6 +22,7 @@ module SignalCrop_v1 (
 	input   Reset,
 	input   tc
 );
+	parameter CoincWindow = 7;
 
 //`#start body` -- edit after this line, do not edit this line
 
@@ -32,25 +33,35 @@ parameter [1:0] WtAt = 2'b11;  // Wait for another down-counter period, to avoid
 
 reg [1:0] State, NextState;
 
-assign Y = (State == Cont);
-assign RstCtr = (State == Wait || State == Done);
+reg Y2, RstCtr2;
+assign Y = Y2;
+assign RstCtr = RstCtr2;
+reg [3:0] ctr;
 always @ (State or A or tc) begin
     case (State) 
 	    Wait: begin
 		          if (A) NextState = Cont;
 				  else NextState = Wait;
+                  Y2 = 1'b0;
+                  RstCtr2 = 1'b1;
 		      end
 	    Cont: begin
-		          if (tc) NextState = Done;
+		          if (ctr == CoincWindow) NextState = Done;
 				  else NextState = Cont;
+                  Y2 = 1'b1;
+                  RstCtr2 = 1'b1;
 		      end
 		Done: begin
 		          if (!A) NextState = WtAt;
 				  else NextState = Done;
+                  Y2 = 1'b0;
+                  RstCtr2 = 1'b1;
 		      end
 		WtAt: begin
 		          if (tc) NextState = Wait;
                   else NextState = WtAt;
+                  Y2 = 1'b0;
+                  RstCtr2 = 1'b0;
 		      end
 	endcase
 end
@@ -60,6 +71,8 @@ always @ (posedge Clk) begin
 	    State <= Wait;
 	end else begin
 	    State <= NextState;
+        if (State == Cont) ctr <= ctr + 1;
+        else ctr <= 0;       
 	end
 end
 //`#end` -- edit above this line, do not edit this line

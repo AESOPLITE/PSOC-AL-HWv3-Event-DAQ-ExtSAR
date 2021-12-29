@@ -12,10 +12,12 @@ from PSOC_cmd import *
 
 address = addrMain
 
-portName = "COM4"
+portName = "COM12"
 openCOM(portName)
 
 print("Entering testMain.py")
+
+hardResetEventPSOC()
 
 initSPI()
 initUART()
@@ -27,7 +29,7 @@ time.sleep(0.1)
 
 #LED2("on", addrMain)
 #time.sleep(1)
-#LED2("off", addrMain)
+LED2("off", addrMain)
 
 #time.sleep(1)
 LED2("on", addrEvnt)
@@ -35,19 +37,12 @@ time.sleep(1)
 LED2("off", addrEvnt)
 
 print(" ")
-print("Set up the thresholds for the PMT channels:")
-setTofDAC(1, 30, addrEvnt)
-setTofDAC(2, 30, addrEvnt)
-for channel in range(1,3):
-    print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, addrEvnt)) + " counts.")
-
-print(" ")
 print("Read the real-time clock over the i2c bus:")
-#loadRTCregister(0x07, 0x40, addrMain)
-#byte = readRTCregister(0x07, addrMain)
-#print("RTC register 0x07 = " + str(binascii.hexlify(byte)))
+loadRTCregister(0x07, 0x40, addrMain)
+byte = readRTCregister(0x07, addrMain)
+print("RTC register 0x07 = " + str(binascii.hexlify(byte)))
 #setRTCtime(addrMain)
-#time.sleep(1)
+time.sleep(1)
 readRTCtime(addrMain)
 
 setInternalRTCfromI2C()
@@ -115,6 +110,8 @@ setTofDAC(2, 30, addrEvnt)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, addrEvnt)) + " counts.")
 
+#sys.exit("abort")
+
 chan = 5
 setPmtDAC(chan, 30, addrEvnt)
 time.sleep(0.1)
@@ -133,6 +130,8 @@ print(" ")
 print("Start the Tracker setup:")
 tkrFPGAreset(0x00)
 
+calibrateAllFPGAinputTiming()
+
 tkrConfigReset(0x00)
 
 readErrors(addrEvnt)
@@ -143,6 +142,11 @@ tkrSetNumLyrs(1)
 
 print("The number of tracker readout layers is " + str(bytes2int(tkrGetNumLyrs(0))))
 
+for i in range(0):
+    tkrAsicPowerOn()
+    time.sleep(2)
+    tkrAsicPowerOff()
+    time.sleep(2)
 tkrAsicPowerOn()
 
 tkrAsicHardReset(0x1F)
@@ -256,7 +260,7 @@ prescale = 4
 print("Setting the PMT trigger prescale to " + str(prescale))
 setTriggerPrescale("PMT", prescale)
 
-setTriggerWindow(72)
+setSettlingWindow(72)
 
 mask = 0x00    # T1, T3 prescaled
 print("Setting the second trigger mask to " + str(mask))
@@ -272,19 +276,21 @@ for i in range(2):
     time.sleep(0.3)
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
+getInternalRTC(address)
+getInternalRTC(addrEvnt)
 print("Before the run, the trigger enable status is " + str(triggerEnableStatus()))
 
 print(" ")
-numEvents = 2
-runNumber = 35
-ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numEvents)
+numEvents = 3
+runNumber = 71
+ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numEvents, True, False)
+time.sleep(5)
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
 print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
 print("    T3 = " + str(ADC[2]) + " +- " + str(Sigma[2]))
 print("    T4 = " + str(ADC[3]) + " +- " + str(Sigma[3]))
 print("     G = " + str(ADC[4]) + " +- " + str(Sigma[4]))
-print("    Ex = " + str(ADC[5]) + " +- " + str(Sigma[5]))
 print("    TOF = " + str(TOF) + " +- " + str(sigmaTOF))
 chName = ["G","T3","T1","T4","T2"]
 for ch in range(5):

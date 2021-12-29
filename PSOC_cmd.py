@@ -90,48 +90,53 @@ def mkDataByte(dataByte, address, byteID):
    end2 = LF.to_bytes(1,'big')   # LF
    return cmd1 + cmd1 + cmd1 + end1 + end2
 
-def getData(): 
+def getData(address): 
     ret = b''
+    debug = False
+    if debug: print("Entering getData for PSOC address " + str(address))
     for i in range(36):  #Sometimes the read starts with blank bytes, so search for the header
         ret = ser.read(1)
-        #print("getData: i= " + str(i) + " ret = " + str(ret))
+        if debug: print("getData: i= " + str(i) + " ret = " + str(ret))
         if ret == b'\xDC': break
         if ret != b'':
             print("getData: expected 'DC' but received " + str(ret))
     if ret != b'\xDC':
         print("getData: failed to find the header 'DC'")
+        if address > 0: readErrors(address)
         raise IOError("getData: failed to find the header 'DC'")
 
     ret = ser.read(2)
-    #print("getData: remainder of header = " + str(ret))
+    if debug: print("getData: remainder of header = " + str(ret))
     if ret != b'\x00\xFF':
         print("getData: invalid header returned: b'\\xDC' " + str(ret))
     ret = ser.read(1)
     dataLength = bytes2int(ret)
-    command = str(ser.read(1))
-    #print("getData: command = " + str(command) + " data length = " + str(dataLength))
+    command = ser.read(1)
+    if debug: print("getData: command = " + str(command) + " " + str(bytes2int(command)) + " " + str(command.hex()) + " data length = " + str(dataLength))
     nCmdBytes = bytes2int(ser.read(1))
+    if debug: print("getData: number of command data bytes = " + str(nCmdBytes)) 
     nPadding = 3 - dataLength%3
     if nPadding == 3: nPadding = 0
+    if debug: print("getData: number of padding bytes = " + str(nPadding))
     dataLength = dataLength - nCmdBytes
     cmdDataBytes = []
     for i in range(nCmdBytes):
         ret = ser.read(1)
         cmdDataBytes.append(ret)
-        #print("getData: command byte " + str(i) + ": " + str(ret))
+        if debug: print("getData: command byte " + str(i) + ": " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
     dataBytes = []
     for i in range(dataLength):
         ret = ser.read(1)
         dataBytes.append(ret)
-        #print("getData: data byte " + str(i) + ": " + str(ret))
+        if debug: print("getData: data byte " + str(i) + ": " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
     for i in range(nPadding):
         ret = ser.read(1)
-        #print("getData: padding byte " + str(i) + ": " + str(ret))
+        if debug: print("getData: padding byte " + str(i) + ": " + str(ret))
     trailer = ser.read(3)
-    #print("getData: trailing bytes: " + str(trailer))
+    if debug: print("getData: trailing bytes: " + str(trailer))
     if trailer != b'\xFF\x00\xFF':
         print("getData: invalid trailer returned: " + str(trailer))
-    #print("getData: command=" + str(command) + " # cmdDataBytes=" + str(len(cmdDataBytes)) + " # dataBytes=" + str(len(dataBytes)))
+    if debug: print("getData: command=" + str(command) + " # cmdDataBytes=" + str(len(cmdDataBytes)) + " # dataBytes=" + str(len(dataBytes)))
     return command,cmdDataBytes,dataBytes
 
 # Retrieve the data for a short data packet coming from the PSOC (<= 3 bytes)
@@ -201,6 +206,18 @@ def loadEventPSOCrtc():
     #    ret = ser.read(9)
     #    print("loadEvenPSOCrtc: data " + str(i) + " is " + str(ret))
 
+def hardResetEventPSOC():
+    print("Sending a hard reset pulse to the Event PSOC")
+    cmdHeader = mkCmdHdr(0, 0x48, addrMain)
+    ser.write(cmdHeader)
+    time.sleep(0.1)
+    
+def softResetEventPSOC():
+    print("Sending a software reset to the Event PSOC")
+    cmdHeader = mkCmdHdr(0, 0x49, addrMain)
+    ser.write(cmdHeader)
+    time.sleep(0.1)
+
 def LED2(onOFF, PSOCaddress):
     cmdHeader = mkCmdHdr(1, 0x06, PSOCaddress)
     ser.write(cmdHeader)
@@ -216,7 +233,7 @@ def LED2(onOFF, PSOCaddress):
 def logicReset(PSOCaddress):
     cmdHeader = mkCmdHdr(0, 0x38, PSOCaddress)
     ser.write(cmdHeader)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(PSOCaddress)
     count = bytes2int(dataBytes[0])*65536 + bytes2int(dataBytes[1])*256 + bytes2int(dataBytes[2])
     print("logicReset: the logic of PSOC " + str(PSOCaddress) + " was reset at clkCnt= " + str(count))
         
@@ -236,7 +253,7 @@ def setTriggerPrescale(whichOne, count):
     data2 = mkDataByte(count, addrEvnt, 2)
     ser.write(data2)
 
-def setTriggerWindow(count):
+def setSettlingWindow(count):
     cmdHeader = mkCmdHdr(1, 0x3A, addrEvnt)
     ser.write(cmdHeader)
     data1 = mkDataByte(count, addrEvnt, 1)
@@ -497,7 +514,7 @@ def tkrReadi2cReg(FPGA,i2cAddress):
   data4 = mkDataByte(i2cAddress, address, 4)
   ser.write(data4)
   time.sleep(0.1)
-  cmd,cmdData,dataBytes = getData()  
+  cmd,cmdData,dataBytes = getData(addrEvnt)  
   result = getBinaryString(dataBytes[1:3])
   return result
 
@@ -571,7 +588,7 @@ def sendTkrCalStrobe(FPGA, trgDelay, trgTag, verbose):
     nBytes = 9
     if verbose: print("sendTkrCalStrobe: expecting " + str(nBytes) + " bytes coming back from the tracker.")
 
-    command,cmdDataBytes,byteList = getData()
+    command,cmdDataBytes,byteList = getData(addrEvnt)
     
     if (len(byteList) != 9): print("sendTkrCalStrobe: wrong number " + str(len(bytesList)) + " of bytes returned")
     i=0
@@ -603,8 +620,8 @@ def readCalEvent(trgTag, verbose):
     if verbose: print("readCalEvent: reading back calibration strobe data for tag " + str(trgTag))
     # Wait for an event to show up
  
-    command,cmdDataBytes,dataList = getData()
-	
+    command,cmdDataBytes,dataList = getData(addrEvnt)
+    
     iPtr = 4
     numBoards = bytes2int(dataList[iPtr])
     if numBoards != 1: print("readCalEvent: wrong number of boards " + str(numBoards) + " in calibration event")
@@ -624,8 +641,8 @@ def readCalEvent(trgTag, verbose):
     return hitList
             
 # Execute a run for a specified number of events to be acquired
-def limitedRun(runNumber, numEvnts, readTracker = True):
-    cmdHeader = mkCmdHdr(3, 0x3C, addrEvnt)
+def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, debugTOF = False):
+    cmdHeader = mkCmdHdr(4, 0x3C, addrEvnt)
     ser.write(cmdHeader)
     data1 = mkDataByte(runNumber>>8, addrEvnt, 1)
     ser.write(data1)
@@ -635,25 +652,30 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     if readTracker: doTkr = 1
     data3 = mkDataByte(doTkr, addrEvnt, 3)
     ser.write(data3)
+    doDebug = 0
+    if debugTOF: doDebug = 1
+    data4 = mkDataByte(doDebug, addrEvnt, 4)
+    ser.write(data4)
     
     nToPlot = 0
     verbose = True
-    outputEvents = True;
+    
     print("limitedRun: starting run number " + str(runNumber) + " for " + str(numEvnts) + " events")
     if not readTracker: print("            The tracking detector will not be read out")
     f = open("nTuple_run" + str(runNumber) + ".txt", "w")
+    #f.write("N  T1  T2  T3  T4  G   NH  TOFA    TOFB    DTMIN   NTOFA   NTOFB   DELTAT  RC\n")
     if outputEvents:
         f2 = open("dataOutput_run" + str(runNumber) + ".txt", "w")
         f2.write("Starting run " + str(runNumber) + " on " + time.strftime("%c") + "\n") 
-    print("limitedRun: trigger enable status = " + str(triggerEnableStatus()))
+    #print("limitedRun: trigger enable status = " + str(triggerEnableStatus()))
     time.sleep(0.1)
     pmtTrg1 = 0
     pmtTrg2 = 0
     tkrTrg0 = 0
     tkrTrg1 = 0
     pmtGrd = 0
-    ADCavg = [0.,0.,0.,0.,0.,0.]
-    ADCavg2 = [0.,0.,0.,0.,0.,0.]
+    ADCavg = [0.,0.,0.,0.,0.]
+    ADCavg2 = [0.,0.,0.,0.,0.]
     TOFavg = 0.
     TOFavg2 = 0.
     startTime = time.time()
@@ -667,41 +689,40 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         cnt = 0
         while True:
             ret = ser.read(1)
-            if cnt%10 == 0:
+            if cnt%1 == 0:
                 print("limitedRun " + str(cnt) + ": looking for start of event. Received byte " + str(ret))
             if ret == b'\xDC': break
             time.sleep(0.1)
             cnt = cnt + 1
         ret = ser.read(2)
         if ret != b'\x00\xFF':
-            print("readCalEvent: bad header found: b'\\xdc' " + str(ret))
+            print("limitedRun: bad header found: b'\\xdc' " + str(ret))
         print("limitedRun: reading event " + str(event) + " of run " + str(runNumber))
         ret = ser.read(1)
         nData = bytes2int(ret)
         ser.read(2)
-        #ret = ser.read(3)
-        #if ret != b'\xFF\x00\xFF':
-        #    print("limitedRun: invalid trailer returned: " + str(ret))  
         R = nData % 3
         nPackets = int(nData/3)
         if (R != 0): nPackets = nPackets + 1
         dataList = []
         byteList = []
         if verbose: print("limitedRun: reading " + str(nData) + " data bytes in " + str(nPackets) + " packets")
+        #if event == 0:   # Read the command echo
+        #    ret = ser.read(2)
+        #    print("limitedRun: echo of the run number = " + str(bytes2int(ret)))
+        #    ret = ser.read(1)
+        #    print("limitedRun: echo of the readTracker flag = " + str(ret))
         for i in range(nPackets):
-            #ret = ser.read(3)
-            #if ret != b'\xDC\x00\xFF':
-            #    print("limitedRun: invalid header returned: " + str(ret))
             byte1 = ser.read()
-            #if verbose: print("   Packet " + str(i) + ", byte 1 = " + str(bytes2int(byte1)) + " decimal, " + str(byte1.hex()) + " hex")
+            if verbose: print("   Packet " + str(i) + ", byte 1 = " + str(bytes2int(byte1)) + " decimal, " + str(byte1.hex()) + " hex")
             dataList.append(bytes2int(byte1))
             byteList.append(byte1)
             byte2 = ser.read()
-            #if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(byte2)) + " decimal, " + str(byte2.hex()) + " hex")
+            if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(byte2)) + " decimal, " + str(byte2.hex()) + " hex")
             dataList.append(bytes2int(byte2))
             byteList.append(byte2)
             byte3 = ser.read()
-            #if verbose: print("   Packet " + str(i) + ", byte 3 = " + str(bytes2int(byte3)) + " decimal, " + str(byte3.hex()) + " hex")
+            if verbose: print("   Packet " + str(i) + ", byte 3 = " + str(bytes2int(byte3)) + " decimal, " + str(byte3.hex()) + " hex")
             dataList.append(bytes2int(byte3))
             byteList.append(byte3)
         ret = ser.read(3)
@@ -730,36 +751,46 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         T3 = dataList[27]*256 + dataList[28]
         T4 = dataList[29]*256 + dataList[30]
         G =  dataList[31]*256 + dataList[32]
-        Ex = dataList[33]*256 + dataList[34]
         if verbose:
             print("        T1 ADC=" + str(T1))
             print("        T2 ADC=" + str(T2))
             print("        T3 ADC=" + str(T3))
             print("        T4 ADC=" + str(T4))
             print("         G ADC=" + str(G))
-            print("        Ex ADC=" + str(Ex))
-        nTOFA = dataList[41]
-        nTOFB = dataList[42]
-        dtmin = 10*np.int16(dataList[35]*256 + dataList[36])
+        dtmin = 10*np.int16(dataList[33]*256 + dataList[34])
+        if debugTOF:
+            nTOFA = dataList[39]
+            nTOFB = dataList[40]
+            tofA = 10*(dataList[41]*256 + dataList[42])
+            tofB = 10*(dataList[43]*256 + dataList[44])
+            clkA = dataList[45]*256 + dataList[46]
+            clkB = dataList[47]*256 + dataList[48]
+            nTkrLyrs = dataList[49]
+            iPtr = 50
+        else: 
+            nTOFA = 0
+            nTOFB = 0
+            tofA = 9999
+            tofB = 9999
+            clkA = 9999
+            clkB = 9999
+            nTkrLyrs = dataList[39]
+            iPtr = 40
         if verbose:
             print("        TimeStamp = " + str(timeStamp))
             print("        TOF=" + str(dtmin) + " Number A=" + str(nTOFA) + " Number B=" + str(nTOFB))
             print("        run=" + str(run) + "  trigger " + str(trigger))
-        tofA = 10*(dataList[43]*256 + dataList[44])
-        tofB = 10*(dataList[45]*256 + dataList[46])
-        clkA = dataList[47]*256 + dataList[48]
-        clkB = dataList[49]*256 + dataList[50]
         trgStatus = dataList[22]
-        nTkrLyrs = dataList[51]
+        
         rc = 0
+        numHitEvt = 0
         if verbose: 
             if month > 12 or month < 1: month = 1
             print("        Event time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
-            print("        REF-A=" + str(tofA) + "  REF-B=" + str(tofB))
-            print("        TOF clkA=" + str(clkA) + "  TOF clkB=" + str(clkB))
+            if debugTOF: print("        REF-A=" + str(tofA) + "  REF-B=" + str(tofB))
+            if debugTOF: print("        TOF clkA=" + str(clkA) + "  TOF clkB=" + str(clkB))
             print("        Trigger status = " + str(hex(trgStatus)))
-            print("      Number of tracker layers read out = " + str(nTkrLyrs))
-            iPtr = 52
+            print("      Number of tracker layers read out = " + str(nTkrLyrs))           
             FPGAs = []
             stripHits = []
             for brd in range(nTkrLyrs):
@@ -776,7 +807,8 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
                 #print("           Hit list= " + getBinaryString(hitList))
                 rc, FPGA, strips = ParseASIChitList(getBinaryString(hitList),True)
                 if rc != 0: nBadTkr = nBadTkr + 1
-                numHits = numHits + len(strips)
+                numHitEvt = len(strips)
+                numHits = numHits + numHitEvt
                 FPGAs.append(FPGA)
                 stripHits.append(strips)
             if nPlotted < nToPlot: 
@@ -787,7 +819,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         if trgStatus & 0x04: tkrTrg0 = tkrTrg0 + 1
         if trgStatus & 0x08: tkrTrg1 = tkrTrg1 + 1
         if trgStatus & 0x10: pmtGrd = pmtGrd + 1
-        strOut = '{} {} {} {} {} {} {} {} {} {} {} {} {} {}\n'.format(trigger, T1, T2, T3, T4, G, Ex, tofA, tofB, dtmin, nTOFA, nTOFB, deltaTime, rc)
+        strOut = '{} {} {} {} {} {} {} {} {} {} {} {} {} {}\n'.format(trigger, T1, T2, T3, T4, G, numHitEvt, tofA, tofB, dtmin, nTOFA, nTOFB, deltaTime, rc)
         f.write(strOut)   
         TOFavg = TOFavg + float(dtmin)
         TOFavg2 = TOFavg2 + float(dtmin)*float(dtmin)
@@ -796,13 +828,11 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
         ADCavg[2] = ADCavg[2] + T3
         ADCavg[3] = ADCavg[3] + T4
         ADCavg[4] = ADCavg[4] + G
-        ADCavg[5] = ADCavg[5] + Ex
         ADCavg2[0] = ADCavg2[0] + T1*T1
         ADCavg2[1] = ADCavg2[1] + T2*T2
         ADCavg2[2] = ADCavg2[2] + T3*T3
         ADCavg2[3] = ADCavg2[3] + T4*T4
         ADCavg2[4] = ADCavg2[4] + G*G
-        ADCavg2[5] = ADCavg2[5] + Ex*Ex
         # Output all of the data to an ASCII file
         if outputEvents:
             timeStr = str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year)
@@ -818,39 +848,64 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     endTime = time.time()
     runTime = endTime - startTime
     print("Elapsed time for the run = " + str(runTime) + " seconds")
-    timeSum = timeSum/float(numEvnts - 1)
+    if numEvnts > 1: timeSum = timeSum/float(numEvnts - 1)
     timeSumSec = timeSum*(1./200.)
     print("Average time between event time stamps = " + str(timeSum) + " counts = " + str(timeSumSec) + " seconds")
     
     # Tell the Event PSOC to stop the run
     cmdHeader = mkCmdHdr(0, 0x44, addrEvnt)
     ser.write(cmdHeader)
-    nBytes = 8
-    nPackets = 4
-    print("limitedRun: EOR expecting " + str(nBytes) + " bytes coming back.")
+    print("limitedRun: EOR expecting 8 bytes coming back.")
+    cnt = 0
+    while True:
+        if cnt > 10:
+            readErrors(addrEvnt)
+            break
+        ret = ser.read(1)
+        if cnt%1 == 0:
+            print("limitedRun " + str(cnt) + ": looking for start of trailer. Received byte " + str(ret))
+        if ret == b'\xDC': 
+            ret = ser.read(2)
+            if ret != b'\x00\xFF':
+                print("limitedRun: bad header found: b'\\xdc' " + str(ret)) 
+            nBytes = bytes2int(ser.read(1))
+            print("limitedRun: number of header bytes = " + str(nBytes))
+            if nBytes != 8:
+                print("limitedRun: dumping the bytes for an extra event trigger that came in while ending the run:")
+                for i in range(nBytes+2):
+                    ret = ser.read(1);      
+                    if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
+                ret = ser.read(3)
+                if ret != b'\xFF\x00\xFF':
+                    print("limitedRun: invalid trailer returned: " + str(ret))     
+                continue
+            break               
+        time.sleep(0.1)
+        cnt = cnt + 1       
+    ret = ser.read(1)
+    if ret != b'\x44': print("limitedRun: invalid command echo " + str(ret) + " received for EOR header")
+    ret = ser.read(1)
+    if ret != b'\x00': print("limitedRun: invalid command data bytes " + str(ret) + " received for EOR header")
     byteList = []
-    for i in range(nPackets):
-        if i == 0:
-            ret = ser.read(3)
-            if ret != b'\xDC\x00\xFF':
-                print("limitedRun: invalid header returned: " + str(ret))
-        byteList.append(ser.read())
-        byteList.append(ser.read())
-        byteList.append(ser.read())
+    for i in range(nBytes):
+        ret = ser.read(1)
+        if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
+        byteList.append(ret)
+    ret = ser.read(1)
+    if ret != b'\x01': print("limitedRun: invalid padding byte " + str(ret) + " received for EOR header")
     ret = ser.read(3)
     if ret != b'\xFF\x00\xFF':
-        print("limitedRun: invalid trailer returned: " + str(ret))        
-    if (bytes2int(byteList[0]) != nBytes): print("limitedRun: wrong number " + str(byteList[0].hex()) + " of bytes returned in EOR summary.")  
-    go0 = bytes2int(byteList[3])
-    go1 = bytes2int(byteList[4])
-    go2 = bytes2int(byteList[5])
-    go3 = bytes2int(byteList[6])
+        print("limitedRun: invalid trailer returned: " + str(ret))         
+    go0 = bytes2int(byteList[0])
+    go1 = bytes2int(byteList[1])
+    go2 = bytes2int(byteList[2])
+    go3 = bytes2int(byteList[3])
     cntGo1 = go0*16777216 + go1*65536 + go2*256 + go3
 
-    go0 = bytes2int(byteList[7])
-    go1 = bytes2int(byteList[8])
-    go2 = bytes2int(byteList[9])
-    go3 = bytes2int(byteList[10])
+    go0 = bytes2int(byteList[4])
+    go1 = bytes2int(byteList[5])
+    go2 = bytes2int(byteList[6])
+    go3 = bytes2int(byteList[7])
     cntGo = go0*16777216 + go1*65536 + go2*256 + go3
     
     Sigma = [0.,0.,0.,0.,0.,0.]
@@ -859,7 +914,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True):
     numHitsAvg = numHits/float(numEvnts)
     print("Average number of hits per event = " + str(numHitsAvg))
     sigmaTOF = math.sqrt(TOFavg2 - TOFavg*TOFavg)
-    for ch in range(6):
+    for ch in range(5):
         ADCavg[ch] = ADCavg[ch]/float(numEvnts)
         ADCavg2[ch] = ADCavg2[ch]/float(numEvnts)
         Sigma[ch] = math.sqrt(ADCavg2[ch] - ADCavg[ch]*ADCavg[ch])
@@ -914,8 +969,8 @@ def getChannelCount(channel):
     ser.write(cmdHeader)
     data1 = mkDataByte(channel, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData()
-	# The hardware counter period is 255, not 256, hence the 255 in this expression
+    cmd,cmdData,dataBytes = getData(addrEvnt)
+    # The hardware counter period is 255, not 256, hence the 255 in this expression
     count = (bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1]))*255 + bytes2int(dataBytes[2])
     return count
     
@@ -926,7 +981,7 @@ def getEndOfRunChannelCount(channel):
     ser.write(cmdHeader)
     data1 = mkDataByte(channel, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(addrEvnt)
     count = (bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1]))*255 + bytes2int(dataBytes[2])
     return count
 
@@ -952,7 +1007,7 @@ def getTriggerMask(maskNumber):
     ser.write(cmdHeader)
     data1 = mkDataByte(maskNumber, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(addrEvnt)
     mask = bytes2int(dataBytes[0])
     return mask
     
@@ -1000,7 +1055,7 @@ def readPmtDAC(channel, address):
     ser.write(cmdHeader)
     data1 = mkDataByte(channel, address, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(address)
     if (channel == 5):
         value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     else:
@@ -1010,7 +1065,7 @@ def readPmtDAC(channel, address):
 def triggerEnableStatus():
     cmdHeader = mkCmdHdr(0, 0x3D, addrEvnt)
     ser.write(cmdHeader)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(addrEvnt)
     return bytes2int(dataBytes[0])        
 
 # Load a 12-bit DAC for the TOF threshold
@@ -1043,7 +1098,7 @@ def readTofDAC(channel, address):
     #print("readTofDAC: data = " + str(data1))
     ser.write(data1)
     time.sleep(0.1)
-    cmd,cmdBytes,dataBytes = getData()
+    cmd,cmdBytes,dataBytes = getData(address)
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     #print("value="+str(value))
     return value
@@ -1054,7 +1109,7 @@ def readBusVoltage(i2cAddress, PSOCaddress):
     ser.write(cmdHeader)
     data1 = mkDataByte(i2cAddress, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(PSOCaddress)
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     #print("value="+str(value))
     return (value * 1.25)/1000.
@@ -1065,7 +1120,7 @@ def readCurrent(i2cAddress, address):
     ser.write(cmdHeader)
     data1 = mkDataByte(i2cAddress, address, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(address)
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     #print("value="+str(value))
     return (value * 0.03)
@@ -1074,7 +1129,7 @@ def readCurrent(i2cAddress, address):
 def readTemperature(address):
     cmdHeader = mkCmdHdr(0, 0x22, address)
     ser.write(cmdHeader)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(address)
     value = bytes2int(dataBytes[0] + dataBytes[1]) >> 4
     #print("value="+str(value))
     return (value*0.0625)
@@ -1103,7 +1158,7 @@ def readBarometerReg(regAddress, PSOCaddress):
     ser.write(cmdHeader)
     data1 = mkDataByte(regAddress, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(PSOCaddress)
     #print("readBarometerReg: byte = " + str(binascii.hexlify(byte1)))
     return bytes2int(dataBytes[0])
     
@@ -1113,7 +1168,7 @@ def readRTCregister(regAddress, PSOCaddress):
     ser.write(cmdHeader)
     data1 = mkDataByte(regAddress, PSOCaddress, 1)
     ser.write(data1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(PSOCaddress)
     #print("readRTCregister: byte = " + str(binascii.hexlify(dataBytes[0])))
     return dataBytes[0]
 
@@ -1162,83 +1217,57 @@ def setRTCtime(address):
 # Set the PSOC internal Real-Time-Clock according to the current time and date
 def setInternalRTC(address):
     now = time.localtime()
-    print("setInternalRTC: " + str(now))
+    print("setInternalRTC for PSOC " + str(address) + ": " + str(now))
     cmdHeader = mkCmdHdr(10, 0x45, address)
     #print("command header x45 10 for address=" + str(address) + "  is " + str(cmdHeader))
     ser.write(cmdHeader)
     data1 = mkDataByte(now.tm_sec, address, 1)
-    #print("data1 for " + str(now.tm_sec) + " is " + str(data1))
+    #print("data1= " + str(now.tm_sec))
     ser.write(data1)
     data2 = mkDataByte(now.tm_min, address, 2)
     ser.write(data2)
-    #print("data2=" + str(now.tm_min))
+    #print("data2= " + str(now.tm_min))
     data3 = mkDataByte(now.tm_hour, address, 3)
+    #print("data3= " + str(now.tm_hour))
     ser.write(data3)
     data4 = mkDataByte(now.tm_wday+1, address, 4)
+    #print("data4= " + str(now.tm_wday+1))
     ser.write(data4)
     data5 = mkDataByte(now.tm_mday, address, 5)
     ser.write(data5)
+    #print("data5= " + str(now.tm_mday))
     dayOfYear = now.tm_yday
     data6 = mkDataByte(dayOfYear//256, address, 6)
+    #print("data6= " + str(dayOfYear//256))
     ser.write(data6)
     data7 = mkDataByte(dayOfYear%256, address, 7)
     ser.write(data7)
+    #print("data7= " + str(dayOfYear%256))
     data8 = mkDataByte(now.tm_mon, address, 8)
-    #print("data8=" + str(now.tm_mon))
+    #print("data8= " + str(now.tm_mon))
     ser.write(data8)
     year = now.tm_year
-    #print("year=" + str(now.tm_year))
-    data9 = mkDataByte(year//256, address, 9)
+    yearHigh = year//256
+    #print("data9= " + str(yearHigh))
+    data9 = mkDataByte(yearHigh, address, 9)
     ser.write(data9)
-    data10 = mkDataByte(year%256, address, 10)
+    yearLow = year%256
+    #print("data10= " + str(yearLow))
+    data10 = mkDataByte(yearLow, address, 10)
     ser.write(data10)
-    time.sleep(2)
+    time.sleep(1)
     
 def getInternalRTC(address):
+    print("getInternalRTC: reading the internal real-time-clock for PSOC address " + str(address))
     cmdHeader = mkCmdHdr(0, 0x46, address)
     ser.write(cmdHeader)
-    time.sleep(0.1)
-    ret = b''
-    for i in range(36):
-        ret = ser.read(1)
-        #print("getInternalRTC: incoming byte = " + str(ret))
-        if ret == b'\xDC': break
-    if ret != b'\xDC':
-        print("getInternalRTC: no data header found")
-        return
-    ret = ser.read(2)
-    if ret != b'\x00\xFF': 
-        print("getInternalRTC: incorrect header returned: '\\xDC' " + str(ret)) 
-    ret = ser.read(1)
-    nData = bytes2int(ret)
-    #print("getInternalRTC: expecting " + str(nData) + " bytes of data.")
-    ser.read(2)
-    #ret = ser.read(3)
-    #if ret != b'\xFF\x00\xFF':
-    #    print("getInternalRTC: invalid trailer returned: " + str(ret))
-    nPackets = 4
-    byteList = []
-    for ipkt in range(nPackets):
-        #ret = ser.read(3)
-        #print(str(ret))
-        #if ret != b'\xDC\x00\xFF': 
-        #    print("getInternalRTC " + str(ipkt) + ": incorrect header returned: " + str(ret)) 
-        byte = ser.read(1)
-        #print(str(byte))
-        byteList.append(bytes2int(byte))
-        byte = ser.read(1)
-        #print(str(byte))
-        byteList.append(bytes2int(byte))
-        byte = ser.read(1)
-        #print(str(byte))
-        byteList.append(bytes2int(byte))
-    ret = ser.read(3)
-    #print(str(ret))
-    if ret != b'\xFF\x00\xFF':
-        print("getInternalRTC " + str(ipkt) + ": invalid trailer returned: " + str(ret))
+    time.sleep(0.5)
+    cmd,cmdData,byteList = getData(address)
+    #print("getInternalRTC: command = " + str(bytes2int(cmd)) + " decimal, " + str(cmd.hex()) + " hex")
 
-    #for i in range(10):
-    #    print("    Byte " + str(i) + " is " + str(byteList[i]))    
+    for i in range(10):
+        #print("getInternalRTC:    Byte " + str(i) + " is " +  str(bytes2int(byteList[i])) + " decimal, " + str(byteList[i].hex()) + " hex")   
+        byteList[i] = bytes2int(byteList[i])
     year = byteList[8]*256 + byteList[9]
     month = byteList[7]
     if month > 12: month = 1
@@ -1261,7 +1290,7 @@ def setInternalRTCfromI2C():
     cmdHeader = mkCmdHdr(0, 0x47, addrMain)
     ser.write(cmdHeader)
     print("setInternalRTCfromI2C: setting the internal Main PSOC RTC from the i2c RTC")
-    time.sleep(2)
+    time.sleep(1)
 
 # Read and print out the current time date, from the onboard i2c-bus Real-Time-Clock
 def readRTCtime(address):
@@ -1292,7 +1321,7 @@ def readRTCtime(address):
 def readErrors(address):
     cmdHeader = mkCmdHdr(0, 0x03, address)
     ser.write(cmdHeader)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(0)
     nData = len(dataBytes)
     if nData == 3 and bytes2int(dataBytes[0])==0:
         print("readErrors for PSOC address " + str(address) + ": no errors encountered.")
@@ -1313,7 +1342,7 @@ def readBackplaneVoltage():
     cmdHeader = mkCmdHdr(0, 0x25, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(address)
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     return value/1000.
 
@@ -1323,7 +1352,7 @@ def readBatteryVoltage():
     cmdHeader = mkCmdHdr(0, 0x25, addrEvnt)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(addrEvnt)
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     print("readBatteryVoltage: result = " + str(value) + " mV")
     return value/1000.
@@ -1332,7 +1361,7 @@ def readNumTOF(address):
     cmdHeader = mkCmdHdr(0, 0x34, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(address)
     valueA = bytes2int(dataBytes[0])
     print("readNumTOF: channel-A TOF pointer = " + str(valueA))
     valueB = bytes2int(dataBytes[1])
@@ -1343,7 +1372,7 @@ def readSAR_ADC(address):
     cmdHeader = mkCmdHdr(0, 0x33, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(address)
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     return value*3.3/4096.
 
@@ -1351,7 +1380,7 @@ def readAllTOFdata(address):
     cmdHeader = mkCmdHdr(0, 0x40, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(address)
     nA = bytes2int(dataBytes[0])
     print("readAllTOFdata: number of A-channel hits = " + str(nA))
     nB = bytes2int(dataBytes[1])     
@@ -1430,14 +1459,14 @@ def readTofConfig():
     cmdHeader = mkCmdHdr(0, 0x0E, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(address)
     for i in range(len(dataBytes)):
         ret = dataBytes[i]
         print("Byte "+str(i)+" returned by SPI from the TOF chip config reg: " + str(binascii.hexlify(ret)))  
 
 # Receive and check the echo from a tracker command
 def getTkrEcho():
-    cmd,cmdData,dataBytes = getData()
+    cmd,cmdData,dataBytes = getData(addrEvnt)
     cmdCount = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     #print("getTkrEcho: command count = " + str(cmdCount))
     cmdCode = dataBytes[2]
@@ -1536,7 +1565,6 @@ def tkrAsicSoftReset(ASICaddress):
     if (str(binascii.hexlify(echo)) != "b'0c'"):
         print("tkrConfigReset: incorrect echo received (" + str(binascii.hexlify(echo)) + "), should be b'0c'")   
 
-# Set the tracker trigger end status
 def tkrSetDualTrig(FPGAaddress,value):
     if value != 0 and value != 1:
         print("tkrSetDualTrig: invalid value " + str(value) + " supplied")
@@ -1599,7 +1627,7 @@ def tkrAsicPowerOn():
 
 # Get housekeeping data sent back from the tracker
 def getTkrHousekeeping():
-    command,cmdDataBytes,dataBytes = getData()
+    command,cmdDataBytes,dataBytes = getData(addrEvnt)
     return dataBytes
 
 def tkrGetCodeVersion(FPGA):

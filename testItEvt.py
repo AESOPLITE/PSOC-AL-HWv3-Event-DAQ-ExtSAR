@@ -9,7 +9,7 @@ from PSOC_cmd import *
 
 asicReset = True
 
-portName = "COM7"
+portName = "COM11"
 openCOM(portName)
 
 print("Entering testItEvt.py")
@@ -20,23 +20,18 @@ address = 8   # Address of the event PSOC
 #time.sleep(1)
 #LED2("off", address)
 
-#setInternalRTC(address)
-#time.sleep(0.1)
+setInternalRTC(address)
+#time.sleep(1)
 getInternalRTC(address)
 
-setTofDAC(1, 64, address)   
-setTofDAC(2, 64, address)
+setTofDAC(1, 96, address)   
+setTofDAC(2, 96, address)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
-pmtThresh = [6,6,6,6,90]
-ch5Thresh = pmtThresh[4]
-print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
-setPmtDAC(5, ch5Thresh, address)
-
-print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
-time.sleep(0.2)
-print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
+pmtThr = 20
+ch5Thresh = 90
+pmtThresh = [pmtThr,pmtThr,pmtThr,pmtThr,ch5Thresh]
 for chan in range(1,5):
     setPmtDAC(chan, pmtThresh[chan-1], addrEvnt)
     time.sleep(0.1)
@@ -45,7 +40,7 @@ for chan in range(1,5):
 print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
 setPmtDAC(5, ch5Thresh, address)
 print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
-
+#sys.exit("abort")
 readTofConfig()
 #sys.exit("abort")
 
@@ -63,19 +58,19 @@ if nBoards > 0:
     tkrConfigReset(0x00)
 
     tkrSetNumLyrs(nBoards)
-
     for brd in boards:
         print("The number of tracker readout layers is " + str(bytes2int(tkrGetNumLyrs(brd))) + " for board " + str(brd))
         print("The tracker FPGA firmware code version is " + str(tkrGetCodeVersion(0)) + " for board " + str(brd))
 
-    if asicReset: tkrAsicPowerOn()
+    tkrAsicPowerOn()
+    #time.sleep(1)
 
     if asicReset: tkrAsicHardReset(0x1F)
 
     if asicReset: tkrAsicSoftReset(0x1F)
 
     calibrateAllFPGAinputTiming()
-		
+        
     tkrTrigEndStat(1, 1)
     tkrTrigEndStat(0, 1)
     tkrSetDualTrig(0, 0)
@@ -144,7 +139,7 @@ if nBoards > 0:
         tkrSetDAC(brd, 31, "calibration", 20 , "high")
         tkrGetDAC(brd, 3, "calibration")
 
-        tkrSetDAC(brd, 31, "threshold", 21 , "low")
+        tkrSetDAC(brd, 31, "threshold", 22 , "low")
         tkrGetDAC(brd, 3, "threshold")
 
         tkrSetDataMask(brd, 31, "unmask", [])
@@ -183,7 +178,7 @@ prescale = 4
 print("Setting the PMT trigger prescale to " + str(prescale))
 setTriggerPrescale("PMT", prescale)
 
-setTriggerWindow(24)
+setSettlingWindow(72)
 
 mask = 0x00    # T1, T3 prescaled
 print("Setting the second trigger mask to " + str(mask))
@@ -194,7 +189,7 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
 for brd in boards:
-    tkrSetDAC(brd, 31, "threshold", 9 , "low")
+    tkrSetDAC(brd, 31, "threshold", 20 , "low")
     tkrGetDAC(brd, 3, "threshold")
 
 for i in range(1):
@@ -206,14 +201,14 @@ print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
-ADC, Sigma, TOF, sigmaTOF = limitedRun(47, 4, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 10000, True, False, True)
+
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
 print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
 print("    T3 = " + str(ADC[2]) + " +- " + str(Sigma[2]))
 print("    T4 = " + str(ADC[3]) + " +- " + str(Sigma[3]))
 print("     G = " + str(ADC[4]) + " +- " + str(Sigma[4]))
-print("    Ex = " + str(ADC[5]) + " +- " + str(Sigma[5]))
 print("    TOF = " + str(TOF) + " +- " + str(sigmaTOF))
 chName = ["G","T3","T1","T4","T2"]
 for ch in range(5):
