@@ -25,7 +25,7 @@
  *
  * V5 DO NOT USE A VERSION earlier than this with Production Main PSOC code
  *    P6[5] changed from Sclk output to input of Backplane activiity signal
- *    SCLK for Main PSOC routed instead to the SCLK3 pin P4[2]
+ *    SCLK for Main PSOC routed instead to the SCLK3 pin P4[2] -Brian Lucas
  * V4 This firmware version uses the external SAR ADCs for pulse-height analysis
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
  *              T3        G        T4        T1        T2       

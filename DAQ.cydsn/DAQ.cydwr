@@ -1204,6 +1204,7 @@
       <Data key="8f0ca3c6-3c42-4fa1-bea9-f9841be328b8" value="Pin_36" />
       <Data key="8ff9ac08-2777-4628-907a-7dac270e4b30" value="Pin_23" />
       <Data key="9a0d5e5f-8715-4cdb-aa8f-f56fb7e42526" value="Pin_21" />
+      <Data key="9e4020de-245a-48de-960b-54481dd60946" value="Pin_SCLK3_Main" />
       <Data key="9f1ff071-4240-4fe1-8791-2439191b1e64" value="Pin_25" />
       <Data key="15b43a2c-3cff-4ca2-93e5-79ccf4055109" value="Pin_7" />
       <Data key="26e21c71-57a0-4a9e-b31c-e30a3d625b5f" value="Pin_4" />
@@ -1231,7 +1232,7 @@
       <Data key="22863ebe-a37b-476f-b252-6e49a8c00b12" value="SDA_2" />
       <Data key="34275bec-0299-4bd0-8bb4-f7006859b59a" value="Pin_13" />
       <Data key="73610cd1-cf98-4d8e-bd5c-43266a1b5d2d" value="Pin_10" />
-      <Data key="96106eab-7a58-4167-8162-e46ed5b85c57" value="Pin_24" />
+      <Data key="96106eab-7a58-4167-8162-e46ed5b85c57" value="Pin_nBackplaneDataReady" />
       <Data key="97137da3-32c9-4c4d-a8b7-cb1310f2b3fe" value="Pin_3" />
       <Data key="1425177d-0d0e-4468-8bcc-e638e5509a9b" value="Rx_1" />
       <Data key="5385387d-9d48-4582-9bdc-aada0169e806" value="Pin_11" />
@@ -4507,6 +4508,11 @@
     <Group key="9a0d5e5f-8715-4cdb-aa8f-f56fb7e42526">
       <Group key="0">
         <Data key="Port Format" value="12,5" />
+      </Group>
+    </Group>
+    <Group key="9e4020de-245a-48de-960b-54481dd60946">
+      <Group key="0">
+        <Data key="Port Format" value="4,2" />
       </Group>
     </Group>
     <Group key="9f1ff071-4240-4fe1-8791-2439191b1e64">
