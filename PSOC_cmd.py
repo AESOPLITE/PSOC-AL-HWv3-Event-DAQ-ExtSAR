@@ -123,12 +123,12 @@ def getData(address):
     for i in range(nCmdBytes):
         ret = ser.read(1)
         cmdDataBytes.append(ret)
-        if debug: print("getData: command byte " + str(i) + ": " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
+        if debug: print("getData: command data byte " + str(i) + ": " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
     dataBytes = []
     for i in range(dataLength):
         ret = ser.read(1)
         dataBytes.append(ret)
-        if debug: print("getData: data byte " + str(i) + ": " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
+        if debug: print("getData: output data byte " + str(i) + ": " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
     for i in range(nPadding):
         ret = ser.read(1)
         if debug: print("getData: padding byte " + str(i) + ": " + str(ret))
@@ -700,13 +700,16 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         print("limitedRun: reading event " + str(event) + " of run " + str(runNumber))
         ret = ser.read(1)
         nData = bytes2int(ret)
-        ser.read(2)
+        ret = ser.read(1)
+        print("   Data type ID is " + str(ret.hex()))
+        ret = ser.read(1)
+        if bytes2int(ret) != 0: print("   Bad number of command data bytes = " + str(bytes2int(ret)))
         R = nData % 3
         nPackets = int(nData/3)
         if (R != 0): nPackets = nPackets + 1
         dataList = []
         byteList = []
-        if verbose: print("limitedRun: reading " + str(nData) + " data bytes in " + str(nPackets) + " packets")
+        if verbose: print("   Reading " + str(nData) + " data bytes in " + str(nPackets) + " packets")
         #if event == 0:   # Read the command echo
         #    ret = ser.read(2)
         #    print("limitedRun: echo of the run number = " + str(bytes2int(ret)))
@@ -1026,6 +1029,7 @@ def setOutputMode(mode):
 # Set the threshold for the DAC of a PMT channel
 def setPmtDAC(channel, value, address):
     if channel > 5 or channel < 1: return 1
+    print("setPmtDAC: setting PMT DAC to " + str(value) + " for channel " + str(channel))
     byte2 = (value & 0x0f00) >> 8
     byte1 = (value & 0x00FF) 
     if (channel < 5): nData = 2

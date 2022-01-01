@@ -1698,14 +1698,16 @@ int main(void)
         if (nDataReady > 0 || cmdDone) {
             if (nDataReady > 0) {    // Send out a command echo only if there are also data to send
                 dataLED(true);
-                dataPacket[3] = nDataReady + nDataBytes;
-                uint16 nPadding = 3 - (nDataBytes + nDataReady)%3;
-                if (nPadding == 3) nPadding = 0;
                 if (!cmdDone) { // Output is event data, not a command response
-                    dataPacket[4] = 0xDD;
+                    if (debugTOF) dataPacket[4] = 0xDB;
+                    else dataPacket[4] = 0xDD;
+                    nDataBytes = 0;   // Set to zero just in case a value is still hanging around in this variable
                 } else {              // Output directly responding to a command
                     dataPacket[4] = command;               
                 }
+                dataPacket[3] = nDataReady + nDataBytes;
+                uint16 nPadding = 3 - (nDataBytes + nDataReady)%3;
+                if (nPadding == 3) nPadding = 0;
                 dataPacket[5] = nDataBytes;
                 // Header data packet:
                 // 0xDC
@@ -1714,17 +1716,16 @@ int main(void)
                 // data record length
                 // command echo
                 // number command data bytes
+                if (outputMode != USBUART_OUTPUT) set_SPI_SSN(SSN_Main, false);
                 if (outputMode == USBUART_OUTPUT) {  // Output the header
                     if (USBUART_GetConfiguration() != 0u) {
                         while(USBUART_CDCIsReady() == 0u);
                         USBUART_PutData(dataPacket, 6);  
                     }
                 } else {
-                    set_SPI_SSN(SSN_Main, false);
                     for (int i=0; i<6; ++i) {
                         SPIM_WriteTxData(dataPacket[i]);
                     }
-                    set_SPI_SSN(SSN_None, false);
                 }
                 if (nDataBytes > 0) {
                     if (outputMode == USBUART_OUTPUT) {  // Output the command data echo
@@ -1733,11 +1734,9 @@ int main(void)
                             USBUART_PutData(cmdData, nDataBytes);
                         }
                     } else {
-                        set_SPI_SSN(SSN_Main, false);
                         for (int i=0; i<nDataBytes; ++i) {
                             SPIM_WriteTxData(cmdData[i]);
                         }
-                        set_SPI_SSN(SSN_None, false);  
                     }
                 }
                 if (outputMode == USBUART_OUTPUT) {    // output the data 
@@ -1770,7 +1769,6 @@ int main(void)
                         Control_Reg_ScopeTrg_Write(0x01);   // Scope trigger for debugging
                         madeItToTheEnd = false;
                     }
-                    set_SPI_SSN(SSN_Main, false);
                     for (int i=0; i<nDataReady; ++i) {
                         SPIM_WriteTxData(dataOut[i]);
                     }
@@ -1780,8 +1778,8 @@ int main(void)
                     for (int i=6; i<9; ++i) {
                         SPIM_WriteTxData(dataPacket[i]);
                     }
-                    set_SPI_SSN(SSN_None, false);
                 }
+                set_SPI_SSN(SSN_None, false);
                 nDataReady = 0;
                 if (eventDataReady) {   // re-enable the trigger after event data has been output
                     if (!endingRun) triggerEnable(true);
