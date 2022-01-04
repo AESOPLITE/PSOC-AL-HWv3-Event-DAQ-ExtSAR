@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define VERSION 5
+#define VERSION 6
 
 /*=========================================================================
  *
@@ -619,6 +619,30 @@ int getTrackerBoardTriggerData(uint8 FPGA) {
     return rc;
 }
 
+void makeDummyHitList(int brd, uint8 code) {
+    tkrData.boardHits[brd].nBytes = 5;                      // Minimum length of a board hit list
+    tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
+    if (tkrData.boardHits[brd].hitList != NULL) {
+        tkrData.boardHits[brd].hitList[0] = 0xE7;           // Identifier
+        tkrData.boardHits[brd].hitList[1] = brd;            // Layer number
+        tkrData.boardHits[brd].hitList[2] = 1;              // Trigger count set to 0, error bit set to 1
+        tkrData.boardHits[brd].hitList[3] = (0x0F & code);  // 4 bits for 0 ASICs plus 4 bits of the CRC
+        tkrData.boardHits[brd].hitList[4] = 0x30;           // 2 bits of the CRC set to 0, then 11, then 0 filler nibble
+                                                            // The CRC is wrong and will get flagged. The code that
+                                                            // replaced the CRC indicates why this dummy was inserted.
+    }
+}
+
+void makeDummyTkrEvent(uint8 trgCnt, uint8 cmdCnt, uint8 trgPtr, uint8 code) {
+    tkrData.triggerCount = trgCnt;  // Send back a packet that won't cause a crash down the road
+    tkrData.cmdCount = cmdCnt;
+    tkrData.trgPattern = trgPtr;
+    tkrData.nTkrBoards = numTkrBrds;
+    for (int brd=0; brd<numTkrBrds; ++brd) {  // Make a default empty ASIC hit list
+        makeDummyHitList(brd, code);
+    }
+}
+
 // Function to get a full data packet from the Tracker.
 int getTrackerData(uint8 idExpected) {
     int rc = 0;
@@ -629,21 +653,7 @@ int getTrackerData(uint8 idExpected) {
         if (idExpected != 0) {
             addError(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
             if (idExpected == TKR_EVT_DATA) {
-                tkrData.triggerCount = 0;  // Send back a packet that won't cause a crash down the road
-                tkrData.cmdCount = 0;
-                tkrData.trgPattern = 0;
-                tkrData.nTkrBoards = numTkrBrds;
-                for (int brd=0; brd<numTkrBrds; ++brd) {  // Make a default empty ASIC hit list
-                    tkrData.boardHits[brd].nBytes = 5;
-                    tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
-                    if (tkrData.boardHits[brd].hitList != NULL) {
-                        tkrData.boardHits[brd].hitList[0] = 0xE7;
-                        tkrData.boardHits[brd].hitList[1] = brd;
-                        tkrData.boardHits[brd].hitList[2] = 0;
-                        tkrData.boardHits[brd].hitList[3] = 0x01;
-                        tkrData.boardHits[brd].hitList[4] = 0x30;
-                    }
-                }
+                makeDummyTkrEvent(0, 0, 0, 0);
                 return 54;
             }
         } else {
@@ -656,75 +666,36 @@ int getTrackerData(uint8 idExpected) {
     if (IDcode == TKR_EVT_DATA) {         // Event data
         if (len != 5) {           // Formal check
             addError(ERR_TKR_BAD_LENGTH, IDcode, len);
-            tkrData.triggerCount = 0;  // Send back a packet that won't cause a crash down the road
-            tkrData.cmdCount = 0;
-            tkrData.trgPattern = 0;
-            tkrData.nTkrBoards = numTkrBrds;
-            for (int brd=0; brd<numTkrBrds; ++brd) {  // Make a default empty ASIC hit list
-                tkrData.boardHits[brd].nBytes = 5;
-                tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
-                if (tkrData.boardHits[brd].hitList != NULL) {
-                    tkrData.boardHits[brd].hitList[0] = 0xE7;
-                    tkrData.boardHits[brd].hitList[1] = brd;
-                    tkrData.boardHits[brd].hitList[2] = 0;
-                    tkrData.boardHits[brd].hitList[3] = 0x02;
-                    tkrData.boardHits[brd].hitList[4] = 0x30;
-                }
-            }
+            makeDummyTkrEvent(0, 0, 0, 1);  // Send back a packet that won't cause a crash down the road
             return 55;
         }
-        tkrData.triggerCount = ((uint16)tkr_getByte(startTime, 3) & 0x00FF) << 8;
-        tkrData.triggerCount = tkrData.triggerCount | ((uint16)tkr_getByte(startTime, 4) & 0x00FF);
-        tkrData.cmdCount = tkr_getByte(startTime, 5);
+        uint8 trgCnt = ((uint16)tkr_getByte(startTime, 3) & 0x00FF) << 8;
+        trgCnt = trgCnt | ((uint16)tkr_getByte(startTime, 4) & 0x00FF);
+        uint8 cmdCnt = tkr_getByte(startTime, 5);
         uint8 nBoards = tkr_getByte(startTime, 6);
-        tkrData.trgPattern = nBoards & 0xC0;
+        uint8 trgPtr = nBoards & 0xC0;
         nBoards = nBoards & 0x3F;
         if (nBoards != numTkrBrds) {
             addError(ERR_TKR_NUM_BOARDS, nBoards, tkrData.trgPattern);
-            nBoards = numTkrBrds;
-            tkrData.nTkrBoards = nBoards;
-            for (int brd=0; brd<nBoards; ++brd) {  // Make a default empty ASIC hit list
-                tkrData.boardHits[brd].nBytes = 5;
-                tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
-                if (tkrData.boardHits[brd].hitList != NULL) {
-                    tkrData.boardHits[brd].hitList[0] = 0xE7;
-                    tkrData.boardHits[brd].hitList[1] = brd;
-                    tkrData.boardHits[brd].hitList[2] = 0;
-                    tkrData.boardHits[brd].hitList[3] = 0x03;
-                    tkrData.boardHits[brd].hitList[4] = 0x30;
-                }
-            }
+            makeDummyTkrEvent(trgCnt, cmdCnt, trgPtr, 2);
             return 56;
         }
+        tkrData.triggerCount = trgCnt;
+        tkrData.cmdCount = cmdCnt;
+        tkrData.trgPattern = trgPtr;
         tkrData.nTkrBoards = nBoards;
         for (int brd=0; brd < nBoards; ++brd) {
             uint8 nBrdBytes = tkr_getByte(startTime, 7);  // Length of the hit list, in bytes
             if (nBrdBytes < 4) {
                 addError(ERR_TKR_BOARD_SHORT, nBrdBytes, brd);
-                tkrData.boardHits[brd].nBytes = 5;
-                tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
-                if (tkrData.boardHits[brd].hitList != NULL) {
-                    tkrData.boardHits[brd].hitList[0] = 0xE7;
-                    tkrData.boardHits[brd].hitList[1] = brd;
-                    tkrData.boardHits[brd].hitList[2] = 0;
-                    tkrData.boardHits[brd].hitList[3] = 0x04;
-                    tkrData.boardHits[brd].hitList[4] = 0x30;
-                }
+                makeDummyHitList(brd, 4);
                 rc = 57;
                 continue;
             }
             uint8 IDbyte = tkr_getByte(startTime, 8);     // Hit list identifier, should always be 11100111
             if (IDbyte != 0xE7) {
                 addError(ERR_TKR_BAD_BOARD_ID, IDbyte, brd);
-                tkrData.boardHits[brd].nBytes = 5;
-                tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
-                if (tkrData.boardHits[brd].hitList != NULL) {
-                    tkrData.boardHits[brd].hitList[0] = 0xE7;
-                    tkrData.boardHits[brd].hitList[1] = brd;
-                    tkrData.boardHits[brd].hitList[2] = 0;
-                    tkrData.boardHits[brd].hitList[3] = 0x05;
-                    tkrData.boardHits[brd].hitList[4] = 0x30;
-                }
+                makeDummyHitList(brd, 5);
                 rc = 58;
                 continue;
             }
@@ -743,7 +714,7 @@ int getTrackerData(uint8 idExpected) {
                 tkrData.boardHits[lyr].nBytes = nBrdBytes;
             }
             tkrData.boardHits[lyr].hitList = (uint8*) malloc(nBrdBytes);
-            if (tkrData.boardHits[lyr].hitList == NULL) {
+            if (tkrData.boardHits[lyr].hitList == NULL) {   // Ran out of heap memory. Not good!
                 addError(ERR_TKR_NO_MEMORY, nBrdBytes-2, brd);
                 rc = 60;
                 continue;
@@ -1486,21 +1457,7 @@ int main(void)
                 }
                 tkrLED(false);
             } else {   // Make up an empty tracker event if no data were ready
-                tkrData.triggerCount = 0;  
-                tkrData.cmdCount = 0;
-                tkrData.trgPattern = 0;
-                tkrData.nTkrBoards = numTkrBrds;
-                for (int brd=0; brd<numTkrBrds; ++brd) {  
-                    tkrData.boardHits[brd].nBytes = 5;
-                    tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
-                    if (tkrData.boardHits[brd].hitList != NULL) {
-                        tkrData.boardHits[brd].hitList[0] = 0xE7;
-                        tkrData.boardHits[brd].hitList[1] = brd;
-                        tkrData.boardHits[brd].hitList[2] = 0;
-                        tkrData.boardHits[brd].hitList[3] = 0x06;  // A bad CRC will get flagged to indicate the error!
-                        tkrData.boardHits[brd].hitList[4] = 0x30;
-                    }
-                }
+                makeDummyTkrEvent(0, 0, 0, 6);
             }
             
             // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
@@ -1637,16 +1594,33 @@ int main(void)
                 nDataReady = 40;
             }
             for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
-                if (nDataReady > MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
+                // Min. # bytes needed: board address, hitlist length, hitlist, 4-byte trailer
+                if (nDataReady >= MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
+                    // There is no room for this tracker board's data, but see if we can fit in an empty dummy readout
+                    if (nDataReady < MAX_DATA_OUT - 10) {
+                        //dataOut[nDataReady++] = brd;
+                        dataOut[nDataReady++] = 5;       // Number of bytes in the (empty) board hit list
+                        dataOut[nDataReady++] = 0xE7;    // Identifier byte for the hit list
+                        dataOut[nDataReady++] = brd;     // Board FPGA address (normally also the layer number)
+                        dataOut[nDataReady++] = 0;       // Event tag plus error flag, all set to zero
+                        dataOut[nDataReady++] = 0x09;    // Number of chips reporting (0) plus first 4 bits of CRC   
+                        dataOut[nDataReady++] = 0x30;    // 2 more CRC bits, set to 0, followed by 11, followed by 0 to byte boundary
+                        continue;
+                    }
+                    if (debugTOF) {
+                        dataOut[49] = brd;
+                    } else {
+                        dataOut[39] = brd;
+                    }
                     addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
-                    break;
+                    break;  // We're really out of space. The event will be truncated.
                 }
-                dataOut[nDataReady++] = brd;
-                if (tkrData.boardHits[brd].hitList == NULL) {
+                //dataOut[nDataReady++] = brd;  // this was redundant, not needed
+                if (tkrData.boardHits[brd].hitList == NULL) {  // In case the heap memory ran out. . .
                     dataOut[nDataReady++] = 5;
                     dataOut[nDataReady++] = 0xE7;
                     dataOut[nDataReady++] = brd;
-                    dataOut[nDataReady++] = 0;
+                    dataOut[nDataReady++] = 1;
                     dataOut[nDataReady++] = 0x07;   // A bad CRC will flag this error
                     dataOut[nDataReady++] = 0x30;
                 } else {
@@ -2187,7 +2161,7 @@ int main(void)
                                         addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
                                         break;
                                     }
-                                    dataOut[nDataReady++] = brd;
+                                    //dataOut[nDataReady++] = brd;
                                     dataOut[nDataReady++] = tkrData.boardHits[brd].nBytes;
                                     for (int b=0; b<tkrData.boardHits[brd].nBytes; ++b) {
                                         dataOut[nDataReady++] = tkrData.boardHits[brd].hitList[b];

@@ -625,12 +625,12 @@ def readCalEvent(trgTag, verbose):
     iPtr = 4
     numBoards = bytes2int(dataList[iPtr])
     if numBoards != 1: print("readCalEvent: wrong number of boards " + str(numBoards) + " in calibration event")
-    iPtr = iPtr + 1
-    brdNum = bytes2int(dataList[iPtr])
+    #iPtr = iPtr + 1
+    #brdNum = bytes2int(dataList[iPtr])
     iPtr = iPtr + 1
     nBytes = bytes2int(dataList[iPtr])
     iPtr = iPtr + 1
-    print(" Hit list from tracker board " + str(brdNum) + " with " + str(nBytes) + " bytes:")
+    print(" Hit list from tracker board with " + str(nBytes) + " bytes:")
     hitList = []
     for hit in range(nBytes):
         #print("                      " + str(hit) + "  " + hex(dataList[iPtr]))
@@ -793,15 +793,14 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             if debugTOF: print("        REF-A=" + str(tofA) + "  REF-B=" + str(tofB))
             if debugTOF: print("        TOF clkA=" + str(clkA) + "  TOF clkB=" + str(clkB))
             print("        Trigger status = " + str(hex(trgStatus)))
-            print("      Number of tracker layers read out = " + str(nTkrLyrs))           
+            print("        Number of tracker layers read out = " + str(nTkrLyrs))           
             FPGAs = []
             stripHits = []
             for brd in range(nTkrLyrs):
-                brdNum = dataList[iPtr]
-                iPtr = iPtr + 1
+                ##brdNum = dataList[iPtr]
+                ##iPtr = iPtr + 1
                 nBytes = dataList[iPtr]
                 iPtr = iPtr + 1
-                #print("           " + str(brd) + " Hit list from tracker board " + str(brdNum) + " with " + str(nBytes) + " bytes:")
                 hitList = []
                 for hit in range(nBytes):
                     #print("                      " + str(hit) + "  " + hex(dataList[iPtr]))
