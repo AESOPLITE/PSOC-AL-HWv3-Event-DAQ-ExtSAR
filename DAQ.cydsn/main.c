@@ -493,7 +493,7 @@ void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
         Pin_SSN_A0_Write(0); //Zero this address bit, consider using CyPins_ClearPin -B
         Pin_SSN_A1_Write(0); //Zero this address bit
         Pin_SSN_A2_Write(0); //Zero this address bit
-        Pin_SSN_Main_Write(1); //High to deselect Main PSOC , consider using CyPins_SetPin -B -B
+        Pin_SSN_Main_Write(1); //High to deselect Main PSOC , consider using CyPins_SetPin -B
         CyExitCriticalSection(InterruptState);
     }
     else if ( SSN_Main == SSN)// Select Main
@@ -651,7 +651,7 @@ void grayCodeSSADC( uint8 stateSSADC )
 // Control of the trigger enable bit. The TOF chip can be turned off while the trigger is disabled (but that
 // feature is commented out).
 void triggerEnable(bool enable) {
-    uint8 regValue = Control_Reg_Trg_Read() & ~triggerEnable_Mask;
+//    uint8 regValue = Control_Reg_Trg_Read() & ~triggerEnable_Mask;
     if (enable) {
         //Reset the TOF chip time reference. It also gets reset every 5 ms by interrupt.
         //Control_Reg_Pls_Write(PULSE_TOF_RESET);
@@ -662,10 +662,12 @@ void triggerEnable(bool enable) {
         //writeTOFdata(0x05);
         
         // Enable the master trigger
-        Control_Reg_Trg_Write(regValue | triggerEnable_Mask);  
+//        Control_Reg_Trg_Write(regValue | triggerEnable_Mask);  
+        Control_Reg_Trg_Write(1);  //just set it since 1 bit control -B
     } else {
         // Disable the master trigger
-        Control_Reg_Trg_Write(regValue);
+//        Control_Reg_Trg_Write(regValue);
+        Control_Reg_Trg_Write(0);
         
         // Stop the TOF chip acquisition by disabling both channels
         //set_SPI_SSN(SSN_TOF, true);
@@ -1301,6 +1303,11 @@ int main(void)
     Padding[0] = '\x01';
     Padding[1] = '\x02';
     
+    Pin_SSN_A0_Write(0); //Zero this address bit, consider using CyPins_ClearPin -B
+    Pin_SSN_A1_Write(0); //Zero this address bit
+    Pin_SSN_A2_Write(0); //Zero this address bit
+    Pin_SSN_Main_Write(1); //High to deselect Main PSOC , consider using CyPins_SetPin -B
+    
     // General hardware logic reset (not including the tracker), and reset of counters
     logicReset();
     
@@ -1535,12 +1542,14 @@ int main(void)
             uint t0 = time();
             uint8 evtStatus = Status_Reg_M_Read();
             if (!(evtStatus & 0x08)) {
+                int InterruptState = CyEnterCriticalSection(); 
                 while (!(Status_Reg_M_Read() & 0x08)) {   // Wait here for the done signal
                     if (time() - t0 > 20) {
                         addError(ERR_PMT_DAQ_TIMEOUT, (uint8)cntGO, (uint8)(cntGO >> 8));
                         break;
                     }
                 }
+                CyExitCriticalSection(InterruptState);
             }
             // Read out the 5 SAR ADCs one at a time
             uint16 adcArray[5];
@@ -1550,10 +1559,10 @@ int main(void)
             adcArray[3] = 0;
             adcArray[4] = 0;
             for (int ch=0; ch<5; ++ch) {
-                set_SPI_SSN(0,false);
+//                set_SPI_SSN(0,false);
                 set_SPI_SSN(SSN_SAR[ch],false);
-                int InterruptState = CyEnterCriticalSection();
                 Control_Reg_1_Write(0x01);
+                int InterruptState = CyEnterCriticalSection();
                 while ((Status_Reg_M_Read() & 0x20) == 0);
                 adcArray[ch] = ShiftReg_ADC_ReadRegValue();
                 CyExitCriticalSection(InterruptState);
@@ -1567,9 +1576,9 @@ int main(void)
             if (readTracker) {
                 while (tkrDataReady != 0x59) {
                     tkrCmdCode = 0x57;
-                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL); //TODO check empty
                     UART_TKR_WriteTxData(0x00);    // Address byte
-                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL); //TODO add all 3 byte to the FIFO without waiting -B
                     UART_TKR_WriteTxData(tkrCmdCode);    // Check status
                     while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
                     UART_TKR_WriteTxData(0x00);    // Number of data bytes
@@ -1608,7 +1617,7 @@ int main(void)
                 rc = getTrackerData(TKR_EVT_DATA);        
                 if (rc != 0) {
                     addError(ERR_GET_TKR_DATA, rc, 0x77);
-                    UART_TKR_ClearRxBuffer();
+                    UART_TKR_ClearRxBuffer(); //TODO consider clearing this more often -B
                     resetAllTrackerLogic();
                 }
                 tkrLED(false);
@@ -1619,7 +1628,7 @@ int main(void)
             // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
             // instrument trigger, so we have to correlate the two channels with each other and with the event
             // by looking at the course timing information.
-            int InterruptState = CyEnterCriticalSection(); //TODO shorten try to shorten this critcal section -B
+            int InterruptState = CyEnterCriticalSection(); //TODO shorten this critcal section or just disable the TOF ints -B
             uint16 timeStamp16 = (uint16)(timeStamp & 0x0000FFFF);
             int nI=0;
             uint8 idx[TOFMAX_EVT];
@@ -1909,7 +1918,7 @@ int main(void)
                         SPIM_WriteTxData(dataPacket[i]);
                     }
                 }
-                set_SPI_SSN(SSN_None, false);
+                set_SPI_SSN(SSN_None, false);  //this shouldn't be needed, waits for SPI buffered data -B
                 nDataReady = 0;
                 if (eventDataReady) {   // re-enable the trigger after event data has been output
                     if (!endingRun) triggerEnable(true);
