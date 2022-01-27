@@ -261,10 +261,10 @@ uint8 tkrHouseKeepingFPGA;
 uint8 tkrHouseKeepingCMD;
 uint8 tkrHouseKeeping[TKRHOUSE_LEN];
 
-uint32 timeStamp;     // Internal event time stamp, in 5 millisecond units
-uint32 cntGO1save;    // Word to save the trigger counter in each time there is an accepted trigger
-uint8 trgStatus;      // Is the trigger enabled, or not?
-bool triggered;       // The system is triggered, so a readout is needed.
+volatile uint32 timeStamp;     // Internal event time stamp, in 5 millisecond units
+volatile uint32 cntGO1save;    // Word to save the trigger counter in each time there is an accepted trigger
+volatile uint8 trgStatus;      // Is the trigger enabled, or not?
+volatile bool triggered;       // The system is triggered, so a readout is needed.
 
 // Tracker data are buffered in this structure prior to sending event data out to the Main PSOC or PC
 struct TkrData {
@@ -293,8 +293,8 @@ uint16 ch3Count, ch3CountSave;
 uint16 ch4Count, ch4CountSave;
 uint16 ch5Count, ch5CountSave;
 uint8 ch1CtrSave, ch2CtrSave, ch3CtrSave, ch4CtrSave, ch5CtrSave;
-uint32 cntGO;
-uint32 cntGO1;
+volatile uint32 cntGO;
+volatile uint32 cntGO1;
 uint16 runNumber;
 
 // Function to turn the LED on/off furthest from the SMA inputs, for debugging
@@ -1167,6 +1167,7 @@ CY_ISR(isrUART) {
 // GO signal (system trigger). Start the full event readout if trigger is enabled.
 CY_ISR(isrGO1)    
 {
+    int InterruptState = CyEnterCriticalSection(); //adding this and volatiles to prevent ADC readouts with no GO -B
     if (isTriggerEnabled()) {
         // Disable the trigger until the event readout has been completed
         triggerEnable(false);
@@ -1179,7 +1180,7 @@ CY_ISR(isrGO1)
         //Timer_1_Start();
     }
     cntGO1++;     // Count all GO signals during a run, even if the trigger is not enabled.
-    
+    CyExitCriticalSection(InterruptState); //adding this and volatiles to prevent ADC readouts with no GO -B
     // At this point execution returns to its normal flow, allowing other interrupts. The remainder of the
     // event readout process is done in main(), in the infinite for loop.
 }
@@ -1534,10 +1535,11 @@ int main(void)
             USBUART_CDC_Init();
         }
 
-        // Build an event and send it out each time a GO is received
         if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
             timeDate = RTC_1_ReadTime();
+            int InterruptState = CyEnterCriticalSection(); //adding this and volatiles to prevent ADC readouts with no GO -B
             triggered = false;
+            CyExitCriticalSection(InterruptState); //adding this and volatiles to prevent ADC readouts with no GO -B
             // Read the digitized PMT data after waiting for the digitizers to finish
             uint t0 = time();
             uint8 evtStatus = Status_Reg_M_Read();
@@ -1628,7 +1630,7 @@ int main(void)
             // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
             // instrument trigger, so we have to correlate the two channels with each other and with the event
             // by looking at the course timing information.
-            int InterruptState = CyEnterCriticalSection(); //TODO shorten this critcal section or just disable the TOF ints -B
+            InterruptState = CyEnterCriticalSection(); //TODO shorten this critcal section or just disable the TOF ints -B
             uint16 timeStamp16 = (uint16)(timeStamp & 0x0000FFFF);
             int nI=0;
             uint8 idx[TOFMAX_EVT];
