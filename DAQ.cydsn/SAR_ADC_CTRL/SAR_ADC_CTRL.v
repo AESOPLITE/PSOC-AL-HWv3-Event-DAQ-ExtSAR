@@ -12,11 +12,12 @@
 // ========================================
 `include "cypress.v"
 //`#end` -- edit above this line, do not edit this line
-// Generated on 11/15/2021 at 15:13
+// Generated on 01/27/2022 at 20:10
 // Component: SAR_ADC_CTRL
 module SAR_ADC_CTRL (
 	output  CONVSTB,
 	output  DONE,
+	output  GOen,
 	output  RstCnt,
 	output  RstPk,
 	input   ChOR,
@@ -28,7 +29,8 @@ module SAR_ADC_CTRL (
 
 //`#start body` -- edit after this line, do not edit this line
 
-//Arguments:
+// Logic to control the PHA digitization with external SAR ADCs
+// Arguments:
 //	output  CONVSTB,   // Start the SAR ADC conversion for all 5 channels
 //	output  DONE,      // Tell the CPU that the SAR ADCs are ready to read out
 //	output  RstCnt,    // Reset the external Count7 counter
@@ -56,6 +58,7 @@ reg [2:0] State, NextState;
 reg Golatch;
 
 assign RstPk = (State == Fini);
+assign GOen = (State == Wait || State == Dlay);
 
 // Note: the external Count7 time must be longer than the conversion time.
 //       It also determines the time waiting for the peak detector to settle 
@@ -124,6 +127,7 @@ end
 always @ (posedge CLK) begin
     if (RST) begin
         State <= Wait;
+        GOlatch <= 1'b0;
     end else begin
         State <= NextState;
         if (State == Fini) begin  // Capture the GO signal if and when it arrives.

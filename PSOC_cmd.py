@@ -924,7 +924,10 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     if outputEvents: f2.close()
     print("Number of triggers generated = " + str(cntGo1))
     print("Number of triggers accepted = " + str(cntGo))
-    live = cntGo/float(cntGo1)
+    if (cntGo+cntGo1 == 0):
+        live = 0.
+    else:
+        live = cntGo/float(cntGo+cntGo1)
     print("Live time fraction = " + str(live))
     print("Number of primary PMT triggers captured = " + str(pmtTrg1))
     print("Number of secondary PMT triggers captured = " + str(pmtTrg2))

@@ -165,6 +165,7 @@
 #define ERR_TRK_WRONG_DATA_TYPE 28u
 #define ERR_CMD_BUF_OVERFLOW 29u
 #define ERR_CMD_TIMEOUT 30u
+#define ERR_TRG_NOT_ENABLED 31u
 
 // Identifiers for types of Tracker data
 #define TKR_EVT_DATA 0xD3
@@ -194,12 +195,6 @@ const uint8 TMP100_Temp_Reg = '\x00';
 const uint8 I2C_Address_Barometer = '\x70';
 const uint8 I2C_Address_RTC = '\x6F';
 
-// Masks for LED control register Control_Reg_LED
-const uint8 LED1 = '\x01';      // Near the PSOC chip closer to the PMT inputs
-const uint8 LED2 = '\x02';      // Near the PSOC chip further from the PMT inputs
-const uint8 TKRLED = '\x04';    // Top right on the double RJ45 connector
-const uint8 DATLED = '\x08';    // Lower left on the double RJ45 connector
-
 // Bit locations for setting up the trigger, in the Control_Reg_Trg1/2. Not actually used in this code.
 #define trgBit_T4 = 0x01;
 #define trgBit_T3 = 0x02;
@@ -224,9 +219,6 @@ const uint8 SSN_CH3  = 0x0F;
 const uint8 SSN_CH4  = 0x0E;
 const uint8 SSN_CH5  = 0x0C;
 
-// Bit location of the trigger enable in the register Control_Reg_Trg
-const uint8 triggerEnable_Mask = '\x01';
-
 // Command codes for the TOF chip
 const uint8 TOF_enable = 0x18;
 const uint8 powerOnRESET = 0x30;
@@ -244,15 +236,16 @@ struct MainPSOCcmds {
     uint8 buf[CMD_LENGTH];
     uint8 nBytes;
 } cmd_buffer[MX_CMDS];
-uint8 cmdWritePtr, cmdReadPtr;
+volatile uint8 cmdWritePtr, cmdReadPtr;
 
 // TOF circular data buffers to store information coming into the shift registers by LVDS from the TOF chip
-struct TOF {
+volatile struct TOF {
     uint32 shiftReg[TOFMAX_EVT];
     uint16 clkCnt[TOFMAX_EVT];
     bool filled[TOFMAX_EVT];
     uint8 ptr;
 } tofA, tofB;
+
 bool outputTOF;  // Controls a special debugging mode to send TOF data out immediately each time it comes in
 
 // Temporary storage of Tracker housekeeping data
@@ -299,11 +292,10 @@ uint16 runNumber;
 
 // Function to turn the LED on/off furthest from the SMA inputs, for debugging
 void LED2_OnOff(bool on) {
-    uint8 status = Control_Reg_LED_Read() & ~LED2;
     if (on) {
-        Control_Reg_LED_Write(status | LED2);
+        Pin_LED2_Write(1);
     } else {
-        Control_Reg_LED_Write(status);
+        Pin_LED2_Write(0);
     }
 }
 
@@ -453,7 +445,7 @@ uint8 readDAC(uint8 I2C_Address, uint16* rvalue) {
 // Check whether the trigger is enabled
 bool isTriggerEnabled() {
     uint8 regValue = Control_Reg_Trg_Read();
-    return (regValue & triggerEnable_Mask);
+    return regValue==0x01;
 }
 
 // Set the time for which a PHA discriminator waits following a threshold crossing before being allowed
@@ -566,15 +558,6 @@ void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
                 
     if (clearBuffer) SPIM_ClearTxBuffer();
 }
-//Prior function commented out below -B
-//void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
-//    // SSN = 0 (or 5) to deselect all slaves
-//    while (!(SPIM_ReadTxStatus() & SPIM_STS_SPI_IDLE));
-//    if (SSN==SSN_TOF) Control_Reg_SSN_Write(SSN_None);
-//    Control_Reg_SSN_Write(SSN);
-//
-//    if (clearBuffer) SPIM_ClearTxBuffer();
-//}
 
 /*******************************************************************************
 * Function Name: grayCodeSSADC
@@ -645,13 +628,12 @@ void grayCodeSSADC( uint8 stateSSADC )
             Pin_SSN_A2_Write(0); //Write this address bit
             CyExitCriticalSection(InterruptState);
             break;
-    }
-    
+    }   
 }
+
 // Control of the trigger enable bit. The TOF chip can be turned off while the trigger is disabled (but that
 // feature is commented out).
 void triggerEnable(bool enable) {
-//    uint8 regValue = Control_Reg_Trg_Read() & ~triggerEnable_Mask;
     if (enable) {
         //Reset the TOF chip time reference. It also gets reset every 5 ms by interrupt.
         //Control_Reg_Pls_Write(PULSE_TOF_RESET);
@@ -661,13 +643,17 @@ void triggerEnable(bool enable) {
         //writeTOFdata(writeConfig+1);
         //writeTOFdata(0x05);
         
-        // Enable the master trigger
-//        Control_Reg_Trg_Write(regValue | triggerEnable_Mask);  
-        Control_Reg_Trg_Write(1);  //just set it since 1 bit control -B
+        // Enable the master trigger and the TOF and empty the TOF buffers
+        Control_Reg_Trg_Write(1); 
+        ShiftReg_A_EnableInt();
+        ShiftReg_B_EnableInt();
+        while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) ShiftReg_A_ReadData();
+        while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) ShiftReg_B_ReadData();
     } else {
-        // Disable the master trigger
-//        Control_Reg_Trg_Write(regValue);
+        // Disable the master trigger and the TOF
         Control_Reg_Trg_Write(0);
+        ShiftReg_A_DisableInt();
+        ShiftReg_B_DisableInt();
         
         // Stop the TOF chip acquisition by disabling both channels
         //set_SPI_SSN(SSN_TOF, true);
@@ -691,23 +677,24 @@ uint8 byte16(uint16 word, int byte) {
 void logicReset() {
     LED2_OnOff(true);
     int InterruptState = CyEnterCriticalSection();
-    int state = isr_clk200_GetState();
-    isr_clk200_Disable();
-    int stateTrg = isr_GO1_GetState();
-    isr_GO1_Disable();
     clkCnt = 0;             
     ch1Count = 0;
     ch2Count = 0;
     ch3Count = 0;
     ch4Count = 0;
     ch5Count = 0;
+    Pin_SSN_A0_Write(0);
+    Pin_SSN_A1_Write(0); 
+    Pin_SSN_A2_Write(0); 
+    Pin_SSN_Main_Write(1);
+    Pin_LED1_Write(0);
+    Pin_LED_TKR_Write(0);
+    Pin_LED_DAT_Write(0);
     cntGO = 0;
     cntGO1 = 0;
     Control_Reg_Pls_Write(PULSE_LOGIC_RST);
     Control_Reg_Pls_Write(PULSE_CNTR_RST);
     CyDelay(20);
-    if (stateTrg) isr_GO1_Enable();
-    if (state) isr_clk200_Enable();
     
     for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
         if (tkrData.boardHits[brd].nBytes > 0) {
@@ -945,8 +932,7 @@ int getTrackerData(uint8 idExpected) {
 // after a delay long enough to make it visible.
 void tkrLED(bool on) {
     if (on) {
-        uint8 status = Control_Reg_LED_Read() & ~TKRLED;
-        Control_Reg_LED_Write(status | TKRLED);
+        Pin_LED_TKR_Write(1);
     } else {
         Timer_1_Start();
     }
@@ -1103,22 +1089,17 @@ CY_ISR(Store_B)
 
 // Turn off an LED once the interval timer has timed out (this is just to make the LED stay on long enough to be visible)
 CY_ISR(intTimer) {
-    uint8 status = Control_Reg_LED_Read();
-    status = status & ~DATLED;
-    status = status & ~TKRLED;
-    Control_Reg_LED_Write(status);
+    Pin_LED_TKR_Write(0);
+    Pin_LED_DAT_Write(0);
     Timer_1_Stop();
 }
 
 // Increment the internal clock count every second, and also make the LED blink
 CY_ISR(clk200) {       // Interrupt every second (200 ticks of the 5ms period clock)
     clkCnt += 200;     // Increment the clock counter used for time stamps
-    uint8 status = Control_Reg_LED_Read();
-    uint8 blink = status & LED1;
-    if (blink == 0x00) blink = LED1;
-    else blink = 0x00;
-    status = (status & ~LED1) | blink;
-    Control_Reg_LED_Write(status);
+    uint8 status = Pin_LED1_Read();
+    status = ~status;
+    Pin_LED1_Write(status);
 }
 
 // Interrupts to keep count of PMT singles rates. These interrupt every time the 8-bit hardware counter turns over.
@@ -1164,25 +1145,26 @@ CY_ISR(isrUART) {
     }
 }
 
-// GO signal (system trigger). Start the full event readout if trigger is enabled.
-CY_ISR(isrGO1)    
-{
-    int InterruptState = CyEnterCriticalSection(); //adding this and volatiles to prevent ADC readouts with no GO -B
-    if (isTriggerEnabled()) {
-        // Disable the trigger until the event readout has been completed
-        triggerEnable(false);
-        trgStatus = Status_Reg_Trg_Read();
-        cntGO++;
-        triggered = true;
-        timeStamp = time();           
-        cntGO1save = cntGO1 + 1;
-        //LED2_OnOff(true);
-        //Timer_1_Start();
-    }
-    cntGO1++;     // Count all GO signals during a run, even if the trigger is not enabled.
-    CyExitCriticalSection(InterruptState); //adding this and volatiles to prevent ADC readouts with no GO -B
+// GO signal (system trigger). Start the full event readout.
+CY_ISR(isrGO) {
+    // The trigger should always be enabled for this to be called, but check just in case. . .
+    if (!isTriggerEnabled()) addError(ERR_TRG_NOT_ENABLED,byte32(cntGO,2),byte32(cntGO,1));
+    // Disable the trigger and TOF shift registers until the event readout has been completed
+    triggerEnable(false);
+    cntGO++;               // The event number counter
+    trgStatus = Status_Reg_Trg_Read();
+    triggered = true;
+    timeStamp = time();           
+    cntGO1save = cntGO1;
+    //LED2_OnOff(true);
+    //Timer_1_Start();  
     // At this point execution returns to its normal flow, allowing other interrupts. The remainder of the
     // event readout process is done in main(), in the infinite for loop.
+}
+
+// Interrupt to count triggers that occur when the trigger is disabled
+CY_ISR(isrGO1) {
+    cntGO1++;     
 }
 
 // External signal to force a software reset of this PSOC
@@ -1194,10 +1176,8 @@ CY_ISR(isrRST)
 // Turn on the LED light on the double RJ45 connector that indicates that data are being sent out. The light
 // will turn off automatically after sufficient time has passed to make it visible.
 void dataLED(bool on) {
-    uint8 status;
     if (on) {
-        status = Control_Reg_LED_Read() & ~DATLED;
-        Control_Reg_LED_Write(status | DATLED);
+        Pin_LED_DAT_Write(1);
     } else {
         Timer_1_Start();
     }
@@ -1309,6 +1289,12 @@ int main(void)
     Pin_SSN_A2_Write(0); //Zero this address bit
     Pin_SSN_Main_Write(1); //High to deselect Main PSOC , consider using CyPins_SetPin -B
     
+    // Turn all the LEDs off
+    Pin_LED1_Write(0);
+    Pin_LED2_Write(0);
+    Pin_LED_TKR_Write(0);
+    Pin_LED_DAT_Write(0);
+    
     // General hardware logic reset (not including the tracker), and reset of counters
     logicReset();
     
@@ -1335,6 +1321,8 @@ int main(void)
     isr_Ch5_Disable();
     isr_GO1_StartEx(isrGO1);
     isr_GO1_Disable();
+    isr_GO_StartEx(isrGO);
+    isr_GO_Disable();
     isr_UART_StartEx(isrUART);
     isr_UART_Disable();
     isr_rst_StartEx(isrRST);
@@ -1507,8 +1495,10 @@ int main(void)
     isr_Ch4_Enable();
     isr_Ch5_SetPriority(7);
     isr_Ch5_Enable();
-    isr_GO1_SetPriority(5);
+    isr_GO1_SetPriority(7);
     isr_GO1_Enable();
+    isr_GO_SetPriority(5);
+    isr_GO_Enable();
     isr_rst_SetPriority(4);
     isr_rst_Enable();
 
@@ -1537,9 +1527,8 @@ int main(void)
 
         if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
             timeDate = RTC_1_ReadTime();
-            int InterruptState = CyEnterCriticalSection(); //adding this and volatiles to prevent ADC readouts with no GO -B
             triggered = false;
-            CyExitCriticalSection(InterruptState); //adding this and volatiles to prevent ADC readouts with no GO -B
+
             // Read the digitized PMT data after waiting for the digitizers to finish
             uint t0 = time();
             uint8 evtStatus = Status_Reg_M_Read();
@@ -1561,7 +1550,6 @@ int main(void)
             adcArray[3] = 0;
             adcArray[4] = 0;
             for (int ch=0; ch<5; ++ch) {
-//                set_SPI_SSN(0,false);
                 set_SPI_SSN(SSN_SAR[ch],false);
                 Control_Reg_1_Write(0x01);
                 int InterruptState = CyEnterCriticalSection();
@@ -1630,7 +1618,6 @@ int main(void)
             // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
             // instrument trigger, so we have to correlate the two channels with each other and with the event
             // by looking at the course timing information.
-            InterruptState = CyEnterCriticalSection(); //TODO shorten this critcal section or just disable the TOF ints -B
             uint16 timeStamp16 = (uint16)(timeStamp & 0x0000FFFF);
             int nI=0;
             uint8 idx[TOFMAX_EVT];
@@ -1687,7 +1674,6 @@ int main(void)
                     }
                 }
             }
-            CyExitCriticalSection(InterruptState);
             
             // Build the event by filling the output buffer according to the output format.
             // Pack the time and date information into a 4-byte unsigned integer
@@ -1805,14 +1791,12 @@ int main(void)
             dataOut[nDataReady++] = 0x4E;
             dataOut[nDataReady++] = 0x49;
             eventDataReady = true;
-            InterruptState = CyEnterCriticalSection();
             for (int j=0; j<TOFMAX_EVT; ++j) {
                 tofA.filled[j] = false;
                 tofB.filled[j] = false;
             }
             tofA.ptr = 0;
-            tofB.ptr = 0;
-            CyExitCriticalSection(InterruptState);            
+            tofB.ptr = 0;           
             tkrData.nTkrBoards = 0;
             ch1CtrSave = Cntr8_V1_1_ReadCount();
             ch2CtrSave = Cntr8_V1_2_ReadCount();
@@ -1960,7 +1944,6 @@ int main(void)
                 }
             }
             if (count == 0 && cmdReadPtr < MX_CMDS) { // Command from UART 
-                //int InterruptState = CyEnterCriticalSection();
                 isr_UART_Disable();
                 count = CMD_LENGTH;
                 for (int i=0; i<count; ++i) {
@@ -1973,7 +1956,6 @@ int main(void)
                     cmdReadPtr = 255;
                 }
                 isr_UART_Enable();
-                //CyExitCriticalSection(InterruptState);
             }
         }
         if (count == CMD_LENGTH) {  // We got a complete command string
@@ -2570,13 +2552,6 @@ int main(void)
                                 runNumber = cmdData[0];
                                 runNumber = (runNumber<<8) | cmdData[1];
                                 readTracker = (cmdData[2] == 1);
-                                // Make sure that the TOT FIFOs are empty
-                                while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) {
-                                    ShiftReg_A_ReadData();
-                                }
-                                while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) {
-                                    ShiftReg_B_ReadData();
-                                }
                                 debugTOF = (cmdData[3] == 1);
                                 cntGO = 0;
                                 cntGO1 = 0;

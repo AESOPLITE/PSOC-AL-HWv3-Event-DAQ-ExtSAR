@@ -24,8 +24,8 @@ setInternalRTC(address)
 #time.sleep(1)
 getInternalRTC(address)
 
-setTofDAC(1, 96, address)   
-setTofDAC(2, 96, address)
+setTofDAC(1, 63, address)   
+setTofDAC(2, 63, address)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
@@ -201,7 +201,7 @@ print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
-ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 10000, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 20, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
