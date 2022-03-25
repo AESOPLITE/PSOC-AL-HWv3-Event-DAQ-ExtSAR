@@ -2685,7 +2685,7 @@ int main(void)
                                 Control_Reg_ScopeTrg_Write(0x01);
                                 SPIM_ClearRxBuffer();
                                 writeTOFdata(readConfig);
-                                for (int bt=0; bt<TOFSIZE; ++bt) {
+                                for (int bt=0; bt<TOFSIZE+4; ++bt) {
                                     writeTOFdata(0x00);
                                 }
                                 for (int bt=0; bt<TOFSIZE; ++bt) {
