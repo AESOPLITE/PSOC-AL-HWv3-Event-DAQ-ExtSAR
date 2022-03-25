@@ -81,17 +81,6 @@
  *    bits {7:6} and {1:0} give the data-byte number, 1 through 15
  *    Subsequent commands must wait until after the correct number of data bytes has arrived
  *
- *    The following commands are defined (ones with * won't work unless i2c busses are combined):
- *    Code Description                     Number Data Bytes  Command Data Bytes Definition
- *    0x01 Load threshold DAC in PSOC (8-bit)     2           Channel 1-4  Value   
- *         Load external threshold DAC (12-bit)   3           Channel 5    Value high, value low
- *    0x02 Get threshold DAC setting              1           Channel 1-5
- *    0x03 Read back all error codes              0
- *    0x04 Load TOF 12-bit threshold DACs         3           Channel 1,2  Value high, value low
- *    0x05 Read TOF 12-bit threshold DACs         1           Channel 1,2
- *    0x06 Turn LED #2 on/off                     1           OnOff (1,0)
- *    0x07 Return 1-byte code version number      0
- *    0x10 Send a command to the tracker          n           FPGA, Cmd, # cmd data bytes, cmd data bytes
  */
 
 /* I2C mode */
@@ -166,6 +155,10 @@
 #define ERR_CMD_BUF_OVERFLOW 29u
 #define ERR_CMD_TIMEOUT 30u
 #define ERR_TRG_NOT_ENABLED 31u
+#define ERR_MISSING_HOUSEKEEPING 32u
+#define ERR_BAD_CMD_INPUT 33u
+#define ERR_TKR_BUFFER_OVERFLOW 34u
+#define ERR_TOF_ADC_CONFLICT 35u
 
 // Identifiers for types of Tracker data
 #define TKR_EVT_DATA 0xD3
@@ -229,22 +222,61 @@ const uint8 readResults =  0x60;   // Not used
 // Pointer to the internal PSOC real-time-clock structure
 RTC_1_TIME_DATE* timeDate;
 
+// Data structures for tracker rate monitoring
+uint32 tkrMonitorInterval;   // time interval in 5ms tics between successive 1-second rate accumulations
+uint8 tkrMonitorNumAvg;      // number of 1-second rate measurements to average
+uint16 tkrMonitorRates[MAX_TKR_BOARDS];
+uint tkrMonitorSums[MAX_TKR_BOARDS];
+uint nTkrMonSamples;
+bool monitorTkrRates;
+uint32 tkrClkAtStart;
+uint32 tkrClkCntStart;
+
 // Dual circular buffer for UART commands from the Main PSOC
 #define CMD_LENGTH 29u
 #define MX_CMDS 32u
-struct MainPSOCcmds {
+volatile struct MainPSOCcmds {
     uint8 buf[CMD_LENGTH];
     uint8 nBytes;
 } cmd_buffer[MX_CMDS];
 volatile uint8 cmdWritePtr, cmdReadPtr;
 
-// TOF circular data buffers to store information coming into the shift registers by LVDS from the TOF chip
+// Circular FIFO buffer for bytes coming from the Tracker
+#define MAX_TKR 128
+volatile uint8 tkrBuf[MAX_TKR];
+volatile int tkrWritePtr, tkrReadPtr;
+
+// TOF circular data buffers to store information coming into the shift registers by LVDS from the TOF chip.
+// In the case that the TOF shift register is read by DMA instead of interrupt, the data first get written
+// to the sampleArray and clkArray by as many linked TDs as possible, and then transferred to the TOF struct
+// by an ISR when the TD chain has terminated.
+bool TOF_DMA;   // Set true to send TOF data to memory by DMA instead of interrupting the CPU for every hit
+#define TOF_DMA_BYTES_PER_BURST 4
+#define TOF_DMA_REQUEST_PER_BURST 1
+#define TOF_DMA_MAX_NO_OF_SAMPLES 32
+#define DMA_SRC_BASE (CYDEV_PERIPH_BASE)
+#define DMA_DST_BASE (CYDEV_SRAM_BASE)
 volatile struct TOF {
     uint32 shiftReg[TOFMAX_EVT];
-    uint16 clkCnt[TOFMAX_EVT];
+    uint8 clkCnt[TOFMAX_EVT];  
     bool filled[TOFMAX_EVT];
     uint8 ptr;
 } tofA, tofB;
+uint8 nTOFAint, nTOFBint;
+uint8 nTOF_DMA_samples;
+volatile uint8 DMA_TOFA_Chan;
+uint8 DMA_TOFA_TD[2*TOF_DMA_MAX_NO_OF_SAMPLES];   
+volatile uint8 DMA_TOFB_Chan;
+uint8 DMA_TOFB_TD[2*TOF_DMA_MAX_NO_OF_SAMPLES]; 
+volatile uint32 tofA_sampleArray[TOF_DMA_MAX_NO_OF_SAMPLES] __attribute__ ((aligned(32))) = {0};
+volatile uint8 tofA_clkArray[TOF_DMA_MAX_NO_OF_SAMPLES];
+volatile uint32 tofB_sampleArray[TOF_DMA_MAX_NO_OF_SAMPLES] __attribute__ ((aligned(32))) = {0};
+volatile uint8 tofB_clkArray[TOF_DMA_MAX_NO_OF_SAMPLES];
+
+// Buffer for receiving bytes from the configuration register of the TOF chip
+#define MAX_SPIM_RX 32
+volatile int spimPt = 0;
+volatile uint8 spim_buf[MAX_SPIM_RX]; 
 
 bool outputTOF;  // Controls a special debugging mode to send TOF data out immediately each time it comes in
 
@@ -255,6 +287,7 @@ uint8 tkrHouseKeepingCMD;
 uint8 tkrHouseKeeping[TKRHOUSE_LEN];
 
 volatile uint32 timeStamp;     // Internal event time stamp, in 5 millisecond units
+volatile uint8 timeStamp8;     // Place to store the timestamp counter reading
 volatile uint32 cntGO1save;    // Word to save the trigger counter in each time there is an accepted trigger
 volatile uint8 trgStatus;      // Is the trigger enabled, or not?
 volatile bool triggered;       // The system is triggered, so a readout is needed.
@@ -273,7 +306,7 @@ struct TkrData {
 uint8 numTkrBrds;
 bool readTracker;
 
-uint32 clkCnt;    // 1 Hz counter
+uint32 clkCnt;    // 5ms clock counter
 uint32 time() {   // Returns the time in 5 millisecond units
     uint8 cnt200val = Cntr8_Timer_ReadCount();   // This counter turns over every 200 counts
     return clkCnt + cnt200val;                  
@@ -301,18 +334,18 @@ void LED2_OnOff(bool on) {
 
 // Errors are logged into this structure pending reading them out by command
 struct Error {
-    uint8 errorCode;
-    uint8 value0;
-    uint8 value1;
+    uint8 errorCode;  // Use error codes defined above
+    uint8 value0;     // First information byte
+    uint8 value1;     // Second information byte
 } errors[MXERR];
 uint8 nErrors = 0;
 
 // Function used to log internal errors
-void addError(uint8 code, uint8 val1, uint8 val2) {
+void addError(uint8 code, uint8 val0, uint8 val1) {
     if (nErrors < MXERR) {
         errors[nErrors].errorCode = code;
-        errors[nErrors].value0 = val1;
-        errors[nErrors].value1 = val2;
+        errors[nErrors].value0 = val0;
+        errors[nErrors].value1 = val1;
         nErrors++;
     }
 }
@@ -448,9 +481,10 @@ bool isTriggerEnabled() {
     return regValue==0x01;
 }
 
-// Set the time for which a PHA discriminator waits following a threshold crossing before being allowed
-// to cross again (to avoid double pulsing). This is NOT the coincidence window. That is generally much
-// shorter and is set by a parameter in the SignalCrop_v1 Verilog device.
+// Set the time delays used for coordinating the peak detector readout:
+// Time to wait for the peak detector to rise and settle before starting the ADC conversion
+// Time to wait for the conversions to finish before signaling the CPU to start the readout
+// Time to hold the reset active on the peak detectors
 void setPeakDetResetWait(uint8 waitTime) {
     Count7_3_WritePeriod(waitTime);
 }
@@ -473,9 +507,39 @@ uint8 getTriggerMask(char trigger) {
     return 0;
 }
 
+// The TOF chip and the Main PSOC are on the same SPI bus, but the SAR ADCs were moved to a separate bus.
+// However, a single decoder decodes the TOF and SAR ADC chip selects. The Main PSOC chip select is independent.
+
+// Set the chip select for the SPI bus used only by the external SAR ADCs.
+// The TOF chip's SPI should not be in use simultaneuously.
+void set_ADC_SSN(uint8 SSN) {
+    Control_Reg_SSN_Write(SSN & 0x07);
+}
+
+// Control of the SPI slave address. The slave select is active low.
+// **** Note that the TOF chip SSN needs to go high, for reset, before each SPI transaction. ****
+void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
+    while (!(SPIM_ReadTxStatus() & SPIM_STS_SPI_IDLE));  // Wait for completion of any transaction in progress
+    if (SSN == SSN_TOF) {
+        Pin_SSN_Main_Write(1);
+        uint8 regContent = Control_Reg_SSN_Read();
+        if (regContent != (SSN_TOF & 0x07) && regContent != 0x00) addError(ERR_TOF_ADC_CONFLICT, SSN, regContent);
+        Control_Reg_SSN_Write(0);
+        CyDelay(1);
+        Control_Reg_SSN_Write(SSN & 0x07);
+    } else if (SSN == SSN_Main) {
+        Control_Reg_SSN_Write(0);   // Sets just the 3-8 decoder.
+        Pin_SSN_Main_Write(0);      // Sets the Main PSOC dedicated SSN.
+    } else if (SSN == SSN_None) {
+        Control_Reg_SSN_Write(0);
+        Pin_SSN_Main_Write(1);
+    }
+    if (clearBuffer) SPIM_ClearTxBuffer();
+}
+
 // Control of the SPI slave address. The slave select is active low.
 // **** Note that the TOF chip needs to go high, for reset, before each SPI transaction. ****
-void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
+/*void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
     int InterruptState;
     //Managing multiple SPI Busses with different handling -B
     if( SSN_None == SSN)// Deactivate all. SSN = 0 (or 5) to deselect all slaves
@@ -527,7 +591,7 @@ void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
         Pin_SSN_A0_Write(0); //Write this address bit
         Pin_SSN_A1_Write(1); //Write this address bit
         Pin_SSN_A2_Write(0); //Write this address bit
-        Pin_SSN_Main_Write(0); //Low to select Main PSOC -B
+        Pin_SSN_Main_Write(1); //Low to select Main PSOC -B
         CyExitCriticalSection(InterruptState);
     }
     else if ( (SSN_CH1 == SSN) || (SSN_CH2 == SSN) || (SSN_CH3 == SSN) || (SSN_CH4 == SSN) || (SSN_CH5 == SSN) )// Select ADCs
@@ -558,6 +622,7 @@ void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
                 
     if (clearBuffer) SPIM_ClearTxBuffer();
 }
+*/
 
 /*******************************************************************************
 * Function Name: grayCodeSSADC
@@ -586,6 +651,7 @@ void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
 *  None 
 *
 *******************************************************************************/
+/*
 void grayCodeSSADC( uint8 stateSSADC )
 {
     int InterruptState; //If avoid calling this in ISR can comment this out -B
@@ -630,6 +696,29 @@ void grayCodeSSADC( uint8 stateSSADC )
             break;
     }   
 }
+*/
+
+void TOFenable(bool enable) {
+    if (TOF_DMA) {
+        if (enable) {
+            CyDmaChEnable(DMA_TOFA_Chan, 1);   
+            CyDmaChEnable(DMA_TOFB_Chan, 1);  
+        } else {
+            CyDmaChSetRequest(DMA_TOFA_Chan, CY_DMA_CPU_TERM_CHAIN);
+            CyDmaChSetRequest(DMA_TOFB_Chan, CY_DMA_CPU_TERM_CHAIN);
+        }
+    } else {
+        if (enable) {
+            isr_Store_A_Enable();
+            isr_Store_B_Enable();
+            while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) ShiftReg_A_ReadData();
+            while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) ShiftReg_B_ReadData();
+        } else {
+            isr_Store_A_Disable();
+            isr_Store_B_Disable();
+        }
+    }
+}
 
 // Control of the trigger enable bit. The TOF chip can be turned off while the trigger is disabled (but that
 // feature is commented out).
@@ -638,25 +727,16 @@ void triggerEnable(bool enable) {
         //Reset the TOF chip time reference. It also gets reset every 5 ms by interrupt.
         //Control_Reg_Pls_Write(PULSE_TOF_RESET);
         
-        // Enable both TOF chip channels
-        //set_SPI_SSN(SSN_TOF, true);
         //writeTOFdata(writeConfig+1);
         //writeTOFdata(0x05);
         
         // Enable the master trigger and the TOF and empty the TOF buffers
         Control_Reg_Trg_Write(1); 
-        ShiftReg_A_EnableInt();
-        ShiftReg_B_EnableInt();
-        while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) ShiftReg_A_ReadData();
-        while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) ShiftReg_B_ReadData();
+
     } else {
-        // Disable the master trigger and the TOF
+        // Disable the master trigger 
         Control_Reg_Trg_Write(0);
-        ShiftReg_A_DisableInt();
-        ShiftReg_B_DisableInt();
         
-        // Stop the TOF chip acquisition by disabling both channels
-        //set_SPI_SSN(SSN_TOF, true);
         //writeTOFdata(writeConfig+1);
         //writeTOFdata(0x00);
     }
@@ -709,7 +789,8 @@ void logicReset() {
 // Get a byte of data from the Tracker UART, with a time-out in case nothing is coming.
 // The second argument (flag) helps to identify where a timeout error originated.
 uint8 tkr_getByte(uint32 startTime, uint8 flag) {
-    while (!(UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY)) {
+    while (tkrReadPtr < 0) {
+//    while (!(UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY)) {
         uint32 timeElapsed = time() - startTime;
         if (timeElapsed > TKR_READ_TIMEOUT) {
             uint8 temp = (uint8)(timeElapsed & 0x000000ff);
@@ -717,7 +798,12 @@ uint8 tkr_getByte(uint32 startTime, uint8 flag) {
             return 0x00;
         }
     }
-    return UART_TKR_ReadRxData();
+    uint8 theByte = tkrBuf[tkrReadPtr];
+    if (tkrReadPtr < MAX_TKR-1) tkrReadPtr++;
+    else tkrReadPtr = 0;
+    if (tkrReadPtr == tkrWritePtr) tkrReadPtr = -1;
+    return theByte;
+//    return UART_TKR_ReadRxData();
 }
 
 // Function to receive ASIC register data from the Tracker
@@ -938,7 +1024,56 @@ void tkrLED(bool on) {
     }
 }
 
-// Function to send a command to the tracker that has no data bytes
+// Send a command to the tracker via the UART
+void sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rtnType) {
+    tkrLED(true);
+    tkrCmdCode = code;
+    UART_TKR_PutChar(FPGA);         // FPGA address
+    UART_TKR_PutChar(tkrCmdCode);   // Command code
+    UART_TKR_PutChar(nData);        // Number of data bytes
+    for (int i=0; i<nData; ++i) {
+        UART_TKR_PutChar(cmdData[i]);
+    }
+    // Wait around for the data to transmit
+    uint32 tStart = time();
+    while (UART_TKR_GetTxBufferSize() > 0) {                                           
+        if (time() - tStart > 200) {
+            addError(ERR_TX_FAILED, code, 0xFE);
+            tkrLED(false);
+            return;
+        }
+    }             
+    if (tkrCmdCode == 0x0F) {     // This command sets the number of tracker boards in the readout.
+        numTkrBrds = cmdData[0];  // Make sure the PSOC also knows how many boards are used.
+    }
+    // Wait around for up to a second for all the data to transmit
+    tStart = time();
+    while (UART_TKR_GetTxBufferSize() > 0) {                                           
+        if (time() - tStart > 200) {
+            addError(ERR_TX_FAILED, tkrCmdCode, 0);
+            tkrLED(false);
+            break;
+        }
+    }                                
+    if (tkrCmdCode == 0x67 || tkrCmdCode == 0x6C) {
+        tkrLED(false);
+        return;    // These commands have no echo or data to return
+    }
+    // Now look for the bytes coming back from the Tracker.
+    if (tkrCmdCode >= 0x20 && tkrCmdCode <= 0x25) {
+        getASICdata();
+    } else if (tkrCmdCode == 0x46) {
+        getTKRi2cData();
+    } else {
+        uint8 rc = getTrackerData(rtnType);
+        if (rc != 0) {
+            addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
+        }
+    }
+    tkrLED(false);
+}
+
+// Function to send a command to the tracker that has no data bytes sent or returned
 void sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
     tkrLED(true);
     tkrCmdCode = code;
@@ -964,6 +1099,23 @@ void sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
     }
     nDataReady = 0;  // Suppress the echo from being send out to the world
     tkrLED(false);
+}
+
+// Find the minimum time difference between two 8-bit time stamps
+uint8 minTdif(uint8 t1, uint8 t2) {
+    uint8 tMin, tMax;
+    if (t1>t2) {
+        tMin = t2;
+        tMax = t1;
+    } else {
+        tMin = t1;
+        tMax = t2;
+    }
+    int period = 200;
+    uint8 tD1 = tMax - tMin;
+    uint8 tD2 = tMin + period - tMax;
+    if (tD1 < tD2) return tD1;
+    else return tD2;
 }
 
 // Reset all of the Tracker board FPGAs (soft reset)
@@ -1026,15 +1178,79 @@ uint8 ptrNext(uint8 ptr) {
         return 0;
     }
 }
+void copyTOF_DMA(char which) {
+    if (which != 'B') {
+        for (int i=0; i<nTOF_DMA_samples; ++i) {
+            if (tofA_sampleArray[i] == 0) continue;
+            tofA.shiftReg[tofA.ptr] = tofA_sampleArray[i];
+            tofA_sampleArray[i] = 0;
+            tofA.clkCnt[tofA.ptr] = tofA_clkArray[i] ;
+            tofA.filled[tofA.ptr] = true;
+            tofA.ptr++;
+            if (tofA.ptr >= TOFMAX_EVT) tofA.ptr = 0;
+        }
+    }
+    if (which != 'A') {
+        for (int i=0; i<nTOF_DMA_samples; ++i) {
+            if (tofB_sampleArray[i] == 0) continue;
+            tofB.shiftReg[tofB.ptr] = tofB_sampleArray[i];
+            tofB_sampleArray[i] = 0;
+            tofB.clkCnt[tofB.ptr] = tofB_clkArray[i];
+            tofB.filled[tofB.ptr] = true;
+            tofB.ptr++;
+            if (tofB.ptr >= TOFMAX_EVT) tofB.ptr = 0;
+        }
+    }
+}
+
+// Functions for loading and reading the configuration of the TOF chip via SPI, either 4-bit or 8-bit.
+// Before calling, first the write or read command must be sent to the chip.
+// Each call writes or reads a single byte.
+void writeTOFdata(uint8 dataByte) {
+    if (SPIM_DATA_WIDTH == 4) {
+        uint8 nibH = (dataByte>>4) & 0x0F;
+        uint8 nibL = dataByte & 0x0F;
+        SPIM_WriteTxData(nibH);
+        SPIM_WriteTxData(nibL);
+    } else {
+        SPIM_WriteTxData(dataByte);
+    }
+}
+
+// Function to read TOF chip register settings via SPI in case the RX interrupt is not used.
+// Note that TOF timing data flows out over LVDS lines directly into the PSOC
+uint8 readTOFdata() {
+    uint8 dataByte;
+    if (SPIM_DATA_WIDTH == 4) {
+        while (SPIM_GetRxBufferSize() == 0) writeTOFdata(0x00);
+        uint8 nibH = SPIM_ReadRxData();
+        while (SPIM_GetRxBufferSize() == 0) writeTOFdata(0x00);
+        uint8 nibL = SPIM_ReadRxData();
+        dataByte = ((nibH<<4) & 0xF0) | (nibL & 0x0F); 
+    } else {
+        while (SPIM_GetRxBufferSize() == 0) writeTOFdata(0x00);
+        dataByte = SPIM_ReadRxData();
+    }
+    return dataByte;
+}
+
+CY_ISR(isrTOFnrqA) {
+    copyTOF_DMA('A');
+}
+
+CY_ISR(isrTOFnrqB) {
+    copyTOF_DMA('B');
+}
 
 // Read out the shift register when a TOF stop event arrives for channel A
 CY_ISR(Store_A)
 {
     if (ShiftReg_A_GetIntStatus() == ShiftReg_A_STORE) {
+        nTOFAint++;
         while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) {
             uint32 AT = ShiftReg_A_ReadData();
             tofA.shiftReg[tofA.ptr] = AT;
-            tofA.clkCnt[tofA.ptr] = (uint16)time();
+            tofA.clkCnt[tofA.ptr] = Cntr8_Timer_ReadCount();
             tofA.filled[tofA.ptr] = true;
             tofA.ptr++;
             if (tofA.ptr >= TOFMAX_EVT) tofA.ptr = 0;
@@ -1061,10 +1277,11 @@ CY_ISR(Store_A)
 CY_ISR(Store_B)
 {
     if (ShiftReg_B_GetIntStatus() == ShiftReg_B_STORE) { 
+        nTOFBint++;
         while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) {
             uint32 BT = ShiftReg_B_ReadData();
             tofB.shiftReg[tofB.ptr] = BT;
-            tofB.clkCnt[tofB.ptr] = (uint16)time();
+            tofB.clkCnt[tofB.ptr] = Cntr8_Timer_ReadCount();
             tofB.filled[tofB.ptr] = true;
             tofB.ptr++;
             if (tofB.ptr >= TOFMAX_EVT) tofB.ptr = 0;
@@ -1145,21 +1362,42 @@ CY_ISR(isrUART) {
     }
 }
 
+// Receive data from the Tracker over the UART
+CY_ISR(isrTkrUART) {
+    while (UART_TKR_GetRxBufferSize() > 0 && tkrWritePtr != tkrReadPtr) {
+        tkrBuf[tkrWritePtr] = UART_TKR_GetByte();
+        if (tkrReadPtr < 0) tkrReadPtr = tkrWritePtr;
+        if (tkrWritePtr == MAX_TKR - 1) tkrWritePtr = 0;
+        else tkrWritePtr++;
+        if (tkrWritePtr == tkrReadPtr) {
+            addError(ERR_TKR_BUFFER_OVERFLOW, byte32(cntGO, 0), byte32(cntGO, 1));
+        }
+    }
+}
+
 // GO signal (system trigger). Start the full event readout.
 CY_ISR(isrGO) {
     // The trigger should always be enabled for this to be called, but check just in case. . .
     if (!isTriggerEnabled()) addError(ERR_TRG_NOT_ENABLED,byte32(cntGO,2),byte32(cntGO,1));
     // Disable the trigger and TOF shift registers until the event readout has been completed
     triggerEnable(false);
-    cntGO++;               // The event number counter
-    trgStatus = Status_Reg_Trg_Read();
+
+    cntGO++;                            // The event number counter
+    trgStatus = Status_Reg_Trg_Read();  // Save this status for the eventual event readout
     triggered = true;
-    timeStamp = time();           
-    cntGO1save = cntGO1;
+    timeStamp = time();                    // Save for the event readout 
+    timeStamp8 = Cntr8_Timer_ReadCount();  // Save for the TOF event analysis and readout
+    cntGO1save = cntGO1;                   // Save for the event readout
     //LED2_OnOff(true);
     //Timer_1_Start();  
     // At this point execution returns to its normal flow, allowing other interrupts. The remainder of the
     // event readout process is done in main(), in the infinite for loop.
+}
+
+CY_ISR(isrSPIrx) {
+    while (SPIM_GetRxBufferSize() != 0) {       
+        if (spimPt < MAX_SPIM_RX) spim_buf[spimPt++] = SPIM_ReadRxData();
+    }
 }
 
 // Interrupt to count triggers that occur when the trigger is disabled
@@ -1192,37 +1430,6 @@ void setSettlingWindow(uint8 dt) {
     TrigWindow_V1_5_Count7_1_WritePeriod(dt);
 }
 
-// Functions for loading and reading the configuration of the TOF chip via SPI, either 4-bit or 8-bit.
-// Before calling, first the write or read command must be sent to the chip.
-// Each call writes or reads a single byte.
-void writeTOFdata(uint8 dataByte) {
-    if (SPIM_DATA_WIDTH == 4) {
-        uint8 nibH = (dataByte>>4) & 0x0F;
-        uint8 nibL = dataByte & 0x0F;
-        SPIM_WriteTxData(nibH);
-        SPIM_WriteTxData(nibL);
-    } else {
-        SPIM_WriteTxData(dataByte);
-    }
-}
-
-// Function to read TOF chip register settings via SPI
-// Note that TOF timing data flows out over LVDS lines directly into the PSOC
-uint8 readTOFdata() {
-    uint8 dataByte;
-    if (SPIM_DATA_WIDTH == 4) {
-        while (SPIM_GetRxBufferSize() == 0) writeTOFdata(0x00);
-        uint8 nibH = SPIM_ReadRxData();
-        while (SPIM_GetRxBufferSize() == 0) writeTOFdata(0x00);
-        uint8 nibL = SPIM_ReadRxData();
-        dataByte = ((nibH<<4) & 0xF0) | (nibL & 0x0F); 
-    } else {
-        while (SPIM_GetRxBufferSize() == 0) writeTOFdata(0x00);
-        dataByte = SPIM_ReadRxData();
-    }
-    return dataByte;
-}
-
 // Event PSOC main program
 int main(void)
 {     
@@ -1236,6 +1443,7 @@ int main(void)
         tofA.filled[i] = false;
         tofB.filled[i] = false;
     }
+    spimPt = 0;
     
     nDataReady = 0;
     clkCnt = 0;
@@ -1309,6 +1517,10 @@ int main(void)
     isr_Store_A_Disable();
     isr_Store_B_StartEx(Store_B);
     isr_Store_B_Disable();
+    isr_TOFnrqA_StartEx(isrTOFnrqA);
+    isr_TOFnrqA_Disable();
+    isr_TOFnrqB_StartEx(isrTOFnrqB);
+    isr_TOFnrqB_Disable();
     isr_Ch1_StartEx(isrCh1);
     isr_Ch1_Disable();
     isr_Ch2_StartEx(isrCh2);
@@ -1327,6 +1539,13 @@ int main(void)
     isr_UART_Disable();
     isr_rst_StartEx(isrRST);
     isr_rst_Disable();
+    isr_TKR_StartEx(isrTkrUART);
+    isr_TKR_Disable();
+    isr_SPIrx_StartEx(isrSPIrx);
+    isr_SPIrx_Disable();
+    
+    tkrWritePtr = 0;
+    tkrReadPtr = -1;
     
     // Initialize pointers for the UART double buffer
     cmdReadPtr = 255;
@@ -1337,10 +1556,6 @@ int main(void)
     I2C_2_Start();
     ShiftReg_1_Start();
     
-    // Counters for loading TOF shift registers. The periods are set in the schematic and should never change!
-    Count7_1_Start();
-    Count7_2_Start();
-    
     // Set up the counter used for timing. It counts a 200 Hz clock derived from the watch crystal, and every 200 counts
     // i.e. once each second, it interrupts the CPU, which then increments a 1 Hz count. The time() function adds the two
     // counts together to get a time tag that increments every 5 ms. Note that the main purpose of the 200 Hz clock is to
@@ -1349,9 +1564,10 @@ int main(void)
     
     // Counter for the delay time to wait before resetting the peak detectors.
     Count7_3_Start();
-    // The peak detector output takes about 4us to settle down after its upward swing, so at 12MHz this should be at least 48 ticks to set
-    // the time to start digitizing. This also affects wait times to sent peak detector resets and start looking for new triggers.
-    setPeakDetResetWait(126);
+    // The peak detector output takes about 2us to settle down after its upward swing, so at 24MHz this should be at least 48 ticks to set
+    // the time to start digitizing. This also affects the time to wait for the digitizers to finish (about 1 us needed) and the length
+    // of time to hold the peak detectors in reset.
+    setPeakDetResetWait(28);
 
     // TOF shift registers
     ShiftReg_A_Start();
@@ -1414,8 +1630,68 @@ int main(void)
     //loadI2Creg(I2C_Address_RTC, 0x00, 0x59);
     //loadI2Creg(I2C_Address_RTC, 0x07, 0x80);         
 
+    // Set up the Time-of-Flight DMA (to reduce the number of CPU interrupts if the TOF channels are noisy)
+    TOF_DMA = false;
+  
+    // TOF DMA setup. Not used if TOF_DMA = false, but still in place.
+    nTOF_DMA_samples = CyDmaTdFreeCount()/4 - 2;   // Maximize the number of TDs that we can use.
+    if (nTOF_DMA_samples > TOF_DMA_MAX_NO_OF_SAMPLES) nTOF_DMA_samples = TOF_DMA_MAX_NO_OF_SAMPLES;
+    
+    // DMA Configuration for TOF shift register A 
+    DMA_TOFA_Chan = DMA_TOFA_DmaInitialize(TOF_DMA_BYTES_PER_BURST, TOF_DMA_REQUEST_PER_BURST, 
+                 HI16(DMA_SRC_BASE), HI16(DMA_DST_BASE));
+    CyDmaChDisable(DMA_TOFA_Chan);
+    // Allocate a new transition descriptor for each sample
+    for (int i=0; i<nTOF_DMA_samples; ++i) {
+        tofA_sampleArray[i] = 0;
+        DMA_TOFA_TD[2*i] = CyDmaTdAllocate();
+        DMA_TOFA_TD[2*i+1] = CyDmaTdAllocate();
+    }
+    for (int i=0; i<nTOF_DMA_samples; ++i) {
+        CyDmaTdSetConfiguration(DMA_TOFA_TD[2*i], TOF_DMA_BYTES_PER_BURST, DMA_TOFA_TD[2*i+1], 
+                                                    CY_DMA_TD_AUTO_EXEC_NEXT | CY_DMA_TD_INC_SRC_ADR);
+        if (i < nTOF_DMA_samples-1) {                
+            CyDmaTdSetConfiguration(DMA_TOFA_TD[2*i+1], 1, DMA_TOFA_TD[2*i+2], 0);
+        } else {
+            CyDmaTdSetConfiguration(DMA_TOFA_TD[2*i+1], 1, DMA_TOFA_TD[0], DMA_TOFA__TD_TERMOUT_EN);
+        }
+        CyDmaTdSetAddress(DMA_TOFA_TD[2*i], LO16((uint32)ShiftReg_A_OUT_FIFO_VAL_LSB_PTR), LO16((uint32)&tofA_sampleArray[i]));
+        CyDmaTdSetAddress(DMA_TOFA_TD[2*i+1], LO16((uint32)&Cntr8_Timer_Result_Reg), LO16((uint32)&tofA_clkArray[i]));
+    }
+    CyDmaChSetInitialTd(DMA_TOFA_Chan, DMA_TOFA_TD[0]);
+    CyDmaChPriority(DMA_TOFA_Chan,2);
+    CyDmaChRoundRobin(DMA_TOFA_Chan,1);
+    
+    // DMA Configuration for TOF shift register B 
+    DMA_TOFB_Chan = DMA_TOFB_DmaInitialize(TOF_DMA_BYTES_PER_BURST, TOF_DMA_REQUEST_PER_BURST, 
+                 HI16(DMA_SRC_BASE), HI16(DMA_DST_BASE));
+    CyDmaChDisable(DMA_TOFB_Chan);
+    for (int i=0; i<nTOF_DMA_samples; ++i) {
+        tofB_sampleArray[i] = 0;
+        DMA_TOFB_TD[2*i] = CyDmaTdAllocate();
+        DMA_TOFB_TD[2*i+1] = CyDmaTdAllocate();
+    }
+    for (int i=0; i<nTOF_DMA_samples; ++i) {
+        CyDmaTdSetConfiguration(DMA_TOFB_TD[2*i], TOF_DMA_BYTES_PER_BURST, DMA_TOFB_TD[2*i+1], 
+                                                    CY_DMA_TD_AUTO_EXEC_NEXT | CY_DMA_TD_INC_SRC_ADR);
+        if (i < nTOF_DMA_samples-1) {                
+            CyDmaTdSetConfiguration(DMA_TOFB_TD[2*i+1], 1, DMA_TOFB_TD[2*i+2], 0);
+        } else {
+            CyDmaTdSetConfiguration(DMA_TOFB_TD[2*i+1], 1, DMA_TOFB_TD[0], DMA_TOFB__TD_TERMOUT_EN);
+        }
+        CyDmaTdSetAddress(DMA_TOFB_TD[2*i], LO16((uint32)ShiftReg_B_OUT_FIFO_VAL_LSB_PTR), LO16((uint32)&tofB_sampleArray[i]));
+        CyDmaTdSetAddress(DMA_TOFB_TD[2*i+1], LO16((uint32)&Cntr8_Timer_Result_Reg), LO16((uint32)&tofB_clkArray[i]));
+    }
+    CyDmaChSetInitialTd(DMA_TOFB_Chan, DMA_TOFB_TD[0]); 
+    CyDmaChPriority(DMA_TOFB_Chan,2);
+    CyDmaChRoundRobin(DMA_TOFB_Chan,1);
+    
+    // Counters for loading TOF shift registers. The periods are set in the schematic and should never change!
+    Count7_1_Start();
+    Count7_2_Start();
+    
     // Default configuration of the TOF chip. The second byte should be 0x05 for stop events to be accepted.
-    // That is not normally turned on here by default, but rather is turned on when the master trigger is enabled.
+    // That may not turned on here by default, but rather it may be turned on when the master trigger is enabled.
     // The reference clock is 12 MHz, which has a period of 83333 picoseconds. With 16 bits it will count up to
     // about 5.46 milliseconds. We reset it every 5 milliseconds, so it should only get up to a count of 60,000
     // which is EA60 in hex. We set the LSB by dividing the reference clock period by 8333, which is ~10ps.
@@ -1477,14 +1753,17 @@ int main(void)
     isr_timer_Enable();
     isr_clk200_SetPriority(7);
     isr_clk200_Enable(); 
+
     isr_Store_A_SetPriority(5);
-    isr_Store_A_Enable();   
-    ShiftReg_A_EnableInt();  
     ShiftReg_A_SetIntMode(ShiftReg_A_STORE_INT_EN);  // This can hang up indefinitely if the TOF chip is not set up properly
+    ShiftReg_A_EnableInt();  
     isr_Store_B_SetPriority(5);
-    isr_Store_B_Enable();
-    ShiftReg_B_EnableInt();
     ShiftReg_B_SetIntMode(ShiftReg_B_STORE_INT_EN);  // This can hang up indefinitely if the TOF chip is not set up properly 
+    ShiftReg_B_EnableInt();
+
+    isr_TOFnrqA_SetPriority(6);
+    isr_TOFnrqB_SetPriority(6);
+
     isr_Ch1_SetPriority(7);
     isr_Ch1_Enable();
     isr_Ch2_SetPriority(7);
@@ -1501,8 +1780,12 @@ int main(void)
     isr_GO_Enable();
     isr_rst_SetPriority(4);
     isr_rst_Enable();
+    isr_TKR_SetPriority(5);
+    isr_TKR_Enable();
+    isr_SPIrx_SetPriority(5);
+    isr_SPIrx_Enable();
 
-    numTkrBrds = 1; //MAX_TKR_BOARDS;
+    numTkrBrds = MAX_TKR_BOARDS;
     bool eventDataReady = false;
     bool awaitingCommand = true;   // The system is ready to accept a new command when true
     time_t cmdStartTime = time();
@@ -1513,11 +1796,19 @@ int main(void)
     bool endingRun = false;
     uint8 endData[8];
     bool madeItToTheEnd = false;
+    for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
+        tkrMonitorRates[brd] = 0;
+    }   
+    monitorTkrRates = false;
+    bool waitingRateCnt = false;
+    
+    bool ADCsoftReset=true;
+    nTOFAint = 0;
+    nTOFAint = 0;
     
     // Infinite loop, breaks only if there is a hardware or software reset, or power cycle
     for(;;)
     {
-        //Control_Reg_ScopeTrg_Write(0x01);
         if (USBUART_IsConfigurationChanged() != 0u) {
             /* Wait for USB-UART Device to enumerate */
             while (USBUART_GetConfiguration() == 0u);
@@ -1525,7 +1816,76 @@ int main(void)
             USBUART_CDC_Init();
         }
 
+        //Tracker rate monitoring
+        if (monitorTkrRates) {
+            uint32 diff;
+            if (waitingRateCnt) {
+                if (clkCnt > tkrClkCntStart) {
+                    diff = clkCnt - tkrClkCntStart;
+                } else {
+                    diff = 0xffffffff - (tkrClkCntStart - clkCnt - 1);                       
+                }     
+                if (diff >= 220) {  // Allow 1 second for the Tracker to finish its count
+                    waitingRateCnt = false;
+                    bool trgStat = isTriggerEnabled();
+                    if (trgStat) triggerEnable(false);
+                    bool tkrErr = false;
+                    uint16 theRate[MAX_TKR_BOARDS];
+                    for (int brd=0; brd<numTkrBrds; ++brd) {
+                        theRate[brd] = 0;
+                        sendTrackerCmd(brd, 0x6D, 0, cmdData, TKR_HOUSE_DATA);  // Get counts from tracker
+                        if (nTkrHouseKeeping == 0) {
+                            addError(ERR_MISSING_HOUSEKEEPING,brd,0x5D);
+                            tkrErr = true;
+                        } else {
+                            theRate[brd] = (tkrHouseKeeping[0]<<8 & 0xff00) | tkrHouseKeeping[1];
+                        }
+                        nTkrHouseKeeping = 0;
+                    }
+                    if (!tkrErr) {
+                        if (nTkrMonSamples == tkrMonitorNumAvg) {
+                            //LED2_OnOff(true);
+                            for (int brd=0; brd<numTkrBrds; ++ brd) {
+                                tkrMonitorRates[brd] = tkrMonitorSums[brd]/nTkrMonSamples;
+                                tkrMonitorSums[brd] = theRate[brd];
+                            }
+                            nTkrMonSamples = 1;
+                        } else {
+                            for (int brd=0; brd<numTkrBrds; ++ brd) {
+                                tkrMonitorSums[brd] += theRate[brd];
+                            }
+                            nTkrMonSamples++;
+                        }
+                        tkrClkAtStart = clkCnt;
+                    }
+                    if (trgStat) triggerEnable(true);
+                }
+            } else {
+                if (clkCnt > tkrClkAtStart) {
+                    diff = clkCnt - tkrClkAtStart;
+                } else {
+                    diff = 0xffffffff - (tkrClkAtStart - clkCnt - 1);                       
+                }
+                if (diff >= tkrMonitorInterval) {
+                    // Send a command to the tracker to accumulate trigger counts for 1 second
+                    bool trgStat = isTriggerEnabled();
+                    if (trgStat) triggerEnable(false);
+                    sendSimpleTrackerCmd(0, 0x6C);
+                    tkrClkCntStart = clkCnt;
+                    waitingRateCnt = true;
+                    if (trgStat) triggerEnable(true);
+                }
+            }
+        }
+        
         if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
+            // Stop acquiring TOF hits until the trigger is re-enabled.
+            TOFenable(false);
+            if (TOF_DMA) {  
+                // Copy the TOF information from where the DMA dumped it 
+                copyTOF_DMA('t');
+            } 
+            
             timeDate = RTC_1_ReadTime();
             triggered = false;
 
@@ -1549,15 +1909,25 @@ int main(void)
             adcArray[2] = 0;
             adcArray[3] = 0;
             adcArray[4] = 0;
+            int dummy = 0;
             for (int ch=0; ch<5; ++ch) {
-                set_SPI_SSN(SSN_SAR[ch],false);
-                Control_Reg_1_Write(0x01);
+                set_ADC_SSN(SSN_SAR[ch]);
                 int InterruptState = CyEnterCriticalSection();
-                while ((Status_Reg_M_Read() & 0x20) == 0);
-                adcArray[ch] = ShiftReg_ADC_ReadRegValue();
+                Control_Reg_1_Write(0x01);
+                if (ADCsoftReset) {            // This reset operation will occur only on the first ADC read operation after power-on
+                    if (ch == 7) dummy = dummy + 3; // Delay to stop the read operation between 2nd and 8th SCLK cycles, for soft reset
+                    else dummy = dummy + 4;         // This delay results in the CS going down at the start of the 5th SCLK cycle.
+                    set_ADC_SSN(0);                   
+                    adcArray[ch] = 4095;
+                } else {
+                    while ((Status_Reg_M_Read() & 0x20) == 0);
+                    adcArray[ch] = ShiftReg_ADC_ReadRegValue();
+                }
                 CyExitCriticalSection(InterruptState);
             }
-            set_SPI_SSN(0,false);
+            set_ADC_SSN(SSN_None);
+            if (dummy > 0) ADCsoftReset = false;
+            //LED2_OnOff(true);
             
             // Check that a tracker trigger was received and whether data are ready
             // This check generally works the first try and can maybe be removed in the long run.
@@ -1614,18 +1984,21 @@ int main(void)
             } else {   // Make up an empty tracker event if no data were ready
                 makeDummyTkrEvent(0, 0, 0, 6);
             }
-            
+
             // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
             // instrument trigger, so we have to correlate the two channels with each other and with the event
             // by looking at the course timing information.
-            uint16 timeStamp16 = (uint16)(timeStamp & 0x0000FFFF);
+            uint8 timeStamp8m1;
+            if (timeStamp8 == 0) timeStamp8m1 = 199;
+            else timeStamp8m1 = timeStamp8 - 1; 
+            
             int nI=0;
             uint8 idx[TOFMAX_EVT];
             for (int i=0; i<TOFMAX_EVT; ++i) {           // Make a list of TOF hits in channel A
                 int iptr = tofA.ptr - i - 1;             // Work backwards in time, starting with the most recent measurement
                 if (iptr < 0) iptr = iptr + TOFMAX_EVT;  // Wrap around the circular buffer
                 if (!tofA.filled[iptr]) continue;        // Use only entries filled since the previous readout
-                if (timeStamp16 == tofA.clkCnt[iptr] || timeStamp16 == tofA.clkCnt[iptr]+1) {
+                if (timeStamp8 == tofA.clkCnt[iptr] || timeStamp8 == tofA.clkCnt[iptr]+1) {
                     idx[nI] = iptr;                      // Only look at entries within two 5ms clock periods of the event time stamp
                     ++nI;
                 }
@@ -1641,16 +2014,15 @@ int main(void)
                 if (jptr < 0) jptr = jptr + TOFMAX_EVT;  // Wrap around the circular buffer
                 if (!tofB.filled[jptr]) continue;        // Use only entries filled since the previous readout
                 // Look only at entries filled within two 5 ms clock periods of the event time stamp
-                if (!(tofB.clkCnt[jptr] == timeStamp16 || tofB.clkCnt[jptr] == timeStamp16-1)) continue;
+                if (!(tofB.clkCnt[jptr] == timeStamp8 || tofB.clkCnt[jptr] == timeStamp8m1)) continue;
                 uint32 BT = tofB.shiftReg[jptr];
-                uint16 stopB = (uint16)(BT & 0x0000FFFF);       // Stop time for channel B
-                uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);  // Reference clock for channel B
-                //bTOF = refB;
+                uint16 stopB = (uint16)(BT & 0x0000FFFF);          // Stop time for channel B
+                uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);     // Reference clock for channel B
                 uint16 timej = refB*8333 + stopB;                  // Full time for channel B in 10 picosecond units
                 ++nJ;
                 for (int i=0; i<nI; ++i) {                          // Loop over the channel A hits
                     int iptr = idx[i];
-                    if (abs(tofA.clkCnt[iptr] - tofB.clkCnt[jptr]) > 1) continue; // Two channels must be within +- 1 clock period
+                    if (minTdif(tofA.clkCnt[iptr], tofB.clkCnt[jptr]) > 1) continue; // Two channels must be within +- 1 clock period
                     uint32 AT = tofA.shiftReg[iptr];
                     uint16 stopA = (uint16)(AT & 0x0000FFFF);       // Stop time for channel A
                     uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);  // Reference clock for channel A
@@ -1820,7 +2192,7 @@ int main(void)
         
         // Data goes out by USBUART, for bench testing, or by SPI to the main PSOC
         // Format: 3 byte aligned packeckets with a 3 byte header (0xDC00FF) and 3 byte EOR (0xFF00FF)       
-        if (nDataReady > 0 || cmdDone) {
+        if (nDataReady > 0 || cmdDone) {   
             if (nDataReady > 0) {    // Send out a command echo only if there are also data to send
                 dataLED(true);
                 if (!cmdDone) { // Output is event data, not a command response
@@ -1891,7 +2263,7 @@ int main(void)
                 } else {         
                     if (madeItToTheEnd) {  // This is for debugging and will eventually be removed
                         //LED2_OnOff(true);
-                        Control_Reg_ScopeTrg_Write(0x01);   // Scope trigger for debugging
+                        //Control_Reg_ScopeTrg_Write(0x01);   // Scope trigger for debugging
                         madeItToTheEnd = false;
                     }
                     for (int i=0; i<nDataReady; ++i) {
@@ -1907,7 +2279,10 @@ int main(void)
                 set_SPI_SSN(SSN_None, false);  //this shouldn't be needed, waits for SPI buffered data -B
                 nDataReady = 0;
                 if (eventDataReady) {   // re-enable the trigger after event data has been output
-                    if (!endingRun) triggerEnable(true);
+                    if (!endingRun) {
+                        triggerEnable(true);
+                        TOFenable(true);
+                    }
                     eventDataReady = false;
                 }
                 if (cmdDone) {  // The command is completely finished once the echo and data have gone out
@@ -2149,43 +2524,7 @@ int main(void)
                                 // Ignore commands that are supposed to be internal to the tracker,
                                 // to avoid confusing the tracker logic.
                                 if (tkrCmdCode == 0x52 || tkrCmdCode == 0x53) break;
-                                tkrLED(true);
-                                UART_TKR_PutChar(cmdData[0]);   // FPGA address
-                                UART_TKR_PutChar(tkrCmdCode);
-                                uint8 nDataTKR = cmdData[2];
-                                UART_TKR_PutChar(nDataTKR);
-                                for (int i=0; i<nDataTKR; ++i) {
-                                    UART_TKR_PutChar(cmdData[3+i]);
-                                }
-                                
-                                if (tkrCmdCode == 0x0F) {  // This command sets the number of tracker boards in the readout.
-                                    numTkrBrds = cmdData[3];  // Make sure the PSOC also knows how many boards are used.
-                                }
-                                // Wait around for up to a second for all the data to transmit
-                                tStart = time();
-                                while (UART_TKR_GetTxBufferSize() > 0) {                                           
-                                    if (time() - tStart > 200) {
-                                        addError(ERR_TX_FAILED, tkrCmdCode, command);
-                                        tkrLED(false);
-                                        break;
-                                    }
-                                }                                
-                                if (tkrCmdCode == 0x67 || tkrCmdCode == 0x6C) {
-                                    tkrLED(false);
-                                    break; // These commands have no echo
-                                }
-                                // Now look for the bytes coming back from the Tracker.
-                                if (tkrCmdCode >= 0x20 && tkrCmdCode <= 0x25) {
-                                    getASICdata();
-                                } else if (tkrCmdCode == 0x46) {
-                                    getTKRi2cData();
-                                } else {
-                                    rc = getTrackerData(0);
-                                    if (rc != 0) {
-                                        addError(ERR_GET_TKR_DATA, rc, command);
-                                    }
-                                }
-                                tkrLED(false);
+                                sendTrackerCmd(cmdData[0], cmdData[1], cmdData[2], &cmdData[3], 0);
                                 break;
                             case '\x41':        // Load a tracker ASIC mask register
                                 tkrLED(true);
@@ -2341,15 +2680,18 @@ int main(void)
                                     set_SPI_SSN(SSN_None, false);
                                 }
                                 break;
-                            case '\x0E':        // Read the TOF IC configuration
-                                SPIM_ClearRxBuffer();
+                            case '\x0E':        // Read the TOF IC configuration                              
                                 set_SPI_SSN(SSN_TOF, true);
-                                CyDelay(1);
-                                writeTOFdata(readConfig);                                
-                                readTOFdata();    // The first byte read back is always garbage.
+                                Control_Reg_ScopeTrg_Write(0x01);
+                                SPIM_ClearRxBuffer();
+                                writeTOFdata(readConfig);
                                 for (int bt=0; bt<TOFSIZE; ++bt) {
-                                    dataOut[bt] = readTOFdata();
+                                    writeTOFdata(0x00);
                                 }
+                                for (int bt=0; bt<TOFSIZE; ++bt) {
+                                    dataOut[bt] = spim_buf[bt];
+                                }
+                                spimPt = 0;
                                 nDataReady = TOFSIZE;
                                 set_SPI_SSN(SSN_None, false);
                                 break;
@@ -2572,6 +2914,7 @@ int main(void)
                                         addError(ERR_TKR_TRG_ENABLE, dataOut[2], rc);;
                                     }
                                 }
+                                TOFenable(true);
                                 nDataReady = 0;  // Don't send the tracker echo back to the UART
                                 nDataBytes = 0;  // Also, avoid sending an echo from this command
                                 cmdDone = false;
@@ -2628,15 +2971,17 @@ int main(void)
                                 uint8 nA = 0;
                                 uint8 nB = 0;
                                 InterruptState = CyEnterCriticalSection();
+                                if (TOF_DMA) copyTOF_DMA('t');
                                 for (int i=0; i<TOFMAX_EVT; ++i) {
                                     if (tofA.filled[i]) ++nA;
                                     if (tofB.filled[i]) ++nB;
                                 }
-                                dataOut[2] = 1;
-                                if (nA > 21 || nB > 21) {
+                                dataOut[2] = nTOF_DMA_samples;
+                                int maxTOFhit = MAX_DATA_OUT/12;
+                                if (nA > maxTOFhit || nB > maxTOFhit) {
                                     dataOut[2] = 2;
-                                    if (nA > 21) nA = 21;
-                                    if (nB > 21) nB = 21;
+                                    if (nA > maxTOFhit) nA = maxTOFhit;
+                                    if (nB > maxTOFhit) nB = maxTOFhit;
                                 }
                                 dataOut[0] = nA;
                                 dataOut[1] = nB;
@@ -2644,47 +2989,35 @@ int main(void)
                                 int jptr = tofB.ptr;
                                 uint8 cnt = 0;
                                 for (int i=0; i<TOFMAX_EVT; ++i) {
-                                    if (!tofA.filled[i]) continue;
                                     --iptr;
                                     if (iptr < 0) iptr += TOFMAX_EVT;
+                                    if (!tofA.filled[iptr]) continue;                                    
                                     uint32 AT = tofA.shiftReg[iptr];
                                     uint16 stopA = (uint16)(AT & 0x0000FFFF);
                                     uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);
-                                    dataOut[nDataReady] = byte16(refA,0);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(refA,1);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(stopA,0);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(stopA,1);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(tofA.clkCnt[iptr],0);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(tofA.clkCnt[iptr],1);
-                                    ++nDataReady;
+                                    dataOut[nDataReady++] = byte16(refA,0);
+                                    dataOut[nDataReady++] = byte16(refA,1);
+                                    dataOut[nDataReady++] = byte16(stopA,0);
+                                    dataOut[nDataReady++] = byte16(stopA,1);
+                                    dataOut[nDataReady++] = byte16(tofA.clkCnt[iptr],0);
+                                    dataOut[nDataReady++] = byte16(tofA.clkCnt[iptr],1);
                                     ++cnt;
                                     if (cnt >= nA) break;
                                 }
                                 cnt = 0;
                                 for (int i=0; i<TOFMAX_EVT; ++i) {
-                                    if (!tofB.filled[i]) continue;
                                     --jptr;
                                     if (jptr < 0) jptr += TOFMAX_EVT;
+                                    if (!tofB.filled[jptr]) continue;
                                     uint32 BT = tofB.shiftReg[jptr];
                                     uint16 stopB = (uint16)(BT & 0x0000FFFF);
                                     uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);
-                                    dataOut[nDataReady] = byte16(refB,0);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(refB,1);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(stopB,0);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(stopB,1);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(tofB.clkCnt[jptr],0);
-                                    ++nDataReady;
-                                    dataOut[nDataReady] = byte16(tofB.clkCnt[jptr],1);
-                                    ++nDataReady;
+                                    dataOut[nDataReady++] = byte16(refB,0);
+                                    dataOut[nDataReady++] = byte16(refB,1);
+                                    dataOut[nDataReady++] = byte16(stopB,0);
+                                    dataOut[nDataReady++] = byte16(stopB,1);
+                                    dataOut[nDataReady++] = byte16(tofB.clkCnt[jptr],0);
+                                    dataOut[nDataReady++] = byte16(tofB.clkCnt[jptr],1);
                                     ++cnt;
                                     if (cnt >= nB) break;
                                 }
@@ -2733,6 +3066,65 @@ int main(void)
                                     calibrateAllInputTiming();
                                 } else {
                                     calibrateInputTiming(cmdData[0]);
+                                }
+                                break;
+                            case '\x49': // Read accumulated tracker layer rates
+                                dataOut[0] = 0x6D;
+                                dataOut[1] = numTkrBrds;                                
+                                for (int brd=0; brd<numTkrBrds; ++brd) {
+                                    dataOut[2 + brd*2] = byte16(tkrMonitorRates[brd],0);
+                                    dataOut[2 + brd*2 + 1] = byte16(tkrMonitorRates[brd],1);
+                                }
+                                nDataReady = 2*(1+numTkrBrds);
+                                break;
+                            case '\x4A': // Set up and initiate tracker rate monitoring
+                                if (cmdData[0] == 0 && cmdData[1] == 0) {
+                                    monitorTkrRates = false;
+                                    break;
+                                }
+                                tkrMonitorInterval = cmdData[0]*200;  // Number of seconds between monitoring events
+                                if (tkrMonitorInterval < 250) tkrMonitorInterval = 250;
+                                tkrMonitorNumAvg = cmdData[1];
+                                nTkrMonSamples = 0;
+                                for (int brd=0; brd<numTkrBrds; ++brd) {
+                                    tkrMonitorSums[brd] = 0;
+                                }
+                                tkrClkAtStart = clkCnt;        
+                                monitorTkrRates = true;
+                                waitingRateCnt = false;
+                                break;
+                            case '\x4B': // Set the delay between trigger and peak detector readout
+                                if (cmdData[0] < 127) setPeakDetResetWait(cmdData[0]);
+                                else addError(ERR_BAD_CMD_INPUT,command,cmdData[0]);
+                                break;
+                            case '\x4C': // Enable or disable the TOF data accumulation
+                                if (cmdData[0] == 1) {
+                                    for (int j=0; j<TOFMAX_EVT; ++j) {
+                                        tofA.filled[j] = false;
+                                        tofB.filled[j] = false;
+                                    }
+                                    tofB.ptr = 0;
+                                    tofA.ptr = 0;
+                                    TOFenable(true);
+                                    while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) ShiftReg_A_ReadData();
+                                    while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) ShiftReg_B_ReadData();
+                                } else {
+                                    TOFenable(false);
+                                }
+                                break;
+                            case '\x4D': // Select TOF acquisition mode
+                                if (cmdData[0] == 1) {
+                                    TOF_DMA = true;
+                                    isr_TOFnrqA_Enable();
+                                    isr_TOFnrqB_Enable();
+                                    ShiftReg_A_DisableInt();
+                                    ShiftReg_B_DisableInt();
+                                } else {
+                                    TOF_DMA = false;
+                                    isr_TOFnrqA_Disable();
+                                    isr_TOFnrqB_Disable();
+                                    ShiftReg_A_EnableInt();
+                                    ShiftReg_B_EnableInt();
                                 }
                                 break;
                         } // End of command switch

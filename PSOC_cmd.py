@@ -172,6 +172,43 @@ def getShortData(address, nBytes):
         print("getShortData: invalid trailer returned: " + str(trailer))
     return ret
 
+def startTkrRateMonitor(interval, numAvg):
+    print("startTkrRateMonitor: interval = " + str(interval) + " seconds. Average " + str(numAvg) + " 1-second measurements")
+    cmdHeader = mkCmdHdr(2, 0x4a, addrEvnt)
+    ser.write(cmdHeader)    
+    data1 = mkDataByte(interval, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(numAvg, addrEvnt, 2)
+    ser.write(data2)    
+    
+def stopTkrRateMonitor():
+    print("stopTkrRateMonitor: stopping the monitoring of tracker rates.")
+    cmdHeader = mkCmdHdr(2, 0x4a, addrEvnt)
+    ser.write(cmdHeader)    
+    data1 = mkDataByte(0, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0, addrEvnt, 2)
+    ser.write(data2)
+    
+def getTkrLyrRates():
+    print("getTkrLyrRates: getting trigger rates from all tracker layers")
+    cmdHeader = mkCmdHdr(0, 0x49, addrEvnt)
+    ser.write(cmdHeader)    
+    time.sleep(2)
+    dataReturned = getTkrHousekeeping()
+    if dataReturned[0] != b'\x6D':
+        print("getTkrLyrRates: byte code 0x6D not returned! Got instead " + str(dataReturned[0]))
+        return
+    numLayers = bytes2int(dataReturned[1])
+    if numLayers < 1 or numLayers > 8:
+        print("getTkrLyrRates: bad number of layers " + str(numLayers) + " returned!")
+        return
+    for lyr in range(numLayers):
+        byte2 = bytes2int(dataReturned[2+lyr])
+        byte1 = bytes2int(dataReturned[3+lyr])
+        print("getTkrLyrRates: byte1 = " + str(byte1) + " and byte2 = " + str(byte2))
+        print("getTkrLyerRates: layer " + str(lyr+1) + ": rate = " + str(byte2*256 + byte1) + " Hz")
+        
 def getLyrTrgCnt(FPGA):
     print("getLyrTrgCnt: getting the trigger count from tracker layer " + str(FPGA))
     cmdHeader = mkCmdHdr(3, 0x10, addrEvnt)
@@ -192,7 +229,8 @@ def getLyrTrgCnt(FPGA):
     data3 = mkDataByte(0, addrEvnt, 3)
     ser.write(data3)
     time.sleep(0.1)
-    rate = bytes2int(getTkrHousekeeping()[6])
+    dataReturned = getTkrHousekeeping()
+    rate = bytes2int(dataReturned[6])*256 + bytes2int(dataReturned[7])
     print("getLyrTrgCnt: the trigger rate for layer " + str(FPGA) + " is " + str(rate) + " Hz")
 
 def loadEventPSOCrtc():
@@ -254,12 +292,25 @@ def setTriggerPrescale(whichOne, count):
     ser.write(data2)
 
 def setSettlingWindow(count):
+    if count > 126:
+        print("setSettlingWindow: input count of " + str(count) + " is too large. Must be < 127")
+        return
     cmdHeader = mkCmdHdr(1, 0x3A, addrEvnt)
     ser.write(cmdHeader)
     data1 = mkDataByte(count, addrEvnt, 1)
     ser.write(data1)
-    print("setTriggerWindow: setting the trigger window to " + str(count) + " counts")
-
+    print("setSettlingWindow: setting the comparator settling time window to " + str(count) + " counts")
+    
+def setPeakDetResetWait(count):
+    if count > 126:
+        print("setPeakDetResetWait: input count of " + str(count) + " is too large. Must be < 127")
+        return
+    cmdHeader = mkCmdHdr(1, 0x4B, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(count, addrEvnt, 1)
+    ser.write(data1)
+    print("setPeakDetResetWait: setting the peak detector settling wait time to " + str(count) + " counts")
+    
 def enableTrigger():
     cmdHeader = mkCmdHdr(1, 0x3B, addrEvnt)
     ser.write(cmdHeader)
@@ -1382,7 +1433,28 @@ def readSAR_ADC(address):
     value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
     return value*3.3/4096.
 
+def TOFselectDAQ(address, mode):
+    if mode == "DMA": 
+        arg = 1
+        print("TOFselecDAQ: use DMA mode for the TOF data acquisition")
+    else: 
+        arg = 0
+        print("TOFselecDAQ: use interrupt mode for the TOF data acquisition")
+    cmdHeader = mkCmdHdr(1, 0x4D, address)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(arg, address, 1)
+    ser.write(data1)    
+
+def TOFenable(address, onOFF):
+    if onOFF == 1: print("TOFenable, enable the TOF")
+    else: print("TOFenable, disable the TOF")
+    cmdHeader = mkCmdHdr(1, 0x4C, address)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(onOFF, address, 1)
+    ser.write(data1)
+
 def readAllTOFdata(address):
+    print("readAllTOFdata: read back all accumulated time-of-flight data")
     cmdHeader = mkCmdHdr(0, 0x40, address)
     ser.write(cmdHeader)
     time.sleep(0.1)
@@ -1464,7 +1536,7 @@ def readTofConfig():
     address = addrEvnt
     cmdHeader = mkCmdHdr(0, 0x0E, address)
     ser.write(cmdHeader)
-    time.sleep(0.1)
+    time.sleep(0.4)
     cmd,cmdData,dataBytes = getData(address)
     for i in range(len(dataBytes)):
         ret = dataBytes[i]

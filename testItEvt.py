@@ -24,8 +24,8 @@ setInternalRTC(address)
 #time.sleep(1)
 getInternalRTC(address)
 
-setTofDAC(1, 63, address)   
-setTofDAC(2, 63, address)
+setTofDAC(1, 90, address)   
+setTofDAC(2, 90, address)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
@@ -46,6 +46,8 @@ readTofConfig()
 
 #ret = ser.read()
 #print(ret)
+
+readErrors(address)
 
 boards = [0]
 nBoards = len(boards)
@@ -161,14 +163,32 @@ if nBoards > 0:
         tkrGetASICconfig(0, 3)
         readErrors(address)
 
-    for brd in boards:
+    #for brd in boards:
         # Measure the trigger noise count
-        getLyrTrgCnt(brd)
-        getLyrTrgCnt(brd)
+        #getLyrTrgCnt(brd)
+        #getLyrTrgCnt(brd)
 
-#sys.exit("abort")
+#for i in range(1):
+#    print("send reset pulse")
+#    logicReset(addrEvnt)
+#    time.sleep(0.3)
 
-mask = 0x01    # T1, T2, T3
+TOFselectDAQ(address,"DMA")
+
+TOFenable(address, 1)
+time.sleep(3)
+TOFenable(address, 0)
+readAllTOFdata(address)
+
+tkrSetDAC(brd, 31, "threshold", 3 , "low")
+tkrGetDAC(brd, 3, "threshold")
+
+#getLyrTrgCnt(0)
+
+#startTkrRateMonitor(4, 6)
+#time.sleep(2)
+
+mask = 0x0d    # T3
 print("Setting the first trigger mask to " + str(mask))
 setTriggerMask(1, mask)
 print("The first trigger mask is set to  " + str(hex(getTriggerMask(1))))
@@ -179,6 +199,7 @@ print("Setting the PMT trigger prescale to " + str(prescale))
 setTriggerPrescale("PMT", prescale)
 
 setSettlingWindow(72)
+setPeakDetResetWait(28)
 
 mask = 0x00    # T1, T3 prescaled
 print("Setting the second trigger mask to " + str(mask))
@@ -189,19 +210,14 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
 for brd in boards:
-    tkrSetDAC(brd, 31, "threshold", 20 , "low")
+    tkrSetDAC(brd, 31, "threshold", 30 , "low")
     tkrGetDAC(brd, 3, "threshold")
-
-for i in range(1):
-    print("send reset pulse")
-    logicReset(addrEvnt)
-    time.sleep(0.3)
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
-ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 20, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 3, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
@@ -214,6 +230,9 @@ chName = ["G","T3","T1","T4","T2"]
 for ch in range(5):
     cnt = getEndOfRunChannelCount(ch+1)
     print("Counter for channel " + chName[ch] + " = " + str(cnt))
+
+#stopTkrRateMonitor()
+#getTkrLyrRates()
 
 if asicReset and nBoards>0: tkrAsicPowerOff()
 
