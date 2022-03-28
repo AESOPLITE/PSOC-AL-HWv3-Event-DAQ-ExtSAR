@@ -22,7 +22,7 @@
 #define VERSION 7
 
 /*=========================================================================
- * V7 Adding ADC software reset. Changed ADC readout to SPI -Brian Lucas
+ * V7 Adding ADC software reset. Changed ADC readout to SPI 
  * V5 DO NOT USE A VERSION earlier than this with Production Main PSOC code
  *    P6[5] changed from Sclk output to input of Backplane activiity signal
  *    SCLK for Main PSOC routed instead to the SCLK3 pin P4[2] -Brian Lucas
