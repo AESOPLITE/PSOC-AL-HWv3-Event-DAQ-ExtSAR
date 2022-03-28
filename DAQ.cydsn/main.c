@@ -273,11 +273,6 @@ volatile uint8 tofA_clkArray[TOF_DMA_MAX_NO_OF_SAMPLES];
 volatile uint32 tofB_sampleArray[TOF_DMA_MAX_NO_OF_SAMPLES] __attribute__ ((aligned(32))) = {0};
 volatile uint8 tofB_clkArray[TOF_DMA_MAX_NO_OF_SAMPLES];
 
-// Buffer for receiving bytes from the configuration register of the TOF chip
-#define MAX_SPIM_RX 32
-volatile int spimPt = 0;
-volatile uint8 spim_buf[MAX_SPIM_RX]; 
-
 bool outputTOF;  // Controls a special debugging mode to send TOF data out immediately each time it comes in
 
 // Temporary storage of Tracker housekeeping data
@@ -1228,7 +1223,8 @@ uint8 readTOFdata() {
         uint8 nibL = SPIM_ReadRxData();
         dataByte = ((nibH<<4) & 0xF0) | (nibL & 0x0F); 
     } else {
-        while (SPIM_GetRxBufferSize() == 0) writeTOFdata(0x00);
+        writeTOFdata(0x00);
+        while (SPIM_GetRxBufferSize() == 0);
         dataByte = SPIM_ReadRxData();
     }
     return dataByte;
@@ -1394,12 +1390,6 @@ CY_ISR(isrGO) {
     // event readout process is done in main(), in the infinite for loop.
 }
 
-CY_ISR(isrSPIrx) {
-    while (SPIM_GetRxBufferSize() != 0) {       
-        if (spimPt < MAX_SPIM_RX) spim_buf[spimPt++] = SPIM_ReadRxData();
-    }
-}
-
 // Interrupt to count triggers that occur when the trigger is disabled
 CY_ISR(isrGO1) {
     cntGO1++;     
@@ -1443,7 +1433,7 @@ int main(void)
         tofA.filled[i] = false;
         tofB.filled[i] = false;
     }
-    spimPt = 0;
+    //spimPt = 0;
     
     nDataReady = 0;
     clkCnt = 0;
@@ -1541,8 +1531,6 @@ int main(void)
     isr_rst_Disable();
     isr_TKR_StartEx(isrTkrUART);
     isr_TKR_Disable();
-    isr_SPIrx_StartEx(isrSPIrx);
-    isr_SPIrx_Disable();
     
     tkrWritePtr = 0;
     tkrReadPtr = -1;
@@ -1782,8 +1770,6 @@ int main(void)
     isr_rst_Enable();
     isr_TKR_SetPriority(5);
     isr_TKR_Enable();
-    isr_SPIrx_SetPriority(5);
-    isr_SPIrx_Enable();
 
     numTkrBrds = MAX_TKR_BOARDS;
     bool eventDataReady = false;
@@ -2680,18 +2666,17 @@ int main(void)
                                     set_SPI_SSN(SSN_None, false);
                                 }
                                 break;
-                            case '\x0E':        // Read the TOF IC configuration                              
+                            case '\x0E':        // Read the TOF IC configuration 
+                                //0xB5, 0x05, 0x0C, 0x8D, 0x20, 0x00, 0x00, 0x08, 0xA1, 0x13, 0x00,
+                                //0x0A, 0xCC, 0xCC, 0xF1, 0x7D, 0x00
                                 set_SPI_SSN(SSN_TOF, true);
-                                Control_Reg_ScopeTrg_Write(0x01);
                                 SPIM_ClearRxBuffer();
+                                Control_Reg_ScopeTrg_Write(0x01);
                                 writeTOFdata(readConfig);
-                                for (int bt=0; bt<TOFSIZE+4; ++bt) {
-                                    writeTOFdata(0x00);
-                                }
+                                readTOFdata();
                                 for (int bt=0; bt<TOFSIZE; ++bt) {
-                                    dataOut[bt] = spim_buf[bt];
+                                    dataOut[bt] = readTOFdata();
                                 }
-                                spimPt = 0;
                                 nDataReady = TOFSIZE;
                                 set_SPI_SSN(SSN_None, false);
                                 break;

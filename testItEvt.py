@@ -42,7 +42,8 @@ setPmtDAC(5, ch5Thresh, address)
 print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts.")
 #sys.exit("abort")
 readTofConfig()
-#sys.exit("abort")
+
+sys.exit("abort")
 
 #ret = ser.read()
 #print(ret)
