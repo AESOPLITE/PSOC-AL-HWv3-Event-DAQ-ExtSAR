@@ -79,11 +79,11 @@ for chan in range(1,6):
     time.sleep(0.1)
     print("Channel " + str(chan) + " PMT DAC was set to " + str(readPmtDAC(chan, addrEvnt)) + " counts")
 
-#sys.exit("abort")
-
 print(" ")
 print("Check the configuration of the TOF chip:")
 readTofConfig()
+
+#sys.exit("abort")
 
 print(" ")
 print("Start the Tracker setup:")

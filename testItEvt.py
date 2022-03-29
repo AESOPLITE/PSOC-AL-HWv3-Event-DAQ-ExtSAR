@@ -16,6 +16,9 @@ print("Entering testItEvt.py")
 
 address = 8   # Address of the event PSOC
 
+print("Set up the Event PSOC to send its output over the UART")
+setOutputMode("UART")
+
 #LED2("on", address)
 #time.sleep(1)
 #LED2("off", address)
@@ -24,12 +27,12 @@ setInternalRTC(address)
 #time.sleep(1)
 getInternalRTC(address)
 
-setTofDAC(1, 90, address)   
-setTofDAC(2, 90, address)
+setTofDAC(1, 80, address)   
+setTofDAC(2, 80, address)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
-pmtThr = 20
+pmtThr = 10
 ch5Thresh = 90
 pmtThresh = [pmtThr,pmtThr,pmtThr,pmtThr,ch5Thresh]
 for chan in range(1,5):
@@ -43,7 +46,7 @@ print("Channel 5 PMT DAC was set to " + str(readPmtDAC(5, address)) + " counts."
 #sys.exit("abort")
 readTofConfig()
 
-sys.exit("abort")
+#sys.exit("abort")
 
 #ret = ser.read()
 #print(ret)
@@ -181,15 +184,15 @@ time.sleep(3)
 TOFenable(address, 0)
 readAllTOFdata(address)
 
-tkrSetDAC(brd, 31, "threshold", 3 , "low")
+tkrSetDAC(brd, 31, "threshold", 20 , "low")
 tkrGetDAC(brd, 3, "threshold")
 
-#getLyrTrgCnt(0)
+getLyrTrgCnt(0)
 
 #startTkrRateMonitor(4, 6)
 #time.sleep(2)
 
-mask = 0x0d    # T3
+mask = 0x06    # T1&T4
 print("Setting the first trigger mask to " + str(mask))
 setTriggerMask(1, mask)
 print("The first trigger mask is set to  " + str(hex(getTriggerMask(1))))
@@ -211,14 +214,14 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
 for brd in boards:
-    tkrSetDAC(brd, 31, "threshold", 30 , "low")
+    tkrSetDAC(brd, 31, "threshold", 15 , "low")
     tkrGetDAC(brd, 3, "threshold")
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
-ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 3, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 10, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))

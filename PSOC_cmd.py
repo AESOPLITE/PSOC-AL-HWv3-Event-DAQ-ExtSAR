@@ -876,16 +876,17 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         f.write(strOut)   
         TOFavg = TOFavg + float(dtmin)
         TOFavg2 = TOFavg2 + float(dtmin)*float(dtmin)
-        ADCavg[0] = ADCavg[0] + T1
-        ADCavg[1] = ADCavg[1] + T2
-        ADCavg[2] = ADCavg[2] + T3
-        ADCavg[3] = ADCavg[3] + T4
-        ADCavg[4] = ADCavg[4] + G
-        ADCavg2[0] = ADCavg2[0] + T1*T1
-        ADCavg2[1] = ADCavg2[1] + T2*T2
-        ADCavg2[2] = ADCavg2[2] + T3*T3
-        ADCavg2[3] = ADCavg2[3] + T4*T4
-        ADCavg2[4] = ADCavg2[4] + G*G
+        if event != 0:
+            ADCavg[0] = ADCavg[0] + T1
+            ADCavg[1] = ADCavg[1] + T2
+            ADCavg[2] = ADCavg[2] + T3
+            ADCavg[3] = ADCavg[3] + T4
+            ADCavg[4] = ADCavg[4] + G
+            ADCavg2[0] = ADCavg2[0] + T1*T1
+            ADCavg2[1] = ADCavg2[1] + T2*T2
+            ADCavg2[2] = ADCavg2[2] + T3*T3
+            ADCavg2[3] = ADCavg2[3] + T4*T4
+            ADCavg2[4] = ADCavg2[4] + G*G
         # Output all of the data to an ASCII file
         if outputEvents:
             timeStr = str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year)
@@ -968,9 +969,12 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     print("Average number of hits per event = " + str(numHitsAvg))
     sigmaTOF = math.sqrt(TOFavg2 - TOFavg*TOFavg)
     for ch in range(5):
-        ADCavg[ch] = ADCavg[ch]/float(numEvnts)
-        ADCavg2[ch] = ADCavg2[ch]/float(numEvnts)
-        Sigma[ch] = math.sqrt(ADCavg2[ch] - ADCavg[ch]*ADCavg[ch])
+        if numEvnts > 1:
+            ADCavg[ch] = ADCavg[ch]/float(numEvnts-1)
+            ADCavg2[ch] = ADCavg2[ch]/float(numEvnts-1)
+            Sigma[ch] = math.sqrt(ADCavg2[ch] - ADCavg[ch]*ADCavg[ch])
+        else:
+            Sigma[ch] = 0.
     f.close()
     if outputEvents: f2.close()
     print("Number of triggers generated = " + str(cntGo1))
