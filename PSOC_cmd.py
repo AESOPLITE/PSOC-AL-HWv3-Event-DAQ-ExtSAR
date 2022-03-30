@@ -1,6 +1,5 @@
 import serial
 import time
-import numpy
 import binascii
 from bitstring import BitArray
 import math
@@ -768,15 +767,15 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         #    print("limitedRun: echo of the readTracker flag = " + str(ret))
         for i in range(nPackets):
             byte1 = ser.read()
-            if verbose: print("   Packet " + str(i) + ", byte 1 = " + str(bytes2int(byte1)) + " decimal, " + str(byte1.hex()) + " hex")
+            #if verbose: print("   Packet " + str(i) + ", byte 1 = " + str(bytes2int(byte1)) + " decimal, " + str(byte1.hex()) + " hex")
             dataList.append(bytes2int(byte1))
             byteList.append(byte1)
             byte2 = ser.read()
-            if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(byte2)) + " decimal, " + str(byte2.hex()) + " hex")
+            #if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(byte2)) + " decimal, " + str(byte2.hex()) + " hex")
             dataList.append(bytes2int(byte2))
             byteList.append(byte2)
             byte3 = ser.read()
-            if verbose: print("   Packet " + str(i) + ", byte 3 = " + str(bytes2int(byte3)) + " decimal, " + str(byte3.hex()) + " hex")
+            #if verbose: print("   Packet " + str(i) + ", byte 3 = " + str(bytes2int(byte3)) + " decimal, " + str(byte3.hex()) + " hex")
             dataList.append(bytes2int(byte3))
             byteList.append(byte3)
         ret = ser.read(3)
@@ -786,7 +785,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         trigger = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
         cntGo1 = dataList[14]*16777216 + dataList[15]*65536 + dataList[16]*256 + dataList[17]
         timeDate = dataList[18]*16777216 + dataList[19]*65536 + dataList[20]*256 + dataList[21]
-        if verbose: print("   Trigger: " + str(trigger) + " accepted, " + str(cntGo1) + " generated.  Data List length = " + str(len(dataList)))
+        if verbose: print("   Trigger: " + str(trigger) + " accepted, " + str(trigger+cntGo1) + " generated.  Data List length = " + str(len(dataList)))
         timeStamp = dataList[10]*16777216 + dataList[11]*65536 + dataList[12]*256 + dataList[13]
         year = ((timeDate & 0x7C000000) >> 26) + 2000
         month = (timeDate & 0x03C00000) >> 22
@@ -977,7 +976,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             Sigma[ch] = 0.
     f.close()
     if outputEvents: f2.close()
-    print("Number of triggers generated = " + str(cntGo1))
+    print("Number of triggers generated = " + str(cntGo1+cntGo))
     print("Number of triggers accepted = " + str(cntGo))
     if (cntGo+cntGo1 == 0):
         live = 0.
@@ -1472,23 +1471,45 @@ def readAllTOFdata(address):
     if (b3 == 2):
         print("    readAllTOFdata: the TOF data were truncated")
     ptr = 3
+    refA= []
+    refB= []
+    clkCntA= []
+    clkCntB= []
+    timeA=[]
+    timeB=[]
     for i in range(nA):
         refIdx = bytes2int(dataBytes[ptr])*256 + bytes2int(dataBytes[ptr+1])
         stp0 = bytes2int(dataBytes[ptr+2])       
         stop = stp0*256 + bytes2int(dataBytes[ptr+3])
         clkCnt = bytes2int(dataBytes[ptr+4])*256 + bytes2int(dataBytes[ptr+5])             
-        timeA = refIdx*8333 + stop;
-        print("    Channel A hit " + str(i) + ": ref=" + str(refIdx) + ", stop=" + str(stop) + ", time=" + str(timeA) + ",  clock count = " + str(clkCnt))
+        timeStop = refIdx*8333 + stop;
+        print("    Channel A hit " + str(i) + ": ref=" + str(refIdx) + ", stop=" + str(stop) + ", time=" + str(timeStop) + ",  clock count = " + str(clkCnt))
+        refA.append(refIdx)
+        clkCntA.append(clkCnt)
+        timeA.append(timeStop)
         ptr = ptr + 6
     for i in range(nB):
         refIdx = bytes2int(dataBytes[ptr])*256 + bytes2int(dataBytes[ptr+1])
         stp0 = bytes2int(dataBytes[ptr+2])       
         stop = stp0*256 + bytes2int(dataBytes[ptr+3])
         clkCnt = bytes2int(dataBytes[ptr+4])*256 + bytes2int(dataBytes[ptr+5])                 
-        timeB = refIdx*8333 + stop;
-        print("    Channel B hit " + str(i) + ": ref=" + str(refIdx) + ", stop=" + str(stop) + ": time=" + str(timeB) + ",  clock count = " + str(clkCnt))    
+        timeStop = refIdx*8333 + stop;
+        print("    Channel B hit " + str(i) + ": ref=" + str(refIdx) + ", stop=" + str(stop) + ": time=" + str(timeStop) + ",  clock count = " + str(clkCnt)) 
+        refB.append(refIdx)
+        clkCntB.append(clkCnt)
+        timeB.append(timeStop)      
         ptr = ptr + 6
+    TOFs = []
+    for i in range(nA):
+        for j in range(nB):
+            if clkCntA[i] == clkCntB[j]:
+                if refA[i] == refB[j]:
+                    TOF = (timeB[j] - timeA[i])/100.
+                    print(str(i) + " " + str(j) + " tA=" + str(timeA[i]) +
+                            " tB=" + str(timeB[j]) + "   TOF = " + str(TOF))
+                    TOFs.append(TOF)
     print("     ")
+    return TOFs
             
 def readTOFevent(address, channel):
     cmdHeader = mkCmdHdr(1, 0x35, address)

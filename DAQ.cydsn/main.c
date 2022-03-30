@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define VERSION 9
+#define VERSION 10
 
 /*=========================================================================
  * V7 Adding ADC software reset. Changed ADC readout to SPI -Brian Lucas
@@ -33,7 +33,7 @@
  * Preamp      p4[6]    p3[2]     p3[3]     p4[5]      p2[0]
  * Schem pin    9         16       15        14        19
  * Channel      2          1        4         3         5 
- * TOF                              2         1   
+ * TOF                              2[B]      1[A] 
  * Trig bit     1         N/A       0         3         2
  * ADC SSN      3          1        6         7         4       
  *
@@ -160,6 +160,9 @@
 #define ERR_TKR_BUFFER_OVERFLOW 34u
 #define ERR_TOF_ADC_CONFLICT 35u
 #define ERR_TKR_FIFO_NOT_EMPTY 36u
+#define ERR_BAD_CMD_FORMAT 37u
+#define ERR_UART_CMD 38u
+#define ERR_UART_TKR 39u
 
 // Identifiers for types of Tracker data
 #define TKR_EVT_DATA 0xD3
@@ -243,7 +246,7 @@ volatile struct MainPSOCcmds {
 volatile uint8 cmdWritePtr, cmdReadPtr;
 
 // Circular FIFO buffer for bytes coming from the Tracker UART
-#define MAX_TKR 128
+#define MAX_TKR 1024
 volatile uint8 tkrBuf[MAX_TKR];
 volatile int tkrWritePtr, tkrReadPtr;
 
@@ -263,7 +266,7 @@ volatile struct TOF {
     bool filled[TOFMAX_EVT];
     uint8 ptr;
 } tofA, tofB;
-uint8 nTOFAint, nTOFBint;
+volatile uint8 nTOFAint, nTOFBint;
 uint8 nTOF_DMA_samples;
 volatile uint8 DMA_TOFA_Chan;
 uint8 DMA_TOFA_TD[2*TOF_DMA_MAX_NO_OF_SAMPLES];   
@@ -285,7 +288,7 @@ uint8 tkrHouseKeeping[TKRHOUSE_LEN];
 volatile uint32 timeStamp;     // Internal event time stamp, in 5 millisecond units
 volatile uint8 timeStamp8;     // Place to store the timestamp counter reading
 volatile uint32 cntGO1save;    // Word to save the trigger counter in each time there is an accepted trigger
-volatile uint8 trgStatus;      // Is the trigger enabled, or not?
+volatile uint8 trgStatus;      // Contents read from trigger status register
 volatile bool triggered;       // The system is triggered, so a readout is needed.
 
 // Tracker data are buffered in this structure prior to sending event data out to the Main PSOC or PC
@@ -302,22 +305,25 @@ struct TkrData {
 uint8 numTkrBrds;
 bool readTracker;
 
-uint32 clkCnt;    // 5ms clock counter
+volatile uint32 clkCnt;    // 5ms clock counter
 uint32 time() {   // Returns the time in 5 millisecond units
     uint8 cnt200val = Cntr8_Timer_ReadCount();   // This counter turns over every 200 counts
     return clkCnt + cnt200val;                  
 }
 
 // Channel and trigger rate counters
-uint16 ch1Count, ch1CountSave;
-uint16 ch2Count, ch2CountSave;
-uint16 ch3Count, ch3CountSave;
-uint16 ch4Count, ch4CountSave;
-uint16 ch5Count, ch5CountSave;
-uint8 ch1CtrSave, ch2CtrSave, ch3CtrSave, ch4CtrSave, ch5CtrSave;
+volatile uint16 ch1Count;  // TODO: make these counter 32 bits?
+volatile uint16 ch2Count;
+volatile uint16 ch3Count;
+volatile uint16 ch4Count;
+volatile uint16 ch5Count;
 volatile uint32 cntGO;
 volatile uint32 cntGO1;
 uint16 runNumber;
+
+// Saved counts for end of run, from the 8-bit hardware counters and the 16-bit software counters
+uint8 ch1CtrSave, ch2CtrSave, ch3CtrSave, ch4CtrSave, ch5CtrSave;
+uint16 ch1CountSave, ch2CountSave, ch3CountSave, ch4CountSave, ch5CountSave;
 
 // Function to turn the LED on/off furthest from the SMA inputs, for debugging
 void LED2_OnOff(bool on) {
@@ -729,25 +735,13 @@ void TOFenable(bool enable) {
     }
 }
 
-// Control of the trigger enable bit. The TOF chip can be turned off while the trigger is disabled (but that
-// feature is commented out).
+// Control of the trigger enable bit. 
 void triggerEnable(bool enable) {
     if (enable) {
-        //Reset the TOF chip time reference. It also gets reset every 5 ms by interrupt.
-        //Control_Reg_Pls_Write(PULSE_TOF_RESET);
-        
-        //writeTOFdata(writeConfig+1);
-        //writeTOFdata(0x05);
-        
-        // Enable the master trigger and the TOF and empty the TOF buffers
         Control_Reg_Trg_Write(1); 
-
     } else {
         // Disable the master trigger 
         Control_Reg_Trg_Write(0);
-        
-        //writeTOFdata(writeConfig+1);
-        //writeTOFdata(0x00);
     }
 }
 
@@ -806,10 +800,12 @@ uint8 tkr_getByte(uint32 startTime, uint8 flag) {
             return 0x00;
         }
     }
+    isr_TKR_Disable();
     uint8 theByte = tkrBuf[tkrReadPtr];
     if (tkrReadPtr < MAX_TKR-1) tkrReadPtr++;
     else tkrReadPtr = 0;
     if (tkrReadPtr == tkrWritePtr) tkrReadPtr = -1;  // All buffered data have been read
+    isr_TKR_Enable();
     return theByte;
 }
 
@@ -1024,11 +1020,13 @@ int getTrackerData(uint8 idExpected) {
 // Turn on the LED on the double RJ45 connector to indicate Tracker communication. It will turn off automatically
 // after a delay long enough to make it visible.
 void tkrLED(bool on) {
+    isr_timer_Disable();
     if (on) {
         Pin_LED_TKR_Write(1);
     } else {
         Timer_1_Start();
     }
+    isr_timer_Enable();
 }
 
 // Send a command to the tracker via the UART
@@ -1239,8 +1237,7 @@ CY_ISR(isrTOFnrqB) {
 
 // Read out the shift register when a TOF stop event arrives for channel A
 // This is only used when DMA of the TOF data is not employed.
-CY_ISR(Store_A)
-{
+CY_ISR(Store_A) {
     if (ShiftReg_A_GetIntStatus() == ShiftReg_A_STORE) {
         nTOFAint++;
         while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) {
@@ -1271,8 +1268,7 @@ CY_ISR(Store_A)
 
 // Read out the shift register when a TOF stop event arrives for channel B
 // This is only used when DMA of the TOF data is not employed.
-CY_ISR(Store_B)
-{
+CY_ISR(Store_B) {
     if (ShiftReg_B_GetIntStatus() == ShiftReg_B_STORE) { 
         nTOFBint++;
         while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) {
@@ -1303,6 +1299,7 @@ CY_ISR(Store_B)
 
 // Turn off an LED once the interval timer has timed out (this is just to make the LED stay on long enough to be visible)
 CY_ISR(intTimer) {
+    Timer_1_ReadStatusRegister();
     Pin_LED_TKR_Write(0);
     Pin_LED_DAT_Write(0);
     Timer_1_Stop();
@@ -1310,7 +1307,9 @@ CY_ISR(intTimer) {
 
 // Increment the internal clock count every second, and also make the LED blink
 CY_ISR(clk200) {       // Interrupt every second (200 ticks of the 5ms period clock)
+    isr_GO_Disable();  // Don't allow a GO to interrupt while incrementing this counter
     clkCnt += 200;     // Increment the clock counter used for time stamps
+    isr_GO_Enable();
     uint8 status = Pin_LED1_Read();
     status = ~status;
     Pin_LED1_Write(status);
@@ -1344,21 +1343,28 @@ CY_ISR(isrCh5)
 
 // Receive and store commands from the Main PSOC via the UART, using a circular FIFO buffer
 CY_ISR(isrUART) {
-    if (cmdWritePtr != cmdReadPtr) {  // Ignore the interrupt if the software buffer is full
+    if (cmdWritePtr != cmdReadPtr) {  
         while (UART_CMD_ReadRxStatus() & UART_CMD_RX_STS_FIFO_NOTEMPTY) {
-            cmd_buffer[cmdWritePtr].buf[cmd_buffer[cmdWritePtr].nBytes] = UART_CMD_GetByte();
+            uint16 theByte = UART_CMD_GetByte();
+            if ((theByte & 0xDF00) != 0) {
+                uint8 code = (uint8)((theByte & 0xDF00)>>8);
+                addError(ERR_UART_CMD, code, (uint8)theByte);
+            }
+            cmd_buffer[cmdWritePtr].buf[cmd_buffer[cmdWritePtr].nBytes] = (uint8)theByte;
             cmd_buffer[cmdWritePtr].nBytes++;
             if (cmd_buffer[cmdWritePtr].nBytes == CMD_LENGTH) {  // This command is fully received
                 // cmdReadPtr == 255 means that there is currently nothing to be read in the FIFO
                 if (cmdReadPtr >= MX_CMDS) cmdReadPtr = cmdWritePtr;
                 cmdWritePtr = ptrNext(cmdWritePtr);  // Increment pointer in the circular FIFO
-                if (cmdWritePtr == cmdReadPtr) {     // This will almost surely make a mess if it happens!
+                if (cmdWritePtr == cmdReadPtr) {     // This will almost certainly make a mess if it happens!
                     addError(ERR_CMD_BUF_OVERFLOW, cmdWritePtr, 0);
                 } else {
                     cmd_buffer[cmdWritePtr].nBytes = 0;
                 }
             }
         }
+    } else {  // Throw away the data if the software buffer is full. Not good!
+        while (UART_CMD_ReadRxStatus() & UART_CMD_RX_STS_FIFO_NOTEMPTY) UART_CMD_GetByte();
     }
 }
 
@@ -1366,7 +1372,12 @@ CY_ISR(isrUART) {
 CY_ISR(isrTkrUART) {
     if (tkrWritePtr != tkrReadPtr) { // Ignore the interrupt if the software buffer is full
         while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
-            tkrBuf[tkrWritePtr] = UART_TKR_GetByte();
+            uint16 theByte = UART_TKR_GetByte();
+            if ((theByte & 0xDF00) != 0) {
+                uint8 code = (uint8)((theByte & 0xDF00)>>8);
+                addError(ERR_UART_TKR, code, (uint8)theByte);
+            }
+            tkrBuf[tkrWritePtr] = (uint8)theByte;
             if (tkrReadPtr < 0) tkrReadPtr = tkrWritePtr;
             if (tkrWritePtr == MAX_TKR - 1) tkrWritePtr = 0;
             else tkrWritePtr++;
@@ -1374,22 +1385,24 @@ CY_ISR(isrTkrUART) {
                 addError(ERR_TKR_BUFFER_OVERFLOW, byte32(cntGO, 0), byte32(cntGO, 1));
             }
         }
+    } else {  // Throwing away the data here will probably cause the DAQ to fail. . .
+        while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) UART_TKR_GetByte();
     }
 }
 
 // GO signal (system trigger). Start the full event readout.
+// This ISR has highest priority
 CY_ISR(isrGO) {
-    // The trigger should always be enabled for this to be called, but check just in case. . .
-    if (!isTriggerEnabled()) addError(ERR_TRG_NOT_ENABLED,byte32(cntGO,2),byte32(cntGO,1));
-    // Disable the trigger and TOF shift registers until the event readout has been completed
-    triggerEnable(false);
+    // The trigger should always be enabled for this to be called, but we could check just in case. . .
+    //if (!isTriggerEnabled()) addError(ERR_TRG_NOT_ENABLED,byte32(cntGO,2),byte32(cntGO,1));
 
-    cntGO++;                            // The event number counter
-    trgStatus = Status_Reg_Trg_Read();  // Save this status for the eventual event readout
-    triggered = true;
+    triggered = true;                      // Signal that an event is ready to read out
     timeStamp = time();                    // Save for the event readout 
     timeStamp8 = Cntr8_Timer_ReadCount();  // Save for the TOF event analysis and readout
     cntGO1save = cntGO1;                   // Save for the event readout
+    trgStatus = Status_Reg_Trg_Read();     // Save this status for the eventual event readout
+    // Disable the trigger until the event readout has been completed
+    Control_Reg_Trg_Write(0);  //triggerEnable(false);  avoid function call
 
     // At this point execution returns to its normal flow, allowing other interrupts. The remainder of the
     // event readout process is done in main(), in the infinite for loop.
@@ -1624,7 +1637,7 @@ int main(void)
     //loadI2Creg(I2C_Address_RTC, 0x07, 0x80);         
 
     // Set up the Time-of-Flight DMA (to reduce the number of CPU interrupts if the TOF channels are noisy)
-    TOF_DMA = false;
+    TOF_DMA = true;
   
     // TOF DMA setup. Not used if TOF_DMA = false, but still in place.
     nTOF_DMA_samples = CyDmaTdFreeCount()/4 - 2;   // Maximize the number of TDs that we can use.
@@ -1740,13 +1753,15 @@ int main(void)
     setTriggerMask('p',0x05);
 
     // Set interrupt priorities, enable interrupts and configure TOF shift register interrupt signals
-    isr_UART_SetPriority(6);
+    // The communications ISRs can only be interrupted by the trigger GO, which is fast.
+    isr_UART_SetPriority(5);  // This needs high priority to prevent the hardware FIFO from overfilling
     isr_UART_Enable();     
-    isr_timer_SetPriority(7);
+    isr_timer_SetPriority(7);   
     isr_timer_Enable();
     isr_clk200_SetPriority(7);
     isr_clk200_Enable(); 
 
+    // Usually DMA would be used for the TOF, in which case these two ISRs get disabled
     isr_Store_A_SetPriority(5);
     ShiftReg_A_SetIntMode(ShiftReg_A_STORE_INT_EN);  // This can hang up indefinitely if the TOF chip is not set up properly
     ShiftReg_A_EnableInt();  
@@ -1754,8 +1769,9 @@ int main(void)
     ShiftReg_B_SetIntMode(ShiftReg_B_STORE_INT_EN);  // This can hang up indefinitely if the TOF chip is not set up properly 
     ShiftReg_B_EnableInt();
 
-    isr_TOFnrqA_SetPriority(6);
-    isr_TOFnrqB_SetPriority(6);
+    // ISRs for the DMA, to move the acquired TOF events into the large buffer
+    isr_TOFnrqA_SetPriority(5);
+    isr_TOFnrqB_SetPriority(5);
 
     isr_Ch1_SetPriority(7);
     isr_Ch1_Enable();
@@ -1769,11 +1785,11 @@ int main(void)
     isr_Ch5_Enable();
     isr_GO1_SetPriority(7);
     isr_GO1_Enable();
-    isr_GO_SetPriority(5);
+    isr_GO_SetPriority(4);    // Processing a trigger request gets the highest priority
     isr_GO_Enable();
-    isr_rst_SetPriority(4);
+    isr_rst_SetPriority(3);   // Give this system reset highest priority, so it can interrupt any ISR
     isr_rst_Enable();
-    isr_TKR_SetPriority(5);
+    isr_TKR_SetPriority(5);   // This needs high priority to prevent the hardware FIFO from overfilling
     isr_TKR_Enable();
 
     numTkrBrds = MAX_TKR_BOARDS;
@@ -1870,6 +1886,8 @@ int main(void)
         }
         
         if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
+            cntGO++;  // The event number counter
+
             // Stop acquiring TOF hits until the trigger is re-enabled.
             TOFenable(false);
             if (TOF_DMA) {  
@@ -2023,7 +2041,7 @@ int main(void)
                 uint32 BT = tofB.shiftReg[jptr];
                 uint16 stopB = (uint16)(BT & 0x0000FFFF);          // Stop time for channel B
                 uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);     // Reference clock for channel B
-                uint16 timej = refB*8333 + stopB;                  // Full time for channel B in 10 picosecond units
+                int timej = refB*8333 + stopB;                     // Full time for channel B in 10 picosecond units
                 ++nJ;
                 for (int i=0; i<nI; ++i) {                          // Loop over the channel A hits
                     int iptr = idx[i];
@@ -2031,16 +2049,15 @@ int main(void)
                     uint32 AT = tofA.shiftReg[iptr];
                     uint16 stopA = (uint16)(AT & 0x0000FFFF);       // Stop time for channel A
                     uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);  // Reference clock for channel A
-                    //aTOF = refA;
-                    uint16 timei = refA*8333 + stopA;                  // Full time for channel A in 10 picosecond units
+                    int timei = refA*8333 + stopA;                  // Full time for channel A in 10 picosecond units
                     // Here we try to handle cases in which a reference clock rolled over
                     int16 dt;
-                    if (refA > 49152 && refB < 16384) {
-                        dt = timej - (timei - 500000000);
-                    } else if (refB > 49152 && refA < 16384) {
-                        dt = (timej - 500000000) - timei; 
+                    if (refA >= 60001 && refB == 0) {
+                        dt = (int16)((timej + 500000000) - timei);
+                    } else if (refB >= 60001 && refA == 0) {
+                        dt = (int16)(timej - (timei + 500000000)); 
                     } else {
-                        dt = timej - timei;
+                        dt = (int16)(timej - timei);
                     }
                     if (abs(dt) < abs(dtmin)) { // Keep the smallest time difference of all combinations
                         dtmin = dt;
@@ -2324,16 +2341,16 @@ int main(void)
                 }
             }
             if (count == 0 && cmdReadPtr < MX_CMDS) { // Looking for a command from UART 
-                isr_UART_Disable();  
+                isr_UART_Disable();  // Temporarily disable the interrupt handling while reading the buffer
                 count = CMD_LENGTH;
                 for (int i=0; i<count; ++i) {
                     buffer[i] = cmd_buffer[cmdReadPtr].buf[i];
                 }
                 cmd_buffer[cmdReadPtr].nBytes = 0;
                 if (ptrNext(cmdReadPtr) != cmdWritePtr) {
-                    cmdReadPtr = ptrNext(cmdReadPtr);
+                    cmdReadPtr = ptrNext(cmdReadPtr);  // Another command is already buffered
                 } else {
-                    cmdReadPtr = 255;
+                    cmdReadPtr = 255;   // 255 means that no command is buffered for reading
                 }
                 isr_UART_Enable();
             }
@@ -2375,733 +2392,737 @@ int main(void)
                     }
                 }
             }
-            if (!badCMD && buffer[0] == 'S' && buffer[8] == 'W') {
-                if (awaitingCommand) cmdCountGLB++;
-                uint8 nib3 = code[buffer[3]];
-                uint8 nib4 = code[buffer[4]];
-                uint8 addressByte = (nib3<<4) | nib4;
-                uint8 PSOCaddress = (addressByte & '\x3C')>>2;
-                if (PSOCaddress == eventPSOCaddress) {                    
-                    uint8 nib1 = code[buffer[1]];  // No check on code. Illegal characters get translated to 0.
-                    uint8 nib2 = code[buffer[2]];
-                    uint8 dataByte = (nib1<<4) | nib2;
-                    if (awaitingCommand) {         // This is the start of a new command
-                        awaitingCommand = false;
-                        cmdStartTime = time();
-                        cmdCount++;
-                        dCnt = 0;
-                        nDataBytes = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
-                        command = dataByte;
-                        if (nDataBytes == 0) cmdDone = true;
-                    } else {                       // Receiving data from a command in progress
-                        uint8 byteCnt = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
-                        if (byteCnt != 0) {
-                            cmdData[byteCnt-1] = dataByte;
-                            dCnt++;
-                            if (dCnt == nDataBytes) cmdDone = true; 
-                        } else {
-                            addError(ERR_BAD_BYTE, command, nDataBytes);
-                            badCMD = true;
+            if (!badCMD) {
+                if (buffer[0] != 'S' || buffer[8] != 'W') {
+                    addError(ERR_BAD_CMD_FORMAT,buffer[0],buffer[8]);
+                } else {
+                    if (awaitingCommand) cmdCountGLB++;
+                    uint8 nib3 = code[buffer[3]];
+                    uint8 nib4 = code[buffer[4]];
+                    uint8 addressByte = (nib3<<4) | nib4;
+                    uint8 PSOCaddress = (addressByte & '\x3C')>>2;
+                    if (PSOCaddress == eventPSOCaddress) {                    
+                        uint8 nib1 = code[buffer[1]];  // No check on code. Illegal characters get translated to 0.
+                        uint8 nib2 = code[buffer[2]];
+                        uint8 dataByte = (nib1<<4) | nib2;
+                        if (awaitingCommand) {         // This is the start of a new command
+                            awaitingCommand = false;
+                            cmdStartTime = time();
+                            cmdCount++;
+                            dCnt = 0;
+                            nDataBytes = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
+                            command = dataByte;
+                            if (nDataBytes == 0) cmdDone = true;
+                        } else {                       // Receiving data from a command in progress
+                            uint8 byteCnt = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
+                            if (byteCnt != 0) {
+                                cmdData[byteCnt-1] = dataByte;
+                                dCnt++;
+                                if (dCnt == nDataBytes) cmdDone = true; 
+                            } else {
+                                addError(ERR_BAD_BYTE, command, nDataBytes);
+                                badCMD = true;
+                            }
                         }
                     }
-                }
-                if (cmdDone && badCMD) {
-                    cmdDone = false;
-                    awaitingCommand = true;  // Abort a bad command
-                    nDataBytes = 0;
-                }
-                if (cmdDone && !badCMD) {
-                    uint16 DACsetting12;
-                    uint32 tStart;
-                    uint8 DACaddress = 0;
-                    uint16 thrSetting;
-                    uint8 nCalClusters;
-                    uint8 fpgaAddress;
-                    uint8 chipAddress;
-                    // If the trigger is enabled, ignore all commands besides disable trigger, 
-                    // so that nothing can interrupt the readout.
-                    if (command == '\x44' || !isTriggerEnabled()) {
-                        switch (command) { // Interpret all of the commands via this switch
-                            case '\x01':         // Load a threshold DAC setting
-                                switch (cmdData[0]) {
-                                    case 0x05: 
-                                        thrSetting = (uint16)cmdData[1];
-                                        thrSetting = (thrSetting<<8) | (uint16)cmdData[2];
-                                        rc = loadDAC(I2C_Address_DAC_Ch5, thrSetting);
+                    if (cmdDone && badCMD) {
+                        cmdDone = false;
+                        awaitingCommand = true;  // Abort a bad command
+                        nDataBytes = 0;
+                    }
+                    if (cmdDone && !badCMD) {
+                        uint16 DACsetting12;
+                        uint32 tStart;
+                        uint8 DACaddress = 0;
+                        uint16 thrSetting;
+                        uint8 nCalClusters;
+                        uint8 fpgaAddress;
+                        uint8 chipAddress;
+                        // If the trigger is enabled, ignore all commands besides disable trigger, 
+                        // so that nothing can interrupt the readout.
+                        if (command == '\x44' || !isTriggerEnabled()) {
+                            switch (command) { // Interpret all of the commands via this switch
+                                case '\x01':         // Load a threshold DAC setting
+                                    switch (cmdData[0]) {
+                                        case 0x05: 
+                                            thrSetting = (uint16)cmdData[1];
+                                            thrSetting = (thrSetting<<8) | (uint16)cmdData[2];
+                                            rc = loadDAC(I2C_Address_DAC_Ch5, thrSetting);
+                                            if (rc != 0) {
+                                                addError(ERR_DAC_LOAD, rc, I2C_Address_DAC_Ch5);
+                                            }
+                                            break;
+                                        case 0x01:
+                                            VDAC8_Ch1_SetValue(cmdData[1]);
+                                            thrDACsettings[0] = cmdData[1];
+                                            break;
+                                        case 0x02:
+                                            VDAC8_Ch2_SetValue(cmdData[1]);
+                                            thrDACsettings[1] = cmdData[1];
+                                            break;
+                                        case 0x03:
+                                            VDAC8_Ch3_SetValue(cmdData[1]);
+                                            thrDACsettings[2] = cmdData[1];
+                                            break;
+                                        case 0x04:
+                                            VDAC8_Ch4_SetValue(cmdData[1]);
+                                            thrDACsettings[3] = cmdData[1];
+                                            break;
+                                    }
+                                    break;
+                                case '\x02':         // Get a threshold DAC setting
+                                    if (cmdData[0] == 0x05) {
+                                        nDataReady = 2;
+                                        rc = readDAC(I2C_Address_DAC_Ch5, &DACsetting12);
                                         if (rc != 0) {
-                                            addError(ERR_DAC_LOAD, rc, I2C_Address_DAC_Ch5);
+                                            DACsetting12 = 0;
+                                            addError(ERR_DAC_READ, rc, DACaddress);
                                         }
+                                        dataOut[0] = (uint8)((DACsetting12 & 0xFF00)>>8);
+                                        dataOut[1] = (uint8)(DACsetting12 & 0x00FF);
+                                    } else if (cmdData[0] < 5) {
+                                        nDataReady = 1;
+                                        dataOut[0] = thrDACsettings[cmdData[0]-1];
+                                    } else {
+                                        nDataReady = 1;
+                                        dataOut[0] = 0;
+                                    }
+                                    break;
+                                case '\x03':         // Read back all of the accumulated error codes
+                                    if (nErrors == 0) {
+                                        nDataReady = 3;
+                                        dataOut[0] = 0x00;
+                                        dataOut[1] = 0xEE;
+                                        dataOut[2] = 0xFF;
                                         break;
-                                    case 0x01:
-                                        VDAC8_Ch1_SetValue(cmdData[1]);
-                                        thrDACsettings[0] = cmdData[1];
-                                        break;
-                                    case 0x02:
-                                        VDAC8_Ch2_SetValue(cmdData[1]);
-                                        thrDACsettings[1] = cmdData[1];
-                                        break;
-                                    case 0x03:
-                                        VDAC8_Ch3_SetValue(cmdData[1]);
-                                        thrDACsettings[2] = cmdData[1];
-                                        break;
-                                    case 0x04:
-                                        VDAC8_Ch4_SetValue(cmdData[1]);
-                                        thrDACsettings[3] = cmdData[1];
-                                        break;
-                                }
-                                break;
-                            case '\x02':         // Get a threshold DAC setting
-                                if (cmdData[0] == 0x05) {
-                                    nDataReady = 2;
-                                    rc = readDAC(I2C_Address_DAC_Ch5, &DACsetting12);
+                                    }
+                                    nDataReady = nErrors*3;
+                                    for (int i=0; i<nErrors; ++i) {
+                                        dataOut[i*3] = errors[i].errorCode;
+                                        dataOut[i*3 + 1] = errors[i].value0;
+                                        dataOut[i*3 + 2] = errors[i].value1;                                    
+                                    }
+                                    nErrors = 0;
+                                    break;
+                                case '\x04':        // Load the TOF DACs
+                                    if (cmdData[0] == 1) {
+                                        DACaddress = I2C_Address_TOF_DAC1;                                    
+                                    } else if (cmdData[0] == 2) {                                    
+                                        DACaddress = I2C_Address_TOF_DAC2;
+                                    } else break;
+                                    uint16 thrSetting = (uint16)cmdData[1];                                
+                                    thrSetting = (thrSetting<<8) | (uint16)cmdData[2];
+                                    rc = loadDAC(DACaddress, thrSetting);
+                                    if (rc != 0) {
+                                        addError(ERR_TOF_DAC_LOAD, rc, DACaddress);
+                                    }
+                                    break;
+                                case '\x05':        // Read the TOF DAC settings                               
+                                    if (cmdData[0] == 1) {
+                                        DACaddress = I2C_Address_TOF_DAC1;
+                                    } else if (cmdData[0] == 2) {
+                                        DACaddress = I2C_Address_TOF_DAC2;
+                                    } else break;
+                                    rc = readDAC(DACaddress, &DACsetting12);
                                     if (rc != 0) {
                                         DACsetting12 = 0;
-                                        addError(ERR_DAC_READ, rc, DACaddress);
+                                        addError(ERR_TOF_DAC_READ, rc, DACaddress);                                         
                                     }
+                                    
+                                    nDataReady = 2;
                                     dataOut[0] = (uint8)((DACsetting12 & 0xFF00)>>8);
                                     dataOut[1] = (uint8)(DACsetting12 & 0x00FF);
-                                } else if (cmdData[0] < 5) {
-                                    nDataReady = 1;
-                                    dataOut[0] = thrDACsettings[cmdData[0]-1];
-                                } else {
-                                    nDataReady = 1;
-                                    dataOut[0] = 0;
-                                }
-                                break;
-                            case '\x03':         // Read back all of the accumulated error codes
-                                if (nErrors == 0) {
-                                    nDataReady = 3;
-                                    dataOut[0] = 0x00;
-                                    dataOut[1] = 0xEE;
-                                    dataOut[2] = 0xFF;
                                     break;
-                                }
-                                nDataReady = nErrors*3;
-                                for (int i=0; i<nErrors; ++i) {
-                                    dataOut[i*3] = errors[i].errorCode;
-                                    dataOut[i*3 + 1] = errors[i].value0;
-                                    dataOut[i*3 + 2] = errors[i].value1;                                    
-                                }
-                                nErrors = 0;
-                                break;
-                            case '\x04':        // Load the TOF DACs
-                                if (cmdData[0] == 1) {
-                                    DACaddress = I2C_Address_TOF_DAC1;                                    
-                                } else if (cmdData[0] == 2) {                                    
-                                    DACaddress = I2C_Address_TOF_DAC2;
-                                } else break;
-                                uint16 thrSetting = (uint16)cmdData[1];                                
-                                thrSetting = (thrSetting<<8) | (uint16)cmdData[2];
-                                rc = loadDAC(DACaddress, thrSetting);
-                                if (rc != 0) {
-                                    addError(ERR_TOF_DAC_LOAD, rc, DACaddress);
-                                }
-                                break;
-                            case '\x05':        // Read the TOF DAC settings                               
-                                if (cmdData[0] == 1) {
-                                    DACaddress = I2C_Address_TOF_DAC1;
-                                } else if (cmdData[0] == 2) {
-                                    DACaddress = I2C_Address_TOF_DAC2;
-                                } else break;
-                                rc = readDAC(DACaddress, &DACsetting12);
-                                if (rc != 0) {
-                                    DACsetting12 = 0;
-                                    addError(ERR_TOF_DAC_READ, rc, DACaddress);                                         
-                                }
-                                
-                                nDataReady = 2;
-                                dataOut[0] = (uint8)((DACsetting12 & 0xFF00)>>8);
-                                dataOut[1] = (uint8)(DACsetting12 & 0x00FF);
-                                break;
-                            case '\x06':        // Turn LED on or off, for communication test
-                                if (cmdData[0] == 1) {
-                                    LED2_OnOff(true);
-                                } else {
-                                    LED2_OnOff(false);
-                                }
-                                break;
-                            case '\x07':        // Return the version number
-                                nDataReady = 1;
-                                dataOut[0] = VERSION;
-                                break;
-                            case '\x10':        // Send an arbitrary command to the tracker
-                                tkrCmdCode = cmdData[1];
-                                // Ignore commands that are supposed to be internal to the tracker,
-                                // to avoid confusing the tracker logic.
-                                if (tkrCmdCode == 0x52 || tkrCmdCode == 0x53) break;
-                                sendTrackerCmd(cmdData[0], cmdData[1], cmdData[2], &cmdData[3], 0);
-                                break;
-                            case '\x41':        // Load a tracker ASIC mask register
-                                fpgaAddress = cmdData[0] & 0x07;
-                                chipAddress = cmdData[1] & 0x1F;
-                                uint8 regType = cmdData[2] & 0x03;
-                                uint8 fill = cmdData[3] & 0x01;
-                                nCalClusters = cmdData[4];
-                                if (nCalClusters > (nDataBytes - 5)/2) {
-                                    nCalClusters = (nDataBytes - 5)/2;
-                                }   
-                                int ptr = 5;
-                                uint64 mask = 0;
-                                for (int i=0; i<nCalClusters; ++i) {
-                                    uint64 mask0 = 0;
-                                    int nch = cmdData[ptr];
-                                    int ch0 = 64-nch-cmdData[ptr+1];
-                                    mask0 = mask0 +1;
-                                    for (int j=1; j<nch; ++j) {
-                                        mask0 = mask0<<1;
-                                        mask0 = mask0 + 1;
+                                case '\x06':        // Turn LED on or off, for communication test
+                                    if (cmdData[0] == 1) {
+                                        LED2_OnOff(true);
+                                    } else {
+                                        LED2_OnOff(false);
                                     }
-                                    mask0 = mask0<<ch0;
-                                    mask = mask | mask0;
-                                    ptr = ptr + 2;
-                                }
-                                if (fill) mask = ~mask;
-                                if (regType == CALMASK) tkrCmdCode = '\x15';
-                                else if (regType == DATAMASK) tkrCmdCode = '\x13';
-                                else tkrCmdCode = '\x14';
+                                    break;
+                                case '\x07':        // Return the version number
+                                    nDataReady = 1;
+                                    dataOut[0] = VERSION;
+                                    break;
+                                case '\x10':        // Send an arbitrary command to the tracker
+                                    tkrCmdCode = cmdData[1];
+                                    // Ignore commands that are supposed to be internal to the tracker,
+                                    // to avoid confusing the tracker logic.
+                                    if (tkrCmdCode == 0x52 || tkrCmdCode == 0x53) break;
+                                    sendTrackerCmd(cmdData[0], cmdData[1], cmdData[2], &cmdData[3], 0);
+                                    break;
+                                case '\x41':        // Load a tracker ASIC mask register
+                                    fpgaAddress = cmdData[0] & 0x07;
+                                    chipAddress = cmdData[1] & 0x1F;
+                                    uint8 regType = cmdData[2] & 0x03;
+                                    uint8 fill = cmdData[3] & 0x01;
+                                    nCalClusters = cmdData[4];
+                                    if (nCalClusters > (nDataBytes - 5)/2) {
+                                        nCalClusters = (nDataBytes - 5)/2;
+                                    }   
+                                    int ptr = 5;
+                                    uint64 mask = 0;
+                                    for (int i=0; i<nCalClusters; ++i) {
+                                        uint64 mask0 = 0;
+                                        int nch = cmdData[ptr];
+                                        int ch0 = 64-nch-cmdData[ptr+1];
+                                        mask0 = mask0 +1;
+                                        for (int j=1; j<nch; ++j) {
+                                            mask0 = mask0<<1;
+                                            mask0 = mask0 + 1;
+                                        }
+                                        mask0 = mask0<<ch0;
+                                        mask = mask | mask0;
+                                        ptr = ptr + 2;
+                                    }
+                                    if (fill) mask = ~mask;
+                                    if (regType == CALMASK) tkrCmdCode = '\x15';
+                                    else if (regType == DATAMASK) tkrCmdCode = '\x13';
+                                    else tkrCmdCode = '\x14';
 
-                                uint8 bytesToSend[8];
-                                for (int j=0; j<8; ++j) {
-                                    bytesToSend[j] = (uint8)(mask & 0x00000000000000FF);
-                                    mask = mask>>8;
-                                }
-                                uint8 dataBytes[9];
-                                dataBytes[0] = chipAddress;
-                                for (int j=7; j>=0; --j) {
-                                    dataBytes[8-j] = bytesToSend[j];
-                                }
-                                sendTrackerCmd(fpgaAddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
-                                break;
-                            case '\x42':        // Start a tracker calibration sequence
-                                // First send a calibration strobe command
-                                tkrLED(true);
-                                tkrCmdCode = '\x02';
-                                while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-                                    addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x3F);
-                                }
-                                UART_TKR_WriteTxData('\x00');
-                                UART_TKR_WriteTxData(tkrCmdCode);
-                                UART_TKR_WriteTxData('\x03');
-                                UART_TKR_WriteTxData('\x1F');
-                                uint8 FPGA = cmdData[0];
-                                uint8 trgDelay = cmdData[1];
-                                uint8 trgTag = cmdData[2] & 0x03;
-                                uint8 byte2 = (trgDelay & 0x3f)<<2;
-                                byte2 = byte2 | trgTag;
-                                while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                                UART_TKR_WriteTxData(byte2);
-                                while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                                UART_TKR_WriteTxData(FPGA);
-                                // Wait around for up to a second for all the data to transmit
-                                tStart = time();
-                                while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {                                           
-                                    if (time() - tStart > 200) {
-                                        addError(ERR_TX_FAILED, tkrCmdCode, command);
-                                        tkrLED(false);
-                                        break;
+                                    uint8 bytesToSend[8];
+                                    for (int j=0; j<8; ++j) {
+                                        bytesToSend[j] = (uint8)(mask & 0x00000000000000FF);
+                                        mask = mask>>8;
                                     }
-                                }    
-                                // Catch the trigger output and send back to the computer                              
-                                getTrackerBoardTriggerData(FPGA);
-                                tkrLED(false);
-                                break;
-                            case '\x43':   // Send a tracker read-event command for calibration events
-                                tkrCmdCode = 0x01;
-                                trgTag = (cmdData[0] & 0x03) | 0x04;
-                                sendTrackerCmd(0x00, tkrCmdCode, 1, &trgTag, TKR_EVT_DATA);
-                                
-                                // Then send the data out as a tracker-only event
-                                dataOut[0] = 0x5A;
-                                dataOut[1] = 0x45;
-                                dataOut[2] = 0x52;
-                                dataOut[3] = 0x4F;
-                                dataOut[4] = tkrData.nTkrBoards;
-                                nDataReady = 5;
-                                for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
-                                    if (nDataReady > MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
-                                        addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
-                                        break;
+                                    uint8 dataBytes[9];
+                                    dataBytes[0] = chipAddress;
+                                    for (int j=7; j>=0; --j) {
+                                        dataBytes[8-j] = bytesToSend[j];
                                     }
-                                    //dataOut[nDataReady++] = brd;
-                                    dataOut[nDataReady++] = tkrData.boardHits[brd].nBytes;
-                                    for (int b=0; b<tkrData.boardHits[brd].nBytes; ++b) {
-                                        dataOut[nDataReady++] = tkrData.boardHits[brd].hitList[b];
-                                    }
-                                    free(tkrData.boardHits[brd].hitList);
-                                    tkrData.boardHits[brd].nBytes = 0;
-                                }
-                                dataOut[nDataReady++] = 0x46;
-                                dataOut[nDataReady++] = 0x49;
-                                dataOut[nDataReady++] = 0x4E;
-                                dataOut[nDataReady++] = 0x49;
-                                tkrLED(false);
-                                break;
-                            case '\x0C':        // Reset the TOF chip
-                                set_SPI_SSN(SSN_TOF, true);
-                                writeTOFdata(powerOnRESET);
-                                set_SPI_SSN(SSN_None, false);
-                                break;
-                            case '\x0D':        // Modify TOF configuration (disable trigger first)
-                                if (cmdData[0] < TOFSIZE) {
-                                    tofConfig[cmdData[0]] = tofConfig[1];
-                                    set_SPI_SSN(SSN_TOF, true);
-                                    writeTOFdata(writeConfig);
-                                    for (int i=0; i<TOFSIZE; ++i) {
-                                        writeTOFdata(tofConfig[i]);
-                                    }
-                                    CyDelay(1);
-                                    set_SPI_SSN(SSN_None, false);
-                                }
-                                break;
-                            case '\x0E':        // Read the TOF IC configuration 
-                                //0xB5, 0x05, 0x0C, 0x8D, 0x20, 0x00, 0x00, 0x08, 0xA1, 0x13, 0x00,
-                                //0x0A, 0xCC, 0xCC, 0xF1, 0x7D, 0x00
-                                set_SPI_SSN(SSN_TOF, true);
-                                SPIM_ClearRxBuffer();
-                                Control_Reg_ScopeTrg_Write(0x01);
-                                writeTOFdata(readConfig);
-                                readTOFdata();
-                                for (int bt=0; bt<TOFSIZE; ++bt) {
-                                    dataOut[bt] = readTOFdata();
-                                }
-                                nDataReady = TOFSIZE;
-                                set_SPI_SSN(SSN_None, false);
-                                break;
-                            case '\x20':        // Read bus voltages (positive only)
-                                readI2Creg(2, cmdData[0], INA226_BusV_Reg, dataOut);
-                                nDataReady = 2;
-                                break;
-                            case '\x21':        // Read currents (Note: bit 15 is a sign bit, 2's complement)
-                                readI2Creg(2, cmdData[0], INA226_ShuntV_Reg, dataOut);
-                                nDataReady = 2;
-                                break;
-                            case '\x22':        // Read the board temperature
-                                readI2Creg(2, I2C_Address_TMP100, TMP100_Temp_Reg, dataOut);
-                                nDataReady = 2;
-                                break;
-                            case '\x23':        // Read an RTC register
-                                readI2Creg(1, I2C_Address_RTC, cmdData[0], dataOut);
-                                nDataReady = 1;
-                                break;
-                            case '\x24':        // Write an RTC register
-                                loadI2Creg(I2C_Address_RTC , cmdData[0], cmdData[1]);
-                                break;
-                            case '\x26':       // Read a barometer register
-                                readI2Creg(1, I2C_Address_Barometer, cmdData[0], dataOut);
-                                nDataReady = 1;
-                                break;
-                            case '\x27':       // Load a barometer register
-                                loadI2Creg(I2C_Address_Barometer, cmdData[0], cmdData[1]);
-                                break;
-                            case '\x30':       // Set the output mode
-                                if (cmdData[0] == USBUART_OUTPUT || cmdData[0] == SPI_OUTPUT) {
-                                    outputMode = cmdData[0];
-                                }
-                                if (outputMode == SPI_OUTPUT) set_SPI_SSN(SSN_Main, true);
-                                break;
-                            case '\x31':       // Initialize the SPI interface
-                                SPIM_Init();
-                                SPIM_Enable();
-                                break;
-                            case '\x32':       // Send TOF info to USB-UART (temporary testing)
-                                outputTOF = true;                               
-                                break;
-                            case '\x3F':
-                                outputTOF = false;
-                                break;
-                            case '\x34':       // Get the number of TOF events stored
-                                nDataReady = 2;
-                                dataOut[0] = tofA.ptr;
-                                dataOut[1] = tofB.ptr;
-                                break;
-                            case '\x35':       // Read most recent TOF event from channel A or B (for testing)
-                                nDataReady = 9;
-                                int InterruptState = CyEnterCriticalSection();
-                                if (cmdData[0] == 0) {                                    
-                                    uint8 idx = tofA.ptr - 1;
-                                    if (idx < 0) idx = idx + TOFMAX_EVT;
-                                    if (tofA.filled[idx]) {
-                                        uint32 AT = tofA.shiftReg[idx];
-                                        uint16 stopA = (uint16)(AT & 0x0000FFFF);
-                                        uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);
-                                        dataOut[0] = (uint8)((refA & 0xFF00)>>8);
-                                        dataOut[1] = (uint8)(refA & 0x00FF);
-                                        dataOut[2] = 0;
-                                        dataOut[3] = (uint8)((stopA & 0xFF00)>>8);
-                                        dataOut[4] = (uint8)(stopA & 0x00FF);
-                                        dataOut[5] = 0;
-                                        dataOut[6] = (uint8)((tofA.clkCnt[idx] & 0xFF00)>>8);
-                                        dataOut[7] = (uint8)(tofA.clkCnt[idx] & 0x00FF);
-                                        dataOut[8] = tofA.ptr;
-                                        for (int j=0; j<TOFMAX_EVT; ++j) {
-                                            tofA.filled[j] = false;
-                                        }
-                                        tofA.ptr = 0;
-                                    } else {
-                                        for (int i=0; i<8; ++i) dataOut[i] = 0;
-                                        dataOut[8] = idx;
-                                    }
-                                } else {
-                                    uint8 idx = tofB.ptr - 1;
-                                    if (idx < 0) idx = idx + TOFMAX_EVT;
-                                    if (tofB.filled[idx]) {
-                                        uint32 BT = tofB.shiftReg[idx];
-                                        uint16 stopB = (uint16)(BT & 0x0000FFFF);
-                                        uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);
-                                        dataOut[0] = (uint8)((refB & 0xFF00)>>8);
-                                        dataOut[1] = (uint8)(refB & 0x00FF);
-                                        dataOut[2] = 0;
-                                        dataOut[3] = (uint8)((stopB & 0xFF00)>>8);
-                                        dataOut[4] = (uint8)(stopB & 0x00FF);
-                                        dataOut[5] = 0;
-                                        dataOut[6] = (uint8)((tofB.clkCnt[idx] & 0xFF00)>>8);
-                                        dataOut[7] = (uint8)(tofB.clkCnt[idx] & 0x00FF);
-                                        dataOut[8] = tofB.ptr;
-                                        for (int j=0; j<TOFMAX_EVT; ++j) {
-                                            tofB.filled[j] = false;
-                                        }
-                                        tofB.ptr = 0;
-                                    } else {
-                                        for (int i=0; i<8; ++i) dataOut[i] = 0;
-                                        dataOut[8] = idx;
-                                        for (int j=0; j<TOFMAX_EVT; ++j) {
-                                            tofB.filled[j] = false;
-                                            tofA.filled[j] = false;
-                                        }
-                                        tofB.ptr = 0;
-                                        tofA.ptr = 0;
-                                    }
-                                }
-                                CyExitCriticalSection(InterruptState);
-                                break; 
-                            case '\x36':     // Set a trigger mask
-                                if (cmdData[0] == 1) {
-                                    setTriggerMask('e', cmdData[1]);
-                                } else if (cmdData[0] == 2) {
-                                    setTriggerMask('p', cmdData[1]);
-                                }
-                                break;
-                            case '\x37':    // Read a channel counter
-                                nDataReady = 3;
-                                switch (cmdData[0]) {
-                                    case 0x01:
-                                        dataOut[2] = Cntr8_V1_1_ReadCount();
-                                        dataOut[1] = (uint8)(ch1Count & 0x00FF);
-                                        dataOut[0] = (uint8)((ch1Count & 0xFF00)>>8);
-                                        break;
-                                    case 0x02:
-                                        dataOut[2] = Cntr8_V1_2_ReadCount();
-                                        dataOut[1] = (uint8)(ch2Count & 0x00FF);
-                                        dataOut[0] = (uint8)((ch2Count & 0xFF00)>>8);
-                                        break;
-                                    case 0x03:
-                                        dataOut[2] = Cntr8_V1_3_ReadCount();
-                                        dataOut[1] = (uint8)(ch3Count & 0x00FF);
-                                        dataOut[0] = (uint8)((ch3Count & 0xFF00)>>8);
-                                        break;
-                                    case 0x04:
-                                        dataOut[2] = Cntr8_V1_4_ReadCount();
-                                        dataOut[1] = (uint8)(ch4Count & 0x00FF);
-                                        dataOut[0] = (uint8)((ch4Count & 0xFF00)>>8);
-                                        break;
-                                    case 0x05:
-                                        dataOut[2] = Cntr8_V1_5_ReadCount();
-                                        dataOut[1] = (uint8)(ch5Count & 0x00FF);
-                                        dataOut[0] = (uint8)((ch5Count & 0xFF00)>>8);
-                                        break;
-                                }
-                                break;
-                            case '\x38':   // Reset the logic and counters, after reading back 24 bits of the clock count
-                                nDataReady = 3;
-                                uint32 now = time();
-                                dataOut[0] = (uint8)((now & 0x00FF0000)>>16);
-                                dataOut[1] = (uint8)((now & 0x0000FF00)>>8);
-                                dataOut[2] = (uint8)(now & 0x000000FF);
-                                logicReset();
-                                break;
-                            case '\x39':   // Set trigger prescales
-                                if (cmdData[0] == 1) {
-                                    Cntr8_V1_TKR_WritePeriod(cmdData[1]);
-                                } else if (cmdData[0] == 2) {
-                                    Cntr8_V1_PMT_WritePeriod(cmdData[1]);
-                                }
-                                break;
-                            case '\x3A':   // Set trigger coincidence window
-                                setSettlingWindow(cmdData[0]);
-                                break;
-                            case '\x3B':   // Enable or disable the trigger
-                                if (cmdData[0] == 1) {
-                                    triggerEnable(true);
-                                } else if (cmdData[0] == 0) {
-                                    triggerEnable(false);
-                                }
-                                break;
-                            case '\x44':  // End a run and send out the run summary
-                                triggerEnable(false);
-                                endingRun = true;
-                                endData[0] = byte32(cntGO1, 0);
-                                endData[1] = byte32(cntGO1, 1);
-                                endData[2] = byte32(cntGO1, 2);
-                                endData[3] = byte32(cntGO1, 3);
-                                endData[4] = byte32(cntGO, 0);
-                                endData[5] = byte32(cntGO, 1);
-                                endData[6] = byte32(cntGO, 2);
-                                endData[7] = byte32(cntGO, 3);
-                                break;
-                            case '\x3C':  // Start a run
-                                InterruptState = CyEnterCriticalSection();
-                                for (int j=0; j<TOFMAX_EVT; ++j) {
-                                    tofA.filled[j] = false;
-                                    tofB.filled[j] = false;
-                                }
-                                clkCnt = 0;
-                                tofA.ptr = 0;
-                                tofB.ptr = 0;
-                                CyExitCriticalSection(InterruptState);
-                                ch1Count = 0;
-                                ch2Count = 0;
-                                ch3Count = 0;
-                                ch4Count = 0;
-                                ch5Count = 0;
-                                runNumber = cmdData[0];
-                                runNumber = (runNumber<<8) | cmdData[1];
-                                readTracker = (cmdData[2] == 1);
-                                debugTOF = (cmdData[3] == 1);
-                                cntGO = 0;
-                                cntGO1 = 0;
-                                triggerEnable(true);
-                                Control_Reg_Pls_Write(PULSE_CNTR_RST);
-                                // Enable the tracker trigger
-                                if (readTracker) {
-                                    tkrCmdCode = 0x65;
-                                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                                    UART_TKR_WriteTxData(0x00);    // Address byte
-                                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                                    UART_TKR_WriteTxData(tkrCmdCode);    // Trigger enable
-                                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                                    UART_TKR_WriteTxData(0x00);    // Number of data bytes
-                                    uint8 rc = getTrackerData(TKR_ECHO_DATA);   // Get the echo. Note that any delay put before this results in
-                                                                                // the first few bytes of the echo getting missed. Don't know why.
-                                    if (rc != 0) {
-                                        addError(ERR_TKR_TRG_ENABLE, dataOut[2], rc);;
-                                    }
-                                }
-                                TOFenable(true);
-                                nDataReady = 0;  // Don't send the tracker echo back to the UART
-                                nDataBytes = 0;  // Also, avoid sending an echo from this command
-                                cmdDone = false;
-                                awaitingCommand = true;
-                                endingRun = false;
-                                break;
-                            case '\x3D':  // Return trigger enable status
-                                nDataReady =1;
-                                if (isTriggerEnabled()) dataOut[0] = 1;
-                                else dataOut[0] = 0;
-                                break;
-                            case '\x3E':  // Return trigger mask register
-                                nDataReady = 1;
-                                uint8 reg = 0;
-                                if (cmdData[0] == 1) {
-                                    reg = getTriggerMask('e');
-                                } else if (cmdData[0] == 2) {
-                                    reg = getTriggerMask('p');
-                                }
-                                dataOut[0] = reg;
-                                break;
-                            case '\x33':    // Read a saved channel counter, from end of run
-                                nDataReady = 3;
-                                switch (cmdData[0]) {
-                                    case 0x01:
-                                        dataOut[2] = ch1CtrSave;
-                                        dataOut[1] = (uint8)(ch1CountSave & 0x00FF);
-                                        dataOut[0] = (uint8)((ch1CountSave & 0xFF00)>>8);
-                                        break;
-                                    case 0x02:
-                                        dataOut[2] = ch2CtrSave;
-                                        dataOut[1] = (uint8)(ch2CountSave & 0x00FF);
-                                        dataOut[0] = (uint8)((ch2CountSave & 0xFF00)>>8);
-                                        break;
-                                    case 0x03:
-                                        dataOut[2] = ch3CtrSave;
-                                        dataOut[1] = (uint8)(ch3CountSave & 0x00FF);
-                                        dataOut[0] = (uint8)((ch3CountSave & 0xFF00)>>8);
-                                        break;
-                                    case 0x04:
-                                        dataOut[2] = ch4CtrSave;
-                                        dataOut[1] = (uint8)(ch4CountSave & 0x00FF);
-                                        dataOut[0] = (uint8)((ch4CountSave & 0xFF00)>>8);
-                                        break;
-                                    case 0x05:
-                                        dataOut[2] = ch5CtrSave;
-                                        dataOut[1] = (uint8)(ch5CountSave & 0x00FF);
-                                        dataOut[0] = (uint8)((ch5CountSave & 0xFF00)>>8);
-                                        break;
-                                }
-                                break;
-                            case '\x40':  // Read all TOF data (for testing)
-                                nDataReady = 3;
-                                uint8 nA = 0;
-                                uint8 nB = 0;
-                                InterruptState = CyEnterCriticalSection();
-                                if (TOF_DMA) copyTOF_DMA('t');
-                                for (int i=0; i<TOFMAX_EVT; ++i) {
-                                    if (tofA.filled[i]) ++nA;
-                                    if (tofB.filled[i]) ++nB;
-                                }
-                                dataOut[2] = nTOF_DMA_samples;
-                                int maxTOFhit = MAX_DATA_OUT/12;
-                                if (nA > maxTOFhit || nB > maxTOFhit) {
-                                    dataOut[2] = 2;
-                                    if (nA > maxTOFhit) nA = maxTOFhit;
-                                    if (nB > maxTOFhit) nB = maxTOFhit;
-                                }
-                                dataOut[0] = nA;
-                                dataOut[1] = nB;
-                                int iptr = tofA.ptr;
-                                int jptr = tofB.ptr;
-                                uint8 cnt = 0;
-                                for (int i=0; i<TOFMAX_EVT; ++i) {
-                                    --iptr;
-                                    if (iptr < 0) iptr += TOFMAX_EVT;
-                                    if (!tofA.filled[iptr]) continue;                                    
-                                    uint32 AT = tofA.shiftReg[iptr];
-                                    uint16 stopA = (uint16)(AT & 0x0000FFFF);
-                                    uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);
-                                    dataOut[nDataReady++] = byte16(refA,0);
-                                    dataOut[nDataReady++] = byte16(refA,1);
-                                    dataOut[nDataReady++] = byte16(stopA,0);
-                                    dataOut[nDataReady++] = byte16(stopA,1);
-                                    dataOut[nDataReady++] = byte16(tofA.clkCnt[iptr],0);
-                                    dataOut[nDataReady++] = byte16(tofA.clkCnt[iptr],1);
-                                    ++cnt;
-                                    if (cnt >= nA) break;
-                                }
-                                cnt = 0;
-                                for (int i=0; i<TOFMAX_EVT; ++i) {
-                                    --jptr;
-                                    if (jptr < 0) jptr += TOFMAX_EVT;
-                                    if (!tofB.filled[jptr]) continue;
-                                    uint32 BT = tofB.shiftReg[jptr];
-                                    uint16 stopB = (uint16)(BT & 0x0000FFFF);
-                                    uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);
-                                    dataOut[nDataReady++] = byte16(refB,0);
-                                    dataOut[nDataReady++] = byte16(refB,1);
-                                    dataOut[nDataReady++] = byte16(stopB,0);
-                                    dataOut[nDataReady++] = byte16(stopB,1);
-                                    dataOut[nDataReady++] = byte16(tofB.clkCnt[jptr],0);
-                                    dataOut[nDataReady++] = byte16(tofB.clkCnt[jptr],1);
-                                    ++cnt;
-                                    if (cnt >= nB) break;
-                                }
-                                for (int j=0; j<TOFMAX_EVT; ++j) {
-                                    tofB.filled[j] = false;
-                                    tofA.filled[j] = false;
-                                }
-                                tofB.ptr = 0;
-                                tofA.ptr = 0;
-                                CyExitCriticalSection(InterruptState);
-                                break;
-                            case '\x45': // Set the time and date of the real-time-clock
-                                RTC_1_DisableInt();         
-                                timeDate = RTC_1_ReadTime();   // Set the pointer to some memory location, then overwrite
-                                timeDate->Sec = cmdData[0];
-                                timeDate->Min = cmdData[1];
-                                timeDate->Hour = cmdData[2];
-                                timeDate->DayOfWeek = cmdData[3];
-                                timeDate->DayOfMonth = cmdData[4];
-                                timeDate->DayOfYear = cmdData[6] + cmdData[5]*256;
-                                timeDate->Month = cmdData[7];
-                                timeDate->Year = cmdData[9] + cmdData[8]*256;
-                                RTC_1_WriteTime(timeDate);                   
-                                RTC_1_EnableInt();
-                                break;
-                            case '\x46': // get the time and date of the real-time-clock
-                                nDataReady = 10;
-                                timeDate = RTC_1_ReadTime();
-                                dataOut[0] = timeDate->Sec;
-                                dataOut[1] = timeDate->Min;
-                                dataOut[2] = timeDate->Hour;
-                                dataOut[3] = timeDate->DayOfWeek;
-                                dataOut[4] = timeDate->DayOfMonth;
-                                dataOut[5] = timeDate->DayOfYear/256;
-                                dataOut[6] = timeDate->DayOfYear%256;
-                                dataOut[7] = timeDate->Month;
-                                uint16 year = timeDate->Year;
-                                dataOut[8] = year/256;
-                                dataOut[9] = year%256;
-                                break;
-                            case '\x47': // Reset the tracker state machines
-                                resetAllTrackerLogic();
-                                break;
-                            case '\x48': // Calibrate the input timing on one or every Tracker FPGA board
-                                if (cmdData[0] > 7) {
-                                    calibrateAllInputTiming();
-                                } else {
-                                    calibrateInputTiming(cmdData[0]);
-                                }
-                                break;
-                            case '\x49': // Read accumulated tracker layer rates
-                                dataOut[0] = 0x6D;
-                                dataOut[1] = numTkrBrds;                                
-                                for (int brd=0; brd<numTkrBrds; ++brd) {
-                                    dataOut[2 + brd*2] = byte16(tkrMonitorRates[brd],0);
-                                    dataOut[2 + brd*2 + 1] = byte16(tkrMonitorRates[brd],1);
-                                }
-                                nDataReady = 2*(1+numTkrBrds);
-                                break;
-                            case '\x4A': // Set up and initiate tracker rate monitoring
-                                if (cmdData[0] == 0 && cmdData[1] == 0) {
-                                    monitorTkrRates = false;
+                                    sendTrackerCmd(fpgaAddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
                                     break;
-                                }
-                                tkrMonitorInterval = cmdData[0]*200;  // Number of seconds between monitoring events
-                                if (tkrMonitorInterval < 250) tkrMonitorInterval = 250;
-                                tkrMonitorNumAvg = cmdData[1];
-                                nTkrMonSamples = 0;
-                                for (int brd=0; brd<numTkrBrds; ++brd) {
-                                    tkrMonitorSums[brd] = 0;
-                                }
-                                tkrClkAtStart = clkCnt;        
-                                monitorTkrRates = true;
-                                waitingRateCnt = false;
-                                break;
-                            case '\x4B': // Set the delay between trigger and peak detector readout
-                                if (cmdData[0] < 127) setPeakDetResetWait(cmdData[0]);
-                                else addError(ERR_BAD_CMD_INPUT,command,cmdData[0]);
-                                break;
-                            case '\x4C': // Enable or disable the TOF data accumulation
-                                if (cmdData[0] == 1) {
+                                case '\x42':        // Start a tracker calibration sequence
+                                    // First send a calibration strobe command
+                                    tkrLED(true);
+                                    tkrCmdCode = '\x02';
+                                    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
+                                        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x3F);
+                                    }
+                                    UART_TKR_WriteTxData('\x00');
+                                    UART_TKR_WriteTxData(tkrCmdCode);
+                                    UART_TKR_WriteTxData('\x03');
+                                    UART_TKR_WriteTxData('\x1F');
+                                    uint8 FPGA = cmdData[0];
+                                    uint8 trgDelay = cmdData[1];
+                                    uint8 trgTag = cmdData[2] & 0x03;
+                                    uint8 byte2 = (trgDelay & 0x3f)<<2;
+                                    byte2 = byte2 | trgTag;
+                                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                                    UART_TKR_WriteTxData(byte2);
+                                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                                    UART_TKR_WriteTxData(FPGA);
+                                    // Wait around for up to a second for all the data to transmit
+                                    tStart = time();
+                                    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {                                           
+                                        if (time() - tStart > 200) {
+                                            addError(ERR_TX_FAILED, tkrCmdCode, command);
+                                            tkrLED(false);
+                                            break;
+                                        }
+                                    }    
+                                    // Catch the trigger output and send back to the computer                              
+                                    getTrackerBoardTriggerData(FPGA);
+                                    tkrLED(false);
+                                    break;
+                                case '\x43':   // Send a tracker read-event command for calibration events
+                                    tkrCmdCode = 0x01;
+                                    trgTag = (cmdData[0] & 0x03) | 0x04;
+                                    sendTrackerCmd(0x00, tkrCmdCode, 1, &trgTag, TKR_EVT_DATA);
+                                    
+                                    // Then send the data out as a tracker-only event
+                                    dataOut[0] = 0x5A;
+                                    dataOut[1] = 0x45;
+                                    dataOut[2] = 0x52;
+                                    dataOut[3] = 0x4F;
+                                    dataOut[4] = tkrData.nTkrBoards;
+                                    nDataReady = 5;
+                                    for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
+                                        if (nDataReady > MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
+                                            addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
+                                            break;
+                                        }
+                                        //dataOut[nDataReady++] = brd;
+                                        dataOut[nDataReady++] = tkrData.boardHits[brd].nBytes;
+                                        for (int b=0; b<tkrData.boardHits[brd].nBytes; ++b) {
+                                            dataOut[nDataReady++] = tkrData.boardHits[brd].hitList[b];
+                                        }
+                                        free(tkrData.boardHits[brd].hitList);
+                                        tkrData.boardHits[brd].nBytes = 0;
+                                    }
+                                    dataOut[nDataReady++] = 0x46;
+                                    dataOut[nDataReady++] = 0x49;
+                                    dataOut[nDataReady++] = 0x4E;
+                                    dataOut[nDataReady++] = 0x49;
+                                    tkrLED(false);
+                                    break;
+                                case '\x0C':        // Reset the TOF chip
+                                    set_SPI_SSN(SSN_TOF, true);
+                                    writeTOFdata(powerOnRESET);
+                                    set_SPI_SSN(SSN_None, false);
+                                    break;
+                                case '\x0D':        // Modify TOF configuration (disable trigger first)
+                                    if (cmdData[0] < TOFSIZE) {
+                                        tofConfig[cmdData[0]] = tofConfig[1];
+                                        set_SPI_SSN(SSN_TOF, true);
+                                        writeTOFdata(writeConfig);
+                                        for (int i=0; i<TOFSIZE; ++i) {
+                                            writeTOFdata(tofConfig[i]);
+                                        }
+                                        CyDelay(1);
+                                        set_SPI_SSN(SSN_None, false);
+                                    }
+                                    break;
+                                case '\x0E':        // Read the TOF IC configuration 
+                                    //0xB5, 0x05, 0x0C, 0x8D, 0x20, 0x00, 0x00, 0x08, 0xA1, 0x13, 0x00,
+                                    //0x0A, 0xCC, 0xCC, 0xF1, 0x7D, 0x00
+                                    set_SPI_SSN(SSN_TOF, true);
+                                    SPIM_ClearRxBuffer();
+                                    Control_Reg_ScopeTrg_Write(0x01);
+                                    writeTOFdata(readConfig);
+                                    readTOFdata();
+                                    for (int bt=0; bt<TOFSIZE; ++bt) {
+                                        dataOut[bt] = readTOFdata();
+                                    }
+                                    nDataReady = TOFSIZE;
+                                    set_SPI_SSN(SSN_None, false);
+                                    break;
+                                case '\x20':        // Read bus voltages (positive only)
+                                    readI2Creg(2, cmdData[0], INA226_BusV_Reg, dataOut);
+                                    nDataReady = 2;
+                                    break;
+                                case '\x21':        // Read currents (Note: bit 15 is a sign bit, 2's complement)
+                                    readI2Creg(2, cmdData[0], INA226_ShuntV_Reg, dataOut);
+                                    nDataReady = 2;
+                                    break;
+                                case '\x22':        // Read the board temperature
+                                    readI2Creg(2, I2C_Address_TMP100, TMP100_Temp_Reg, dataOut);
+                                    nDataReady = 2;
+                                    break;
+                                case '\x23':        // Read an RTC register
+                                    readI2Creg(1, I2C_Address_RTC, cmdData[0], dataOut);
+                                    nDataReady = 1;
+                                    break;
+                                case '\x24':        // Write an RTC register
+                                    loadI2Creg(I2C_Address_RTC , cmdData[0], cmdData[1]);
+                                    break;
+                                case '\x26':       // Read a barometer register
+                                    readI2Creg(1, I2C_Address_Barometer, cmdData[0], dataOut);
+                                    nDataReady = 1;
+                                    break;
+                                case '\x27':       // Load a barometer register
+                                    loadI2Creg(I2C_Address_Barometer, cmdData[0], cmdData[1]);
+                                    break;
+                                case '\x30':       // Set the output mode
+                                    if (cmdData[0] == USBUART_OUTPUT || cmdData[0] == SPI_OUTPUT) {
+                                        outputMode = cmdData[0];
+                                    }
+                                    if (outputMode == SPI_OUTPUT) set_SPI_SSN(SSN_Main, true);
+                                    break;
+                                case '\x31':       // Initialize the SPI interface
+                                    SPIM_Init();
+                                    SPIM_Enable();
+                                    break;
+                                case '\x32':       // Send TOF info to USB-UART (temporary testing)
+                                    outputTOF = true;                               
+                                    break;
+                                case '\x3F':
+                                    outputTOF = false;
+                                    break;
+                                case '\x34':       // Get the number of TOF events stored
+                                    nDataReady = 2;
+                                    dataOut[0] = tofA.ptr;
+                                    dataOut[1] = tofB.ptr;
+                                    break;
+                                case '\x35':       // Read most recent TOF event from channel A or B (for testing)
+                                    nDataReady = 9;
+                                    int InterruptState = CyEnterCriticalSection();
+                                    if (cmdData[0] == 0) {                                    
+                                        uint8 idx = tofA.ptr - 1;
+                                        if (idx < 0) idx = idx + TOFMAX_EVT;
+                                        if (tofA.filled[idx]) {
+                                            uint32 AT = tofA.shiftReg[idx];
+                                            uint16 stopA = (uint16)(AT & 0x0000FFFF);
+                                            uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);
+                                            dataOut[0] = (uint8)((refA & 0xFF00)>>8);
+                                            dataOut[1] = (uint8)(refA & 0x00FF);
+                                            dataOut[2] = 0;
+                                            dataOut[3] = (uint8)((stopA & 0xFF00)>>8);
+                                            dataOut[4] = (uint8)(stopA & 0x00FF);
+                                            dataOut[5] = 0;
+                                            dataOut[6] = (uint8)((tofA.clkCnt[idx] & 0xFF00)>>8);
+                                            dataOut[7] = (uint8)(tofA.clkCnt[idx] & 0x00FF);
+                                            dataOut[8] = tofA.ptr;
+                                            for (int j=0; j<TOFMAX_EVT; ++j) {
+                                                tofA.filled[j] = false;
+                                            }
+                                            tofA.ptr = 0;
+                                        } else {
+                                            for (int i=0; i<8; ++i) dataOut[i] = 0;
+                                            dataOut[8] = idx;
+                                        }
+                                    } else {
+                                        uint8 idx = tofB.ptr - 1;
+                                        if (idx < 0) idx = idx + TOFMAX_EVT;
+                                        if (tofB.filled[idx]) {
+                                            uint32 BT = tofB.shiftReg[idx];
+                                            uint16 stopB = (uint16)(BT & 0x0000FFFF);
+                                            uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);
+                                            dataOut[0] = (uint8)((refB & 0xFF00)>>8);
+                                            dataOut[1] = (uint8)(refB & 0x00FF);
+                                            dataOut[2] = 0;
+                                            dataOut[3] = (uint8)((stopB & 0xFF00)>>8);
+                                            dataOut[4] = (uint8)(stopB & 0x00FF);
+                                            dataOut[5] = 0;
+                                            dataOut[6] = (uint8)((tofB.clkCnt[idx] & 0xFF00)>>8);
+                                            dataOut[7] = (uint8)(tofB.clkCnt[idx] & 0x00FF);
+                                            dataOut[8] = tofB.ptr;
+                                            for (int j=0; j<TOFMAX_EVT; ++j) {
+                                                tofB.filled[j] = false;
+                                            }
+                                            tofB.ptr = 0;
+                                        } else {
+                                            for (int i=0; i<8; ++i) dataOut[i] = 0;
+                                            dataOut[8] = idx;
+                                            for (int j=0; j<TOFMAX_EVT; ++j) {
+                                                tofB.filled[j] = false;
+                                                tofA.filled[j] = false;
+                                            }
+                                            tofB.ptr = 0;
+                                            tofA.ptr = 0;
+                                        }
+                                    }
+                                    CyExitCriticalSection(InterruptState);
+                                    break; 
+                                case '\x36':     // Set a trigger mask
+                                    if (cmdData[0] == 1) {
+                                        setTriggerMask('e', cmdData[1]);
+                                    } else if (cmdData[0] == 2) {
+                                        setTriggerMask('p', cmdData[1]);
+                                    }
+                                    break;
+                                case '\x37':    // Read a channel counter
+                                    nDataReady = 3;
+                                    switch (cmdData[0]) {
+                                        case 0x01:
+                                            dataOut[2] = Cntr8_V1_1_ReadCount();
+                                            dataOut[1] = (uint8)(ch1Count & 0x00FF);
+                                            dataOut[0] = (uint8)((ch1Count & 0xFF00)>>8);
+                                            break;
+                                        case 0x02:
+                                            dataOut[2] = Cntr8_V1_2_ReadCount();
+                                            dataOut[1] = (uint8)(ch2Count & 0x00FF);
+                                            dataOut[0] = (uint8)((ch2Count & 0xFF00)>>8);
+                                            break;
+                                        case 0x03:
+                                            dataOut[2] = Cntr8_V1_3_ReadCount();
+                                            dataOut[1] = (uint8)(ch3Count & 0x00FF);
+                                            dataOut[0] = (uint8)((ch3Count & 0xFF00)>>8);
+                                            break;
+                                        case 0x04:
+                                            dataOut[2] = Cntr8_V1_4_ReadCount();
+                                            dataOut[1] = (uint8)(ch4Count & 0x00FF);
+                                            dataOut[0] = (uint8)((ch4Count & 0xFF00)>>8);
+                                            break;
+                                        case 0x05:
+                                            dataOut[2] = Cntr8_V1_5_ReadCount();
+                                            dataOut[1] = (uint8)(ch5Count & 0x00FF);
+                                            dataOut[0] = (uint8)((ch5Count & 0xFF00)>>8);
+                                            break;
+                                    }
+                                    break;
+                                case '\x38':   // Reset the logic and counters, after reading back 24 bits of the clock count
+                                    nDataReady = 3;
+                                    uint32 now = time();
+                                    dataOut[0] = (uint8)((now & 0x00FF0000)>>16);
+                                    dataOut[1] = (uint8)((now & 0x0000FF00)>>8);
+                                    dataOut[2] = (uint8)(now & 0x000000FF);
+                                    logicReset();
+                                    break;
+                                case '\x39':   // Set trigger prescales
+                                    if (cmdData[0] == 1) {
+                                        Cntr8_V1_TKR_WritePeriod(cmdData[1]);
+                                    } else if (cmdData[0] == 2) {
+                                        Cntr8_V1_PMT_WritePeriod(cmdData[1]);
+                                    }
+                                    break;
+                                case '\x3A':   // Set the settling time allowed for PMT signals
+                                    setSettlingWindow(cmdData[0]);
+                                    break;
+                                case '\x3B':   // Enable or disable the trigger
+                                    if (cmdData[0] == 1) {
+                                        triggerEnable(true);
+                                    } else if (cmdData[0] == 0) {
+                                        triggerEnable(false);
+                                    }
+                                    break;
+                                case '\x44':  // End a run and send out the run summary
+                                    triggerEnable(false);
+                                    endingRun = true;
+                                    endData[0] = byte32(cntGO1, 0);
+                                    endData[1] = byte32(cntGO1, 1);
+                                    endData[2] = byte32(cntGO1, 2);
+                                    endData[3] = byte32(cntGO1, 3);
+                                    endData[4] = byte32(cntGO, 0);
+                                    endData[5] = byte32(cntGO, 1);
+                                    endData[6] = byte32(cntGO, 2);
+                                    endData[7] = byte32(cntGO, 3);
+                                    break;
+                                case '\x3C':  // Start a run
+                                    InterruptState = CyEnterCriticalSection();
                                     for (int j=0; j<TOFMAX_EVT; ++j) {
                                         tofA.filled[j] = false;
                                         tofB.filled[j] = false;
                                     }
+                                    clkCnt = 0;
+                                    tofA.ptr = 0;
+                                    tofB.ptr = 0;
+                                    ch1Count = 0;
+                                    ch2Count = 0;
+                                    ch3Count = 0;
+                                    ch4Count = 0;
+                                    ch5Count = 0;
+                                    cntGO1 = 0;
+                                    CyExitCriticalSection(InterruptState);
+                                    runNumber = cmdData[0];
+                                    runNumber = (runNumber<<8) | cmdData[1];
+                                    readTracker = (cmdData[2] == 1);
+                                    debugTOF = (cmdData[3] == 1);
+                                    cntGO = 0;
+                                    triggerEnable(true);
+                                    Control_Reg_Pls_Write(PULSE_CNTR_RST);
+                                    // Enable the tracker trigger
+                                    if (readTracker) {
+                                        tkrCmdCode = 0x65;
+                                        while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                                        UART_TKR_WriteTxData(0x00);    // Address byte
+                                        while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                                        UART_TKR_WriteTxData(tkrCmdCode);    // Trigger enable
+                                        while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+                                        UART_TKR_WriteTxData(0x00);    // Number of data bytes
+                                        uint8 rc = getTrackerData(TKR_ECHO_DATA);   // Get the echo. Note that any delay put before this results in
+                                                                                    // the first few bytes of the echo getting missed. Don't know why.
+                                        if (rc != 0) {
+                                            addError(ERR_TKR_TRG_ENABLE, dataOut[2], rc);;
+                                        }
+                                    }
+                                    TOFenable(true);
+                                    nDataReady = 0;  // Don't send the tracker echo back to the UART
+                                    nDataBytes = 0;  // Also, avoid sending an echo from this command
+                                    cmdDone = false;
+                                    awaitingCommand = true;
+                                    endingRun = false;
+                                    break;
+                                case '\x3D':  // Return trigger enable status
+                                    nDataReady =1;
+                                    if (isTriggerEnabled()) dataOut[0] = 1;
+                                    else dataOut[0] = 0;
+                                    break;
+                                case '\x3E':  // Return trigger mask register
+                                    nDataReady = 1;
+                                    uint8 reg = 0;
+                                    if (cmdData[0] == 1) {
+                                        reg = getTriggerMask('e');
+                                    } else if (cmdData[0] == 2) {
+                                        reg = getTriggerMask('p');
+                                    }
+                                    dataOut[0] = reg;
+                                    break;
+                                case '\x33':    // Read a saved channel counter, from end of run
+                                    nDataReady = 3;
+                                    switch (cmdData[0]) {
+                                        case 0x01:
+                                            dataOut[2] = ch1CtrSave;
+                                            dataOut[1] = (uint8)(ch1CountSave & 0x00FF);
+                                            dataOut[0] = (uint8)((ch1CountSave & 0xFF00)>>8);
+                                            break;
+                                        case 0x02:
+                                            dataOut[2] = ch2CtrSave;
+                                            dataOut[1] = (uint8)(ch2CountSave & 0x00FF);
+                                            dataOut[0] = (uint8)((ch2CountSave & 0xFF00)>>8);
+                                            break;
+                                        case 0x03:
+                                            dataOut[2] = ch3CtrSave;
+                                            dataOut[1] = (uint8)(ch3CountSave & 0x00FF);
+                                            dataOut[0] = (uint8)((ch3CountSave & 0xFF00)>>8);
+                                            break;
+                                        case 0x04:
+                                            dataOut[2] = ch4CtrSave;
+                                            dataOut[1] = (uint8)(ch4CountSave & 0x00FF);
+                                            dataOut[0] = (uint8)((ch4CountSave & 0xFF00)>>8);
+                                            break;
+                                        case 0x05:
+                                            dataOut[2] = ch5CtrSave;
+                                            dataOut[1] = (uint8)(ch5CountSave & 0x00FF);
+                                            dataOut[0] = (uint8)((ch5CountSave & 0xFF00)>>8);
+                                            break;
+                                    }
+                                    break;
+                                case '\x40':  // Read all TOF data (for testing)
+                                    nDataReady = 3;
+                                    uint8 nA = 0;
+                                    uint8 nB = 0;
+                                    InterruptState = CyEnterCriticalSection();
+                                    if (TOF_DMA) copyTOF_DMA('t');
+                                    for (int i=0; i<TOFMAX_EVT; ++i) {
+                                        if (tofA.filled[i]) ++nA;
+                                        if (tofB.filled[i]) ++nB;
+                                    }
+                                    dataOut[2] = nTOF_DMA_samples;
+                                    int maxTOFhit = MAX_DATA_OUT/12;
+                                    if (nA > maxTOFhit || nB > maxTOFhit) {
+                                        dataOut[2] = 2;
+                                        if (nA > maxTOFhit) nA = maxTOFhit;
+                                        if (nB > maxTOFhit) nB = maxTOFhit;
+                                    }
+                                    dataOut[0] = nA;
+                                    dataOut[1] = nB;
+                                    int iptr = tofA.ptr;
+                                    int jptr = tofB.ptr;
+                                    uint8 cnt = 0;
+                                    for (int i=0; i<TOFMAX_EVT; ++i) {
+                                        --iptr;
+                                        if (iptr < 0) iptr += TOFMAX_EVT;
+                                        if (!tofA.filled[iptr]) continue;                                    
+                                        uint32 AT = tofA.shiftReg[iptr];
+                                        uint16 stopA = (uint16)(AT & 0x0000FFFF);
+                                        uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);
+                                        dataOut[nDataReady++] = byte16(refA,0);
+                                        dataOut[nDataReady++] = byte16(refA,1);
+                                        dataOut[nDataReady++] = byte16(stopA,0);
+                                        dataOut[nDataReady++] = byte16(stopA,1);
+                                        dataOut[nDataReady++] = byte16(tofA.clkCnt[iptr],0);
+                                        dataOut[nDataReady++] = byte16(tofA.clkCnt[iptr],1);
+                                        ++cnt;
+                                        if (cnt >= nA) break;
+                                    }
+                                    cnt = 0;
+                                    for (int i=0; i<TOFMAX_EVT; ++i) {
+                                        --jptr;
+                                        if (jptr < 0) jptr += TOFMAX_EVT;
+                                        if (!tofB.filled[jptr]) continue;
+                                        uint32 BT = tofB.shiftReg[jptr];
+                                        uint16 stopB = (uint16)(BT & 0x0000FFFF);
+                                        uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);
+                                        dataOut[nDataReady++] = byte16(refB,0);
+                                        dataOut[nDataReady++] = byte16(refB,1);
+                                        dataOut[nDataReady++] = byte16(stopB,0);
+                                        dataOut[nDataReady++] = byte16(stopB,1);
+                                        dataOut[nDataReady++] = byte16(tofB.clkCnt[jptr],0);
+                                        dataOut[nDataReady++] = byte16(tofB.clkCnt[jptr],1);
+                                        ++cnt;
+                                        if (cnt >= nB) break;
+                                    }
+                                    for (int j=0; j<TOFMAX_EVT; ++j) {
+                                        tofB.filled[j] = false;
+                                        tofA.filled[j] = false;
+                                    }
                                     tofB.ptr = 0;
                                     tofA.ptr = 0;
-                                    TOFenable(true);
-                                    while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) ShiftReg_A_ReadData();
-                                    while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) ShiftReg_B_ReadData();
-                                } else {
-                                    TOFenable(false);
-                                }
-                                break;
-                            case '\x4D': // Select TOF acquisition mode
-                                if (cmdData[0] == 1) {
-                                    TOF_DMA = true;
-                                    isr_TOFnrqA_Enable();
-                                    isr_TOFnrqB_Enable();
-                                    ShiftReg_A_DisableInt();
-                                    ShiftReg_B_DisableInt();
-                                } else {
-                                    TOF_DMA = false;
-                                    isr_TOFnrqA_Disable();
-                                    isr_TOFnrqB_Disable();
-                                    ShiftReg_A_EnableInt();
-                                    ShiftReg_B_EnableInt();
-                                }
-                                break;
-                        } // End of command switch
-                    } else { // Log an error if the user is sending spurious commands while the trigger is enabled
-                        addError(ERR_CMD_IGNORE, command, 0);
+                                    CyExitCriticalSection(InterruptState);
+                                    break;
+                                case '\x45': // Set the time and date of the real-time-clock
+                                    RTC_1_DisableInt();         
+                                    timeDate = RTC_1_ReadTime();   // Set the pointer to some memory location, then overwrite
+                                    timeDate->Sec = cmdData[0];
+                                    timeDate->Min = cmdData[1];
+                                    timeDate->Hour = cmdData[2];
+                                    timeDate->DayOfWeek = cmdData[3];
+                                    timeDate->DayOfMonth = cmdData[4];
+                                    timeDate->DayOfYear = cmdData[6] + cmdData[5]*256;
+                                    timeDate->Month = cmdData[7];
+                                    timeDate->Year = cmdData[9] + cmdData[8]*256;
+                                    RTC_1_WriteTime(timeDate);                   
+                                    RTC_1_EnableInt();
+                                    break;
+                                case '\x46': // get the time and date of the real-time-clock
+                                    nDataReady = 10;
+                                    timeDate = RTC_1_ReadTime();
+                                    dataOut[0] = timeDate->Sec;
+                                    dataOut[1] = timeDate->Min;
+                                    dataOut[2] = timeDate->Hour;
+                                    dataOut[3] = timeDate->DayOfWeek;
+                                    dataOut[4] = timeDate->DayOfMonth;
+                                    dataOut[5] = timeDate->DayOfYear/256;
+                                    dataOut[6] = timeDate->DayOfYear%256;
+                                    dataOut[7] = timeDate->Month;
+                                    uint16 year = timeDate->Year;
+                                    dataOut[8] = year/256;
+                                    dataOut[9] = year%256;
+                                    break;
+                                case '\x47': // Reset the tracker state machines
+                                    resetAllTrackerLogic();
+                                    break;
+                                case '\x48': // Calibrate the input timing on one or every Tracker FPGA board
+                                    if (cmdData[0] > 7) {
+                                        calibrateAllInputTiming();
+                                    } else {
+                                        calibrateInputTiming(cmdData[0]);
+                                    }
+                                    break;
+                                case '\x49': // Read accumulated tracker layer rates
+                                    dataOut[0] = 0x6D;
+                                    dataOut[1] = numTkrBrds;                                
+                                    for (int brd=0; brd<numTkrBrds; ++brd) {
+                                        dataOut[2 + brd*2] = byte16(tkrMonitorRates[brd],0);
+                                        dataOut[2 + brd*2 + 1] = byte16(tkrMonitorRates[brd],1);
+                                    }
+                                    nDataReady = 2*(1+numTkrBrds);
+                                    break;
+                                case '\x4A': // Set up and initiate tracker rate monitoring
+                                    if (cmdData[0] == 0 && cmdData[1] == 0) {
+                                        monitorTkrRates = false;
+                                        break;
+                                    }
+                                    tkrMonitorInterval = cmdData[0]*200;  // Number of seconds between monitoring events
+                                    if (tkrMonitorInterval < 250) tkrMonitorInterval = 250;
+                                    tkrMonitorNumAvg = cmdData[1];
+                                    nTkrMonSamples = 0;
+                                    for (int brd=0; brd<numTkrBrds; ++brd) {
+                                        tkrMonitorSums[brd] = 0;
+                                    }
+                                    tkrClkAtStart = clkCnt;        
+                                    monitorTkrRates = true;
+                                    waitingRateCnt = false;
+                                    break;
+                                case '\x4B': // Set the delay between trigger and peak detector readout
+                                    if (cmdData[0] < 127) setPeakDetResetWait(cmdData[0]);
+                                    else addError(ERR_BAD_CMD_INPUT,command,cmdData[0]);
+                                    break;
+                                case '\x4C': // Enable or disable the TOF data accumulation
+                                    if (cmdData[0] == 1) {
+                                        for (int j=0; j<TOFMAX_EVT; ++j) {
+                                            tofA.filled[j] = false;
+                                            tofB.filled[j] = false;
+                                        }
+                                        tofB.ptr = 0;
+                                        tofA.ptr = 0;
+                                        TOFenable(true);
+                                        while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) ShiftReg_A_ReadData();
+                                        while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) ShiftReg_B_ReadData();
+                                    } else {
+                                        TOFenable(false);
+                                    }
+                                    break;
+                                case '\x4D': // Select TOF acquisition mode
+                                    if (cmdData[0] == 1) {
+                                        TOF_DMA = true;
+                                        isr_TOFnrqA_Enable();
+                                        isr_TOFnrqB_Enable();
+                                        ShiftReg_A_DisableInt();
+                                        ShiftReg_B_DisableInt();
+                                    } else {
+                                        TOF_DMA = false;
+                                        isr_TOFnrqA_Disable();
+                                        isr_TOFnrqB_Disable();
+                                        ShiftReg_A_EnableInt();
+                                        ShiftReg_B_EnableInt();
+                                    }
+                                    break;
+                            } // End of command switch
+                        } else { // Log an error if the user is sending spurious commands while the trigger is enabled
+                            addError(ERR_CMD_IGNORE, command, 0);
+                        }
                     }
                 }
             } // End of command polling            

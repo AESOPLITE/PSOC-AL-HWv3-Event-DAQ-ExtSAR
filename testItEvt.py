@@ -27,12 +27,12 @@ setInternalRTC(address)
 #time.sleep(1)
 getInternalRTC(address)
 
-setTofDAC(1, 80, address)   
-setTofDAC(2, 80, address)
+setTofDAC(1, 60, address)   
+setTofDAC(2, 60, address)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
-pmtThr = 10
+pmtThr = 5
 ch5Thresh = 90
 pmtThresh = [pmtThr,pmtThr,pmtThr,pmtThr,ch5Thresh]
 for chan in range(1,5):
@@ -179,10 +179,26 @@ if nBoards > 0:
 
 TOFselectDAQ(address,"DMA")
 
-TOFenable(address, 1)
-time.sleep(3)
-TOFenable(address, 0)
-readAllTOFdata(address)
+TOFs = []
+for iter in range(1):
+    TOFenable(address, 1)
+    time.sleep(1)
+    TOFenable(address, 0)
+    TOFs.append(readAllTOFdata(address))
+N=0
+Sum=0.
+Sum2=0.
+for TOF1 in TOFs:
+    for TOF in TOF1:
+        N=N+1
+        print(str(N) + "  TOF= " + str(TOF) + " ns")
+        Sum=Sum + TOF
+        Sum2=Sum2 + TOF*TOF
+if N>1:
+    tAvg = Sum/N
+    t2Avg = Sum2/N
+    Var = t2Avg - tAvg*tAvg
+    print("Mean TOF = " + str(tAvg) + " ns    Std. Dev. = " + str(math.sqrt(Var)) + " ns")
 
 tkrSetDAC(brd, 31, "threshold", 20 , "low")
 tkrGetDAC(brd, 3, "threshold")
@@ -202,7 +218,7 @@ prescale = 4
 print("Setting the PMT trigger prescale to " + str(prescale))
 setTriggerPrescale("PMT", prescale)
 
-setSettlingWindow(72)
+setSettlingWindow(16)
 setPeakDetResetWait(28)
 
 mask = 0x00    # T1, T3 prescaled
@@ -214,14 +230,14 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
 for brd in boards:
-    tkrSetDAC(brd, 31, "threshold", 15 , "low")
+    tkrSetDAC(brd, 31, "threshold", 22 , "low")
     tkrGetDAC(brd, 3, "threshold")
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
-ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 10, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 50, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
