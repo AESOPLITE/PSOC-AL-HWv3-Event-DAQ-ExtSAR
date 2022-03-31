@@ -175,6 +175,9 @@ uint8 nDataReady;                 // Number of bytes of data ready to send out t
 uint8 dataOut[MAX_DATA_OUT];      // Buffer for output data
 uint16 tkrCmdCount;               // Command count returned from the Tracker
 uint8 tkrCmdCode;                 // Command code echoed from the Tracker
+bool eventDataReady;
+bool awaitingCommand;             // The system is ready to accept a new command when true
+bool ADCsoftReset;                // Used to force a soft reset of the external SAR ADCs on the first event.
 
 // Register pointers for the power monitoring chips
 const uint8 INA226_Config_Reg = 0x00;
@@ -207,6 +210,7 @@ const uint8 I2C_Address_RTC = '\x6F';
 // 4-bit slave addresses for the SPI interface
 // Bits 0,1,2 drive the 3-to-8 decoder and are active high
 // Bit 3 goes directly to the Main PSOC SS and is active low
+uint8 SSN_SAR[5];
 const uint8 SSN_None = 0x08;
 const uint8 SSN_Main = 0x00;
 const uint8 SSN_TOF  = 0x0A;
@@ -716,6 +720,10 @@ void grayCodeSSADC( uint8 stateSSADC )
 void TOFenable(bool enable) {
     if (TOF_DMA) {
         if (enable) {
+            // The DMA needs to start up with the shift register FIFO empty, because it always reads only the first
+            // entry in the register.
+            while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) ShiftReg_A_ReadData();
+            while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) ShiftReg_B_ReadData();
             CyDmaChEnable(DMA_TOFA_Chan, 1);   
             CyDmaChEnable(DMA_TOFB_Chan, 1);  
         } else {
@@ -724,10 +732,11 @@ void TOFenable(bool enable) {
         }
     } else {
         if (enable) {
-            isr_Store_A_Enable();
-            isr_Store_B_Enable();
+            // Clean out the shift register FIFOs before enabling the ISR.
             while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) ShiftReg_A_ReadData();
             while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) ShiftReg_B_ReadData();
+            isr_Store_A_Enable();
+            isr_Store_B_Enable();
         } else {
             isr_Store_A_Disable();
             isr_Store_B_Disable();
@@ -1170,7 +1179,7 @@ uint8 ptrNext(uint8 ptr) {
 }
 
 // Copy TOF information from the buffer into which the DMA writes
-void copyTOF_DMA(char which) {
+void copyTOF_DMA(char which, bool cleanUp) {
     if (which != 'B') {
         for (int i=0; i<nTOF_DMA_samples; ++i) {
             if (tofA_sampleArray[i] == 0) continue;
@@ -1180,6 +1189,18 @@ void copyTOF_DMA(char which) {
             tofA.filled[tofA.ptr] = true;
             tofA.ptr++;
             if (tofA.ptr >= TOFMAX_EVT) tofA.ptr = 0;
+        }
+        if (cleanUp) {  // Grab any events that may be stuck in the shift register FIFO. This normally doesn't find anything
+                        // as long as the DMA was started up with the FIFO empty, but we check anyway, just in case.
+            while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) {
+                LED2_OnOff(true);
+                uint32 AT = ShiftReg_A_ReadData();
+                tofA.shiftReg[tofA.ptr] = AT;
+                tofA.clkCnt[tofA.ptr] = Cntr8_Timer_ReadCount();  // Note: this timer value may be off by now
+                tofA.filled[tofA.ptr] = true;
+                tofA.ptr++;
+                if (tofA.ptr >= TOFMAX_EVT) tofA.ptr = 0;
+            }
         }
     }
     if (which != 'A') {
@@ -1191,6 +1212,17 @@ void copyTOF_DMA(char which) {
             tofB.filled[tofB.ptr] = true;
             tofB.ptr++;
             if (tofB.ptr >= TOFMAX_EVT) tofB.ptr = 0;
+        }
+        if (cleanUp) {  // Grab any events that may be stuck in the shift register FIFO
+            while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) {
+                LED2_OnOff(true);
+                uint32 BT = ShiftReg_B_ReadData();
+                tofB.shiftReg[tofB.ptr] = BT;
+                tofB.clkCnt[tofB.ptr] = Cntr8_Timer_ReadCount();  // Note: this timer value may be off by now
+                tofB.filled[tofB.ptr] = true;
+                tofB.ptr++;
+                if (tofB.ptr >= TOFMAX_EVT) tofB.ptr = 0;
+            }
         }
     }
 }
@@ -1229,10 +1261,10 @@ uint8 readTOFdata() {
 
 // Move TOF data out of the DMA buffers each time the maximum number of DMA TDs is used up
 CY_ISR(isrTOFnrqA) {
-    copyTOF_DMA('A');
+    copyTOF_DMA('A', false);
 }
 CY_ISR(isrTOFnrqB) {
-    copyTOF_DMA('B');
+    copyTOF_DMA('B', false);
 }
 
 // Read out the shift register when a TOF stop event arrives for channel A
@@ -1414,8 +1446,7 @@ CY_ISR(isrGO1) {
 }
 
 // External signal to force a software reset of this PSOC
-CY_ISR(isrRST)
-{
+CY_ISR(isrRST) {
     CySoftwareReset();
 }
 
@@ -1437,6 +1468,387 @@ void setSettlingWindow(uint8 dt) {
     TrigWindow_V1_4_Count7_1_WritePeriod(dt);
     TrigWindow_V1_5_Count7_1_WritePeriod(dt);
 }
+
+void makeEvent(bool debugTOF) {
+    cntGO++;  // The event number counter
+
+    // Stop acquiring TOF hits until the trigger is re-enabled.
+    TOFenable(false);
+    if (TOF_DMA) {  
+        // Copy the TOF information from where the DMA dumped it 
+        copyTOF_DMA('t', true);
+    } 
+    
+    timeDate = RTC_1_ReadTime();
+    triggered = false;
+
+    // Read the digitized PMT data after waiting for the digitizers to finish
+    uint t0 = time();
+    uint8 evtStatus = Status_Reg_M_Read();
+    if (!(evtStatus & 0x08)) {
+        int InterruptState = CyEnterCriticalSection(); 
+        while (!(Status_Reg_M_Read() & 0x08)) {   // Wait here for the done signal
+            if (time() - t0 > 20) {
+                addError(ERR_PMT_DAQ_TIMEOUT, (uint8)cntGO, (uint8)(cntGO >> 8));
+                break;
+            }
+        }
+        CyExitCriticalSection(InterruptState);
+    }
+    // Read out the 5 SAR ADCs one at a time
+    uint16 adcArray[5];
+    adcArray[0] = 0;
+    adcArray[1] = 0;
+    adcArray[2] = 0;
+    adcArray[3] = 0;
+    adcArray[4] = 0;
+    int dummy = 0;
+    for (int ch=0; ch<5; ++ch) {
+        set_ADC_SSN(SSN_SAR[ch]);
+        int InterruptState = CyEnterCriticalSection();
+        Control_Reg_1_Write(0x01);
+        if (ADCsoftReset) {            // This reset operation will occur only on the first ADC read operation after power-on
+            if (ch == 7) dummy = dummy + 3; // Delay to stop the read operation between 2nd and 8th SCLK cycles, for soft reset
+            else dummy = dummy + 4;         // This delay results in the CS going down at the start of the 5th SCLK cycle.
+            set_ADC_SSN(0);                   
+            adcArray[ch] = 4095;
+        } else {
+            while ((Status_Reg_M_Read() & 0x20) == 0);
+            adcArray[ch] = ShiftReg_ADC_ReadRegValue();
+        }
+        CyExitCriticalSection(InterruptState);
+    }
+    set_ADC_SSN(SSN_None);
+    if (dummy > 0) ADCsoftReset = false;
+    
+    // Check that a tracker trigger was received and whether data are ready
+    // This check generally works the first try and can maybe be removed in the long run.
+    uint8 tkrDataReady = 0;
+    uint8 nTry =0;
+    if (readTracker) {
+        while (tkrDataReady != 0x59) {
+            tkrCmdCode = 0x57;   // Command to check whether Tkr data are ready
+            while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
+                addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, nTry);
+            }
+            UART_TKR_WriteTxData(0x00);          // Address byte
+            UART_TKR_WriteTxData(tkrCmdCode);    // Check event-ready status (0x57)
+            UART_TKR_WriteTxData(0x00);          // Number of data bytes
+            // Wait for the Tx FIFO to empty
+            uint32 tStart = time();
+            while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
+                if (time() - tStart > 200) {
+                    addError(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0xCF);
+                }
+            }
+            getTrackerData(TKR_HOUSE_DATA);
+            if (nTkrHouseKeeping > 0) {
+                nTkrHouseKeeping = 0;    // Keep the housekeeping data from being sent out to the world
+                if (tkrHouseKeeping[0] == 0x59) {
+                    tkrDataReady = 0x59;    // Yes, an event is ready
+                    break;
+                } else if (tkrHouseKeeping[0] == 0x4E) {
+                    tkrDataReady = 0x4E;    // No, an event is not ready
+                } else {
+                    addError(ERR_TKR_BAD_STATUS, tkrHouseKeeping[0], nTry);
+                }
+            } else {
+                addError(ERR_TKR_BAD_STATUS, tkrDataReady, nTry);
+            }
+            nTry++;
+            if (nTry > 9) {
+                addError(ERR_TKR_BAD_STATUS, tkrDataReady, nTry+1);
+                break;
+            }
+        }           
+    }
+    if (tkrDataReady == 0x59) {
+        // Start the read of the Tracker data by sending a read-event command
+        tkrLED(true);
+        tkrCmdCode = 0x01;
+        while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
+            addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, tkrDataReady);
+        }
+        UART_TKR_WriteTxData(0x00);          // Address byte
+        UART_TKR_WriteTxData(tkrCmdCode);    // Read event command
+        UART_TKR_WriteTxData(0x01);          // Number of data bytes
+        UART_TKR_WriteTxData(0x00);          // Use internally generated trigger tags
+        // Wait for the Tx FIFO to empty
+        uint32 tStart = time();
+        while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
+            if (time() - tStart > 200) {
+                addError(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0xDF);
+            }
+        }
+        // Read the Tracker event data in from the UART and into internal arrays
+        int rc = getTrackerData(TKR_EVT_DATA);        
+        if (rc != 0) {
+            addError(ERR_GET_TKR_DATA, rc, 0x77);
+            UART_TKR_ClearRxBuffer(); 
+            resetAllTrackerLogic();
+        }
+        tkrLED(false);
+    } else {   // Make up an empty tracker event if no data were ready
+        makeDummyTkrEvent(0, 0, 0, 6);
+    }
+
+    // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
+    // instrument trigger, so we have to correlate the two channels with each other and with the event
+    // by looking at the course timing information.
+    uint8 timeStamp8m1;
+    if (timeStamp8 == 0) timeStamp8m1 = 199;
+    else timeStamp8m1 = timeStamp8 - 1; 
+    
+    int nI=0;
+    uint8 idx[TOFMAX_EVT];
+    for (int i=0; i<TOFMAX_EVT; ++i) {           // Make a list of TOF hits in channel A
+        int iptr = tofA.ptr - i - 1;             // Work backwards in time, starting with the most recent measurement
+        if (iptr < 0) iptr = iptr + TOFMAX_EVT;  // Wrap around the circular buffer
+        if (!tofA.filled[iptr]) continue;        // Use only entries filled since the previous readout
+        if (timeStamp8 == tofA.clkCnt[iptr] || timeStamp8 == tofA.clkCnt[iptr]+1) {
+            idx[nI] = iptr;                      // Only look at entries within two 5ms clock periods of the event time stamp
+            ++nI;
+        }
+    }
+    uint16 aCLK = 65535;
+    uint16 bCLK = 65535;
+    uint16 aTOF = 65535;
+    uint16 bTOF = 65535;
+    int16 dtmin = 32767;
+    int nJ=0;
+    for (int j=0; j<TOFMAX_EVT; ++j) {           // Loop over the TOF hits in channel B
+        int jptr = tofB.ptr - j - 1;             // Work backwards in time, starting with the most recent measurement
+        if (jptr < 0) jptr = jptr + TOFMAX_EVT;  // Wrap around the circular buffer
+        if (!tofB.filled[jptr]) continue;        // Use only entries filled since the previous readout
+        // Look only at entries filled within two 5 ms clock periods of the event time stamp
+        if (!(tofB.clkCnt[jptr] == timeStamp8 || tofB.clkCnt[jptr] == timeStamp8m1)) continue;
+        uint32 BT = tofB.shiftReg[jptr];
+        uint16 stopB = (uint16)(BT & 0x0000FFFF);          // Stop time for channel B
+        uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);     // Reference clock for channel B
+        int timej = refB*8333 + stopB;                     // Full time for channel B in 10 picosecond units
+        ++nJ;
+        for (int i=0; i<nI; ++i) {                          // Loop over the channel A hits
+            int iptr = idx[i];
+            if (minTdif(tofA.clkCnt[iptr], tofB.clkCnt[jptr]) > 1) continue; // Two channels must be within +- 1 clock period
+            uint32 AT = tofA.shiftReg[iptr];
+            uint16 stopA = (uint16)(AT & 0x0000FFFF);       // Stop time for channel A
+            uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);  // Reference clock for channel A
+            int timei = refA*8333 + stopA;                  // Full time for channel A in 10 picosecond units
+            // Here we try to handle cases in which a reference clock rolled over
+            int16 dt;
+            if (refA >= 60001 && refB == 0) {
+                dt = (int16)((timej + 500000000) - timei);
+            } else if (refB >= 60001 && refA == 0) {
+                dt = (int16)(timej - (timei + 500000000)); 
+            } else {
+                dt = (int16)(timej - timei);
+            }
+            if (abs(dt) < abs(dtmin)) { // Keep the smallest time difference of all combinations
+                dtmin = dt;
+                aCLK = tofA.clkCnt[iptr];  // Save the clock and reference counts for debugging
+                bCLK = tofB.clkCnt[jptr];
+                aTOF = refA;
+                bTOF = refB;
+            }
+        }
+    }
+    
+    // Build the event by filling the output buffer according to the output format.
+    // Pack the time and date information into a 4-byte unsigned integer
+    uint32 timeWord = ((uint32)timeDate->Year - 2000) << 26;
+    timeWord = timeWord | ((uint32)timeDate->Month << 22);
+    timeWord = timeWord | ((uint32)timeDate->DayOfMonth << 17);
+    timeWord = timeWord | ((uint32)timeDate->Hour << 12);
+    timeWord = timeWord | ((uint32)timeDate->Min << 6);
+    timeWord = timeWord | ((uint32)timeDate->Sec); 
+    //
+    // Start the event with a 4-byte header (spells ZERO) in ASCII
+    dataOut[0] = 0x5A;
+    dataOut[1] = 0x45;
+    dataOut[2] = 0x52;
+    dataOut[3] = 0x4F;
+    dataOut[4] = byte16(runNumber, 0);
+    dataOut[5] = byte16(runNumber, 1);
+    dataOut[6] = byte32(cntGO, 0);     // Event number
+    dataOut[7] = byte32(cntGO, 1);
+    dataOut[8] = byte32(cntGO, 2);
+    dataOut[9] = byte32(cntGO, 3);
+    dataOut[10] = byte32(timeStamp, 0); // Time stamp
+    dataOut[11] = byte32(timeStamp, 1);
+    dataOut[12] = byte32(timeStamp, 2);
+    dataOut[13] = byte32(timeStamp, 3);
+    dataOut[14] = byte32(cntGO1save, 0);   // Trigger count
+    dataOut[15] = byte32(cntGO1save, 1);
+    dataOut[16] = byte32(cntGO1save, 2);
+    dataOut[17] = byte32(cntGO1save, 3);
+    dataOut[18] = byte32(timeWord, 0); // Time and date
+    dataOut[19] = byte32(timeWord, 1);
+    dataOut[20] = byte32(timeWord, 2);
+    dataOut[21] = byte32(timeWord, 3);
+    dataOut[22] = trgStatus;
+    uint16 T1mV = adcArray[2]; 
+    uint16 T2mV = adcArray[4]; 
+    uint16 T3mV = adcArray[1]; 
+    uint16 T4mV = adcArray[3]; 
+    uint16 GmV =  adcArray[0]; 
+    dataOut[23] = byte16(T1mV, 0);   // T1
+    dataOut[24] = byte16(T1mV, 1);
+    dataOut[25] = byte16(T2mV, 0);   // T2
+    dataOut[26] = byte16(T2mV, 1);
+    dataOut[27] = byte16(T3mV, 0);   // T3
+    dataOut[28] = byte16(T3mV, 1);
+    dataOut[29] = byte16(T4mV, 0);   // T4
+    dataOut[30] = byte16(T4mV, 1);
+    dataOut[31] = byte16(GmV, 0);    // G
+    dataOut[32] = byte16(GmV, 1);
+    dataOut[33] = byte16(dtmin, 0);  // TOF
+    dataOut[34] = byte16(dtmin, 1);
+    dataOut[35] = byte16(tkrData.triggerCount, 0);
+    dataOut[36] = byte16(tkrData.triggerCount, 1);
+    dataOut[37] = tkrData.cmdCount;
+    dataOut[38] = (tkrData.trgPattern & 0xC0) | (evtStatus & 0x37);
+    if (debugTOF) {  // Extra TOF information for debugging
+        dataOut[39] = nI;   // Number of TOF readouts since the last trigger
+        dataOut[40] = nJ; 
+        dataOut[41] = byte16(aTOF,0);    // TOF chip reference clock 
+        dataOut[42] = byte16(aTOF,1);
+        dataOut[43] = byte16(bTOF,0);
+        dataOut[44] = byte16(bTOF,1);
+        dataOut[45] = byte16(aCLK,0);    // Internal clock at time of TOF event
+        dataOut[46] = byte16(aCLK,1);
+        dataOut[47] = byte16(bCLK,0);
+        dataOut[48] = byte16(bCLK,1);
+        dataOut[49] = tkrData.nTkrBoards;
+        nDataReady = 50;
+    } else {
+        dataOut[39] = tkrData.nTkrBoards;
+        nDataReady = 40;
+    }
+    for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
+        // Min. # bytes needed: board address, hitlist length, hitlist, 4-byte trailer
+        if (nDataReady >= MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
+            // There is no room for this tracker board's data, but see if we can fit in an empty dummy readout
+            if (nDataReady < MAX_DATA_OUT - 10) {
+                //dataOut[nDataReady++] = brd;
+                dataOut[nDataReady++] = 5;       // Number of bytes in the (empty) board hit list
+                dataOut[nDataReady++] = 0xE7;    // Identifier byte for the hit list
+                dataOut[nDataReady++] = brd;     // Board FPGA address (normally also the layer number)
+                dataOut[nDataReady++] = 0;       // Event tag plus error flag, all set to zero
+                dataOut[nDataReady++] = 0x09;    // Number of chips reporting (0) plus first 4 bits of CRC   
+                dataOut[nDataReady++] = 0x30;    // 2 more CRC bits, set to 0, followed by 11, followed by 0 to byte boundary
+                continue;
+            }
+            if (debugTOF) {
+                dataOut[49] = brd;
+            } else {
+                dataOut[39] = brd;
+            }
+            addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
+            break;  // We're really out of space. The event will be truncated.
+        }
+        //dataOut[nDataReady++] = brd;  // this was redundant, not needed
+        if (tkrData.boardHits[brd].hitList == NULL) {  // In case the heap memory ran out. . .
+            dataOut[nDataReady++] = 5;
+            dataOut[nDataReady++] = 0xE7;
+            dataOut[nDataReady++] = brd;
+            dataOut[nDataReady++] = 1;
+            dataOut[nDataReady++] = 0x07;   // A bad CRC will flag this error
+            dataOut[nDataReady++] = 0x30;
+        } else {
+            dataOut[nDataReady++] = tkrData.boardHits[brd].nBytes;
+            for (int b=0; b<tkrData.boardHits[brd].nBytes; ++b) {
+                dataOut[nDataReady++] = tkrData.boardHits[brd].hitList[b];
+            }
+            free(tkrData.boardHits[brd].hitList);
+            tkrData.boardHits[brd].nBytes = 0;
+        }
+    }
+    // Four byte trailer, spells FINI in ASCII
+    dataOut[nDataReady++] = 0x46;
+    dataOut[nDataReady++] = 0x49;
+    dataOut[nDataReady++] = 0x4E;
+    dataOut[nDataReady++] = 0x49;
+    eventDataReady = true;
+    for (int j=0; j<TOFMAX_EVT; ++j) {
+        tofA.filled[j] = false;
+        tofB.filled[j] = false;
+    }
+    tofA.ptr = 0;
+    tofB.ptr = 0;           
+    tkrData.nTkrBoards = 0;
+    ch1CtrSave = Cntr8_V1_1_ReadCount();
+    ch2CtrSave = Cntr8_V1_2_ReadCount();
+    ch3CtrSave = Cntr8_V1_3_ReadCount();
+    ch4CtrSave = Cntr8_V1_4_ReadCount();
+    ch5CtrSave = Cntr8_V1_5_ReadCount();
+    ch1CountSave = ch1Count;
+    ch2CountSave = ch2Count;
+    ch3CountSave = ch3Count;
+    ch4CountSave = ch4Count;
+    ch5CountSave = ch5Count;
+} // end of subroutine makeEvent
+
+void tkrRateMonitor(bool *waitingRateCnt) {
+    uint32 diff;
+    if (*waitingRateCnt) {
+        if (clkCnt > tkrClkCntStart) {
+            diff = clkCnt - tkrClkCntStart;
+        } else {
+            diff = 0xffffffff - (tkrClkCntStart - clkCnt - 1);                       
+        }     
+        if (diff >= 220) {  // Allow 1 second for the Tracker to finish its count
+            *waitingRateCnt = false;
+            bool trgStat = isTriggerEnabled();
+            if (trgStat) triggerEnable(false);
+            bool tkrErr = false;
+            uint16 theRate[MAX_TKR_BOARDS];
+            for (int brd=0; brd<numTkrBrds; ++brd) {
+                theRate[brd] = 0;
+                uint8 cmdData[1];
+                sendTrackerCmd(brd, 0x6D, 0, cmdData, TKR_HOUSE_DATA);  // Get counts from tracker
+                if (nTkrHouseKeeping == 0) {
+                    addError(ERR_MISSING_HOUSEKEEPING,brd,0x5D);
+                    tkrErr = true;
+                } else {
+                    theRate[brd] = (tkrHouseKeeping[0]<<8 & 0xff00) | tkrHouseKeeping[1];
+                }
+                nTkrHouseKeeping = 0;
+            }
+            if (!tkrErr) {
+                if (nTkrMonSamples == tkrMonitorNumAvg) {
+                    //LED2_OnOff(true);
+                    for (int brd=0; brd<numTkrBrds; ++ brd) {
+                        tkrMonitorRates[brd] = tkrMonitorSums[brd]/nTkrMonSamples;
+                        tkrMonitorSums[brd] = theRate[brd];
+                    }
+                    nTkrMonSamples = 1;
+                } else {
+                    for (int brd=0; brd<numTkrBrds; ++ brd) {
+                        tkrMonitorSums[brd] += theRate[brd];
+                    }
+                    nTkrMonSamples++;
+                }
+                tkrClkAtStart = clkCnt;
+            }
+            if (trgStat) triggerEnable(true);
+        }
+    } else {
+        if (clkCnt > tkrClkAtStart) {
+            diff = clkCnt - tkrClkAtStart;
+        } else {
+            diff = 0xffffffff - (tkrClkAtStart - clkCnt - 1);                       
+        }
+        if (diff >= tkrMonitorInterval) {
+            // Send a command to the tracker to accumulate trigger counts for 1 second
+            bool trgStat = isTriggerEnabled();
+            if (trgStat) triggerEnable(false);
+            sendSimpleTrackerCmd(0, 0x6C);
+            tkrClkCntStart = clkCnt;
+            *waitingRateCnt = true;
+            if (trgStat) triggerEnable(true);
+        }
+    }
+} // end of subroutine trkRateMonitor
 
 // Event PSOC main program
 int main(void)
@@ -1586,7 +1998,6 @@ int main(void)
     SPIM_Start();
     
     // SPI SSN codes for the external SAR ADCs
-    uint8 SSN_SAR[5];
     SSN_SAR[0] = SSN_CH1;
     SSN_SAR[1] = SSN_CH2;
     SSN_SAR[2] = SSN_CH3;
@@ -1793,8 +2204,9 @@ int main(void)
     isr_TKR_Enable();
 
     numTkrBrds = MAX_TKR_BOARDS;
-    bool eventDataReady = false;
-    bool awaitingCommand = true;   // The system is ready to accept a new command when true
+    eventDataReady = false;
+    awaitingCommand = true;   
+    
     time_t cmdStartTime = time();
     uint8 rc;
     bool cmdDone = false;    // If true, A command has been fully received but data have not yet been sent back
@@ -1809,7 +2221,7 @@ int main(void)
     monitorTkrRates = false;
     bool waitingRateCnt = false;
     
-    bool ADCsoftReset=true;
+    ADCsoftReset=true;
     nTOFAint = 0;
     nTOFAint = 0;
     
@@ -1825,383 +2237,11 @@ int main(void)
 
         //Tracker rate monitoring
         if (monitorTkrRates) {
-            uint32 diff;
-            if (waitingRateCnt) {
-                if (clkCnt > tkrClkCntStart) {
-                    diff = clkCnt - tkrClkCntStart;
-                } else {
-                    diff = 0xffffffff - (tkrClkCntStart - clkCnt - 1);                       
-                }     
-                if (diff >= 220) {  // Allow 1 second for the Tracker to finish its count
-                    waitingRateCnt = false;
-                    bool trgStat = isTriggerEnabled();
-                    if (trgStat) triggerEnable(false);
-                    bool tkrErr = false;
-                    uint16 theRate[MAX_TKR_BOARDS];
-                    for (int brd=0; brd<numTkrBrds; ++brd) {
-                        theRate[brd] = 0;
-                        sendTrackerCmd(brd, 0x6D, 0, cmdData, TKR_HOUSE_DATA);  // Get counts from tracker
-                        if (nTkrHouseKeeping == 0) {
-                            addError(ERR_MISSING_HOUSEKEEPING,brd,0x5D);
-                            tkrErr = true;
-                        } else {
-                            theRate[brd] = (tkrHouseKeeping[0]<<8 & 0xff00) | tkrHouseKeeping[1];
-                        }
-                        nTkrHouseKeeping = 0;
-                    }
-                    if (!tkrErr) {
-                        if (nTkrMonSamples == tkrMonitorNumAvg) {
-                            //LED2_OnOff(true);
-                            for (int brd=0; brd<numTkrBrds; ++ brd) {
-                                tkrMonitorRates[brd] = tkrMonitorSums[brd]/nTkrMonSamples;
-                                tkrMonitorSums[brd] = theRate[brd];
-                            }
-                            nTkrMonSamples = 1;
-                        } else {
-                            for (int brd=0; brd<numTkrBrds; ++ brd) {
-                                tkrMonitorSums[brd] += theRate[brd];
-                            }
-                            nTkrMonSamples++;
-                        }
-                        tkrClkAtStart = clkCnt;
-                    }
-                    if (trgStat) triggerEnable(true);
-                }
-            } else {
-                if (clkCnt > tkrClkAtStart) {
-                    diff = clkCnt - tkrClkAtStart;
-                } else {
-                    diff = 0xffffffff - (tkrClkAtStart - clkCnt - 1);                       
-                }
-                if (diff >= tkrMonitorInterval) {
-                    // Send a command to the tracker to accumulate trigger counts for 1 second
-                    bool trgStat = isTriggerEnabled();
-                    if (trgStat) triggerEnable(false);
-                    sendSimpleTrackerCmd(0, 0x6C);
-                    tkrClkCntStart = clkCnt;
-                    waitingRateCnt = true;
-                    if (trgStat) triggerEnable(true);
-                }
-            }
+            tkrRateMonitor(&waitingRateCnt);
         }
         
         if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
-            cntGO++;  // The event number counter
-
-            // Stop acquiring TOF hits until the trigger is re-enabled.
-            TOFenable(false);
-            if (TOF_DMA) {  
-                // Copy the TOF information from where the DMA dumped it 
-                copyTOF_DMA('t');
-            } 
-            
-            timeDate = RTC_1_ReadTime();
-            triggered = false;
-
-            // Read the digitized PMT data after waiting for the digitizers to finish
-            uint t0 = time();
-            uint8 evtStatus = Status_Reg_M_Read();
-            if (!(evtStatus & 0x08)) {
-                int InterruptState = CyEnterCriticalSection(); 
-                while (!(Status_Reg_M_Read() & 0x08)) {   // Wait here for the done signal
-                    if (time() - t0 > 20) {
-                        addError(ERR_PMT_DAQ_TIMEOUT, (uint8)cntGO, (uint8)(cntGO >> 8));
-                        break;
-                    }
-                }
-                CyExitCriticalSection(InterruptState);
-            }
-            // Read out the 5 SAR ADCs one at a time
-            uint16 adcArray[5];
-            adcArray[0] = 0;
-            adcArray[1] = 0;
-            adcArray[2] = 0;
-            adcArray[3] = 0;
-            adcArray[4] = 0;
-            int dummy = 0;
-            for (int ch=0; ch<5; ++ch) {
-                set_ADC_SSN(SSN_SAR[ch]);
-                int InterruptState = CyEnterCriticalSection();
-                Control_Reg_1_Write(0x01);
-                if (ADCsoftReset) {            // This reset operation will occur only on the first ADC read operation after power-on
-                    if (ch == 7) dummy = dummy + 3; // Delay to stop the read operation between 2nd and 8th SCLK cycles, for soft reset
-                    else dummy = dummy + 4;         // This delay results in the CS going down at the start of the 5th SCLK cycle.
-                    set_ADC_SSN(0);                   
-                    adcArray[ch] = 4095;
-                } else {
-                    while ((Status_Reg_M_Read() & 0x20) == 0);
-                    adcArray[ch] = ShiftReg_ADC_ReadRegValue();
-                }
-                CyExitCriticalSection(InterruptState);
-            }
-            set_ADC_SSN(SSN_None);
-            if (dummy > 0) ADCsoftReset = false;
-            
-            // Check that a tracker trigger was received and whether data are ready
-            // This check generally works the first try and can maybe be removed in the long run.
-            uint8 tkrDataReady = 0;
-            uint8 nTry =0;
-            if (readTracker) {
-                while (tkrDataReady != 0x59) {
-                    tkrCmdCode = 0x57;   // Command to check whether Tkr data are ready
-                    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-                        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, nTry);
-                    }
-                    UART_TKR_WriteTxData(0x00);          // Address byte
-                    UART_TKR_WriteTxData(tkrCmdCode);    // Check event-ready status (0x57)
-                    UART_TKR_WriteTxData(0x00);          // Number of data bytes
-                    // Wait for the Tx FIFO to empty
-                    uint32 tStart = time();
-                    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-                        if (time() - tStart > 200) {
-                            addError(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0xCF);
-                        }
-                    }
-                    getTrackerData(TKR_HOUSE_DATA);
-                    if (nTkrHouseKeeping > 0) {
-                        nTkrHouseKeeping = 0;    // Keep the housekeeping data from being sent out to the world
-                        if (tkrHouseKeeping[0] == 0x59) {
-                            tkrDataReady = 0x59;    // Yes, an event is ready
-                            break;
-                        } else if (tkrHouseKeeping[0] == 0x4E) {
-                            tkrDataReady = 0x4E;    // No, an event is not ready
-                        } else {
-                            addError(ERR_TKR_BAD_STATUS, tkrHouseKeeping[0], nTry);
-                        }
-                    } else {
-                        addError(ERR_TKR_BAD_STATUS, tkrDataReady, nTry);
-                    }
-                    nTry++;
-                    if (nTry > 9) {
-                        addError(ERR_TKR_BAD_STATUS, tkrDataReady, nTry+1);
-                        break;
-                    }
-                }           
-            }
-            if (tkrDataReady == 0x59) {
-                // Start the read of the Tracker data by sending a read-event command
-                tkrLED(true);
-                tkrCmdCode = 0x01;
-                while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-                    addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, tkrDataReady);
-                }
-                UART_TKR_WriteTxData(0x00);          // Address byte
-                UART_TKR_WriteTxData(tkrCmdCode);    // Read event command
-                UART_TKR_WriteTxData(0x01);          // Number of data bytes
-                UART_TKR_WriteTxData(0x00);          // Use internally generated trigger tags
-                // Wait for the Tx FIFO to empty
-                uint32 tStart = time();
-                while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-                    if (time() - tStart > 200) {
-                        addError(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0xDF);
-                    }
-                }
-                // Read the Tracker event data in from the UART and into internal arrays
-                rc = getTrackerData(TKR_EVT_DATA);        
-                if (rc != 0) {
-                    addError(ERR_GET_TKR_DATA, rc, 0x77);
-                    UART_TKR_ClearRxBuffer(); 
-                    resetAllTrackerLogic();
-                }
-                tkrLED(false);
-            } else {   // Make up an empty tracker event if no data were ready
-                makeDummyTkrEvent(0, 0, 0, 6);
-            }
-
-            // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
-            // instrument trigger, so we have to correlate the two channels with each other and with the event
-            // by looking at the course timing information.
-            uint8 timeStamp8m1;
-            if (timeStamp8 == 0) timeStamp8m1 = 199;
-            else timeStamp8m1 = timeStamp8 - 1; 
-            
-            int nI=0;
-            uint8 idx[TOFMAX_EVT];
-            for (int i=0; i<TOFMAX_EVT; ++i) {           // Make a list of TOF hits in channel A
-                int iptr = tofA.ptr - i - 1;             // Work backwards in time, starting with the most recent measurement
-                if (iptr < 0) iptr = iptr + TOFMAX_EVT;  // Wrap around the circular buffer
-                if (!tofA.filled[iptr]) continue;        // Use only entries filled since the previous readout
-                if (timeStamp8 == tofA.clkCnt[iptr] || timeStamp8 == tofA.clkCnt[iptr]+1) {
-                    idx[nI] = iptr;                      // Only look at entries within two 5ms clock periods of the event time stamp
-                    ++nI;
-                }
-            }
-            uint16 aCLK = 65535;
-            uint16 bCLK = 65535;
-            uint16 aTOF = 65535;
-            uint16 bTOF = 65535;
-            int16 dtmin = 32767;
-            int nJ=0;
-            for (int j=0; j<TOFMAX_EVT; ++j) {           // Loop over the TOF hits in channel B
-                int jptr = tofB.ptr - j - 1;             // Work backwards in time, starting with the most recent measurement
-                if (jptr < 0) jptr = jptr + TOFMAX_EVT;  // Wrap around the circular buffer
-                if (!tofB.filled[jptr]) continue;        // Use only entries filled since the previous readout
-                // Look only at entries filled within two 5 ms clock periods of the event time stamp
-                if (!(tofB.clkCnt[jptr] == timeStamp8 || tofB.clkCnt[jptr] == timeStamp8m1)) continue;
-                uint32 BT = tofB.shiftReg[jptr];
-                uint16 stopB = (uint16)(BT & 0x0000FFFF);          // Stop time for channel B
-                uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);     // Reference clock for channel B
-                int timej = refB*8333 + stopB;                     // Full time for channel B in 10 picosecond units
-                ++nJ;
-                for (int i=0; i<nI; ++i) {                          // Loop over the channel A hits
-                    int iptr = idx[i];
-                    if (minTdif(tofA.clkCnt[iptr], tofB.clkCnt[jptr]) > 1) continue; // Two channels must be within +- 1 clock period
-                    uint32 AT = tofA.shiftReg[iptr];
-                    uint16 stopA = (uint16)(AT & 0x0000FFFF);       // Stop time for channel A
-                    uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);  // Reference clock for channel A
-                    int timei = refA*8333 + stopA;                  // Full time for channel A in 10 picosecond units
-                    // Here we try to handle cases in which a reference clock rolled over
-                    int16 dt;
-                    if (refA >= 60001 && refB == 0) {
-                        dt = (int16)((timej + 500000000) - timei);
-                    } else if (refB >= 60001 && refA == 0) {
-                        dt = (int16)(timej - (timei + 500000000)); 
-                    } else {
-                        dt = (int16)(timej - timei);
-                    }
-                    if (abs(dt) < abs(dtmin)) { // Keep the smallest time difference of all combinations
-                        dtmin = dt;
-                        aCLK = tofA.clkCnt[iptr];  // Save the clock and reference counts for debugging
-                        bCLK = tofB.clkCnt[jptr];
-                        aTOF = refA;
-                        bTOF = refB;
-                    }
-                }
-            }
-            
-            // Build the event by filling the output buffer according to the output format.
-            // Pack the time and date information into a 4-byte unsigned integer
-            uint32 timeWord = ((uint32)timeDate->Year - 2000) << 26;
-            timeWord = timeWord | ((uint32)timeDate->Month << 22);
-            timeWord = timeWord | ((uint32)timeDate->DayOfMonth << 17);
-            timeWord = timeWord | ((uint32)timeDate->Hour << 12);
-            timeWord = timeWord | ((uint32)timeDate->Min << 6);
-            timeWord = timeWord | ((uint32)timeDate->Sec); 
-            //
-            // Start the event with a 4-byte header (spells ZERO) in ASCII
-            dataOut[0] = 0x5A;
-            dataOut[1] = 0x45;
-            dataOut[2] = 0x52;
-            dataOut[3] = 0x4F;
-            dataOut[4] = byte16(runNumber, 0);
-            dataOut[5] = byte16(runNumber, 1);
-            dataOut[6] = byte32(cntGO, 0);     // Event number
-            dataOut[7] = byte32(cntGO, 1);
-            dataOut[8] = byte32(cntGO, 2);
-            dataOut[9] = byte32(cntGO, 3);
-            dataOut[10] = byte32(timeStamp, 0); // Time stamp
-            dataOut[11] = byte32(timeStamp, 1);
-            dataOut[12] = byte32(timeStamp, 2);
-            dataOut[13] = byte32(timeStamp, 3);
-            dataOut[14] = byte32(cntGO1save, 0);   // Trigger count
-            dataOut[15] = byte32(cntGO1save, 1);
-            dataOut[16] = byte32(cntGO1save, 2);
-            dataOut[17] = byte32(cntGO1save, 3);
-            dataOut[18] = byte32(timeWord, 0); // Time and date
-            dataOut[19] = byte32(timeWord, 1);
-            dataOut[20] = byte32(timeWord, 2);
-            dataOut[21] = byte32(timeWord, 3);
-            dataOut[22] = trgStatus;
-            uint16 T1mV = adcArray[2]; 
-            uint16 T2mV = adcArray[4]; 
-            uint16 T3mV = adcArray[1]; 
-            uint16 T4mV = adcArray[3]; 
-            uint16 GmV =  adcArray[0]; 
-            dataOut[23] = byte16(T1mV, 0);   // T1
-            dataOut[24] = byte16(T1mV, 1);
-            dataOut[25] = byte16(T2mV, 0);   // T2
-            dataOut[26] = byte16(T2mV, 1);
-            dataOut[27] = byte16(T3mV, 0);   // T3
-            dataOut[28] = byte16(T3mV, 1);
-            dataOut[29] = byte16(T4mV, 0);   // T4
-            dataOut[30] = byte16(T4mV, 1);
-            dataOut[31] = byte16(GmV, 0);    // G
-            dataOut[32] = byte16(GmV, 1);
-            dataOut[33] = byte16(dtmin, 0);  // TOF
-            dataOut[34] = byte16(dtmin, 1);
-            dataOut[35] = byte16(tkrData.triggerCount, 0);
-            dataOut[36] = byte16(tkrData.triggerCount, 1);
-            dataOut[37] = tkrData.cmdCount;
-            dataOut[38] = (tkrData.trgPattern & 0xC0) | (evtStatus & 0x37);
-            if (debugTOF) {  // Extra TOF information for debugging
-                dataOut[39] = nI;   // Number of TOF readouts since the last trigger
-                dataOut[40] = nJ; 
-                dataOut[41] = byte16(aTOF,0);    // TOF chip reference clock 
-                dataOut[42] = byte16(aTOF,1);
-                dataOut[43] = byte16(bTOF,0);
-                dataOut[44] = byte16(bTOF,1);
-                dataOut[45] = byte16(aCLK,0);    // Internal clock at time of TOF event
-                dataOut[46] = byte16(aCLK,1);
-                dataOut[47] = byte16(bCLK,0);
-                dataOut[48] = byte16(bCLK,1);
-                dataOut[49] = tkrData.nTkrBoards;
-                nDataReady = 50;
-            } else {
-                dataOut[39] = tkrData.nTkrBoards;
-                nDataReady = 40;
-            }
-            for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
-                // Min. # bytes needed: board address, hitlist length, hitlist, 4-byte trailer
-                if (nDataReady >= MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
-                    // There is no room for this tracker board's data, but see if we can fit in an empty dummy readout
-                    if (nDataReady < MAX_DATA_OUT - 10) {
-                        //dataOut[nDataReady++] = brd;
-                        dataOut[nDataReady++] = 5;       // Number of bytes in the (empty) board hit list
-                        dataOut[nDataReady++] = 0xE7;    // Identifier byte for the hit list
-                        dataOut[nDataReady++] = brd;     // Board FPGA address (normally also the layer number)
-                        dataOut[nDataReady++] = 0;       // Event tag plus error flag, all set to zero
-                        dataOut[nDataReady++] = 0x09;    // Number of chips reporting (0) plus first 4 bits of CRC   
-                        dataOut[nDataReady++] = 0x30;    // 2 more CRC bits, set to 0, followed by 11, followed by 0 to byte boundary
-                        continue;
-                    }
-                    if (debugTOF) {
-                        dataOut[49] = brd;
-                    } else {
-                        dataOut[39] = brd;
-                    }
-                    addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
-                    break;  // We're really out of space. The event will be truncated.
-                }
-                //dataOut[nDataReady++] = brd;  // this was redundant, not needed
-                if (tkrData.boardHits[brd].hitList == NULL) {  // In case the heap memory ran out. . .
-                    dataOut[nDataReady++] = 5;
-                    dataOut[nDataReady++] = 0xE7;
-                    dataOut[nDataReady++] = brd;
-                    dataOut[nDataReady++] = 1;
-                    dataOut[nDataReady++] = 0x07;   // A bad CRC will flag this error
-                    dataOut[nDataReady++] = 0x30;
-                } else {
-                    dataOut[nDataReady++] = tkrData.boardHits[brd].nBytes;
-                    for (int b=0; b<tkrData.boardHits[brd].nBytes; ++b) {
-                        dataOut[nDataReady++] = tkrData.boardHits[brd].hitList[b];
-                    }
-                    free(tkrData.boardHits[brd].hitList);
-                    tkrData.boardHits[brd].nBytes = 0;
-                }
-            }
-            // Four byte trailer, spells FINI in ASCII
-            dataOut[nDataReady++] = 0x46;
-            dataOut[nDataReady++] = 0x49;
-            dataOut[nDataReady++] = 0x4E;
-            dataOut[nDataReady++] = 0x49;
-            eventDataReady = true;
-            for (int j=0; j<TOFMAX_EVT; ++j) {
-                tofA.filled[j] = false;
-                tofB.filled[j] = false;
-            }
-            tofA.ptr = 0;
-            tofB.ptr = 0;           
-            tkrData.nTkrBoards = 0;
-            ch1CtrSave = Cntr8_V1_1_ReadCount();
-            ch2CtrSave = Cntr8_V1_2_ReadCount();
-            ch3CtrSave = Cntr8_V1_3_ReadCount();
-            ch4CtrSave = Cntr8_V1_4_ReadCount();
-            ch5CtrSave = Cntr8_V1_5_ReadCount();
-            ch1CountSave = ch1Count;
-            ch2CountSave = ch2Count;
-            ch3CountSave = ch3Count;
-            ch4CountSave = ch4Count;
-            ch5CountSave = ch5Count;
+            makeEvent(debugTOF);
         }
         if (!triggered && endingRun) {
             madeItToTheEnd = true;
@@ -2963,7 +3003,7 @@ int main(void)
                                     uint8 nA = 0;
                                     uint8 nB = 0;
                                     InterruptState = CyEnterCriticalSection();
-                                    if (TOF_DMA) copyTOF_DMA('t');
+                                    if (TOF_DMA) copyTOF_DMA('t', true);
                                     for (int i=0; i<TOFMAX_EVT; ++i) {
                                         if (tofA.filled[i]) ++nA;
                                         if (tofB.filled[i]) ++nB;
@@ -3098,8 +3138,6 @@ int main(void)
                                         tofB.ptr = 0;
                                         tofA.ptr = 0;
                                         TOFenable(true);
-                                        while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) ShiftReg_A_ReadData();
-                                        while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) ShiftReg_B_ReadData();
                                     } else {
                                         TOFenable(false);
                                     }

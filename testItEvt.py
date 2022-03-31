@@ -27,12 +27,12 @@ setInternalRTC(address)
 #time.sleep(1)
 getInternalRTC(address)
 
-setTofDAC(1, 60, address)   
-setTofDAC(2, 60, address)
+setTofDAC(1, 50, address)   
+setTofDAC(2, 50, address)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
-pmtThr = 5
+pmtThr = 12
 ch5Thresh = 90
 pmtThresh = [pmtThr,pmtThr,pmtThr,pmtThr,ch5Thresh]
 for chan in range(1,5):
@@ -180,7 +180,7 @@ if nBoards > 0:
 TOFselectDAQ(address,"DMA")
 
 TOFs = []
-for iter in range(1):
+for iter in range(0):
     TOFenable(address, 1)
     time.sleep(1)
     TOFenable(address, 0)
@@ -200,13 +200,13 @@ if N>1:
     Var = t2Avg - tAvg*tAvg
     print("Mean TOF = " + str(tAvg) + " ns    Std. Dev. = " + str(math.sqrt(Var)) + " ns")
 
-tkrSetDAC(brd, 31, "threshold", 20 , "low")
+tkrSetDAC(brd, 31, "threshold", 30 , "low")
 tkrGetDAC(brd, 3, "threshold")
 
 getLyrTrgCnt(0)
 
-#startTkrRateMonitor(4, 6)
-#time.sleep(2)
+startTkrRateMonitor(10, 2)
+time.sleep(2)
 
 mask = 0x06    # T1&T4
 print("Setting the first trigger mask to " + str(mask))
@@ -230,14 +230,15 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
 for brd in boards:
-    tkrSetDAC(brd, 31, "threshold", 22 , "low")
+    tkrSetDAC(brd, 31, "threshold", 30 , "low")
     tkrGetDAC(brd, 3, "threshold")
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
-ADC, Sigma, TOF, sigmaTOF = limitedRun(74, 50, True, False, True)
+#sys.exit("abort")
+ADC, Sigma, TOF, sigmaTOF = limitedRun(75, 10, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
@@ -251,8 +252,8 @@ for ch in range(5):
     cnt = getEndOfRunChannelCount(ch+1)
     print("Counter for channel " + chName[ch] + " = " + str(cnt))
 
-#stopTkrRateMonitor()
-#getTkrLyrRates()
+stopTkrRateMonitor()
+getTkrLyrRates()
 
 if asicReset and nBoards>0: tkrAsicPowerOff()
 
