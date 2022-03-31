@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define VERSION 10
+#define VERSION 11
 
 /*=========================================================================
  * V7 Adding ADC software reset. Changed ADC readout to SPI -Brian Lucas
@@ -949,7 +949,10 @@ int getTrackerData(uint8 idExpected) {
             }
             uint8 lyr = 0x7 & byte2;  // Get rid of the master bit, leaving just the layer number
             // Require the boards to be set up to read out in order:
-            if (lyr != brd) addError(ERR_TKR_LYR_ORDER, lyr, brd);
+            if (lyr != brd) {
+                addError(ERR_TKR_LYR_ORDER, lyr, brd);
+                lyr = brd;
+            }
             if (nBrdBytes > MAX_TKR_BOARD_BYTES) {    // This really should never happen, due to ASIC 10-hit limit
                 tkrData.boardHits[lyr].nBytes = MAX_TKR_BOARD_BYTES;
                 addError(ERR_TKR_TOO_BIG, nBrdBytes, lyr);
@@ -1738,7 +1741,7 @@ void makeEvent(bool debugTOF) {
                 dataOut[nDataReady++] = 0x30;    // 2 more CRC bits, set to 0, followed by 11, followed by 0 to byte boundary
                 continue;
             }
-            if (debugTOF) {
+            if (debugTOF) {        // For a truncated event, enter the number of boards that did read out.
                 dataOut[49] = brd;
             } else {
                 dataOut[39] = brd;
@@ -1746,8 +1749,7 @@ void makeEvent(bool debugTOF) {
             addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
             break;  // We're really out of space. The event will be truncated.
         }
-        //dataOut[nDataReady++] = brd;  // this was redundant, not needed
-        if (tkrData.boardHits[brd].hitList == NULL) {  // In case the heap memory ran out. . .
+        if (tkrData.boardHits[brd].hitList == NULL) {  // In case the heap memory ran out, enter a dummy layer packet. . .
             dataOut[nDataReady++] = 5;
             dataOut[nDataReady++] = 0xE7;
             dataOut[nDataReady++] = brd;
@@ -1762,7 +1764,10 @@ void makeEvent(bool debugTOF) {
             free(tkrData.boardHits[brd].hitList);
             tkrData.boardHits[brd].nBytes = 0;
         }
+        tkrData.boardHits[brd].nBytes = 0;  // Zero this out to facilitate debugging
     }
+    tkrData.nTkrBoards = 0;  // Zero this out to facilitate debugging
+    
     // Four byte trailer, spells FINI in ASCII
     dataOut[nDataReady++] = 0x46;
     dataOut[nDataReady++] = 0x49;
