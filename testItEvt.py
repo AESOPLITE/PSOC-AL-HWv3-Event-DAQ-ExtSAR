@@ -9,7 +9,7 @@ from PSOC_cmd import *
 
 asicReset = True
 
-portName = "COM11"
+portName = "COM3"
 openCOM(portName)
 
 print("Entering testItEvt.py")
@@ -32,7 +32,7 @@ setTofDAC(2, 50, address)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
-pmtThr = 12
+pmtThr = 8
 ch5Thresh = 90
 pmtThresh = [pmtThr,pmtThr,pmtThr,pmtThr,ch5Thresh]
 for chan in range(1,5):
@@ -52,6 +52,7 @@ readTofConfig()
 #print(ret)
 
 readErrors(address)
+tkrSetCRCcheck("yes")
 
 boards = [0]
 nBoards = len(boards)
@@ -75,9 +76,8 @@ if nBoards > 0:
 
     if asicReset: tkrAsicSoftReset(0x1F)
 
-    calibrateAllFPGAinputTiming()
+    #calibrateAllFPGAinputTiming()
         
-    tkrTrigEndStat(1, 1)
     tkrTrigEndStat(0, 1)
     tkrSetDualTrig(0, 0)
 
@@ -130,27 +130,27 @@ if nBoards > 0:
         tkrSetCalMask(brd, 31, hitList)
         time.sleep(0.1)
         tkrGetCalMask(brd, 3)
-        tkrGetCalMask(brd, 2)
+        tkrGetCalMask(brd, 5)
 
         tkrSetDataMask(brd, 31, "mask", hitList)
         time.sleep(0.1)
         tkrGetDataMask(brd, 3)
-        tkrGetDataMask(brd, 7)
+        tkrGetDataMask(brd, 5)
 
         tkrSetTriggerMask(brd, 31, "mask", hitList)
         time.sleep(0.1)
         tkrGetTriggerMask(brd, 3)
-        tkrGetTriggerMask(brd, 9)
+        tkrGetTriggerMask(brd, 5)
 
         tkrSetDAC(brd, 31, "calibration", 20 , "high")
-        tkrGetDAC(brd, 3, "calibration")
+        tkrGetDAC(brd, 5, "calibration")
 
         tkrSetDAC(brd, 31, "threshold", 22 , "low")
-        tkrGetDAC(brd, 3, "threshold")
+        tkrGetDAC(brd, 5, "threshold")
 
         tkrSetDataMask(brd, 31, "unmask", [])
         time.sleep(0.1)
-        tkrGetDataMask(brd, 3)
+        tkrGetDataMask(brd, 5)
 
         #tkrSetTriggerMask(brd, 31, "unmask", [])
         #time.sleep(0.1)
@@ -164,7 +164,8 @@ if nBoards > 0:
         time.sleep(0.01)
         readCalEvent(triggerTag, True)
 
-        tkrGetASICconfig(0, 3)
+        #tkrGetASICconfig(0, 4)
+        tkrGetASICconfig(0, 5)
         readErrors(address)
 
     #for brd in boards:
@@ -176,6 +177,8 @@ if nBoards > 0:
 #    print("send reset pulse")
 #    logicReset(addrEvnt)
 #    time.sleep(0.3)
+
+#sys.exit("abort")
 
 TOFselectDAQ(address,"DMA")
 
@@ -238,7 +241,7 @@ print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
 #sys.exit("abort")
-ADC, Sigma, TOF, sigmaTOF = limitedRun(75, 10, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(75, 50, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))

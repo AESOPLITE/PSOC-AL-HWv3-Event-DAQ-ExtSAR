@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define VERSION 12
+#define VERSION 13
 
 /*=========================================================================
  * V7 Adding ADC software reset. Changed ADC readout to SPI -Brian Lucas
@@ -163,6 +163,7 @@
 #define ERR_BAD_CMD_FORMAT 37u
 #define ERR_UART_CMD 38u
 #define ERR_UART_TKR 39u
+#define ERR_BAD_CRC 40u
 
 // Identifiers for types of Tracker data
 #define TKR_EVT_DATA 0xD3
@@ -178,6 +179,7 @@ uint8 tkrCmdCode;                 // Command code echoed from the Tracker
 bool eventDataReady;
 bool awaitingCommand;             // The system is ready to accept a new command when true
 bool ADCsoftReset;                // Used to force a soft reset of the external SAR ADCs on the first event.
+bool doCRCcheck;                  // Whether to check the Tracker hitlist CRC
 
 // Register pointers for the power monitoring chips
 const uint8 INA226_Config_Reg = 0x00;
@@ -903,6 +905,76 @@ void makeDummyTkrEvent(uint8 trgCnt, uint8 cmdCnt, uint8 trgPtr, uint8 code) {
     }
 }
 
+// Calculate a 6-bit CRC of a set of sequential bytes.
+uint8 CRC6(int nBits, uint8 theBytes[]) {
+    uint8 divisor[7] = {1,1,0,0,1,0,1};  // The key used by the Tracker FPGA
+    uint8 mask[8] = {0x80,0x40,0x20,0x10,0x08,0x04,0x02,0x01};
+    nBits++;  // Need to add one more bit, for the start bit
+    int nBytes = nBits/8;
+    if (nBits%8 != 0) nBytes++;
+    // First, expand the bytes of the hitlist into a bitstring.
+    uint8* A = (uint8*) malloc(nBits);
+    if (A == NULL) {
+        addErrorOnce(ERR_TKR_NO_MEMORY, nBits, 0x55);
+        return 0x00;
+    }
+    A[0]=1;  // The CRC was calculated in the FPGA with the start bit, so we add it back here.
+    int ibit = 1;
+    for (int iB=0; iB<nBytes; ++iB) {
+        for (int i=0; i<8; ++i) {
+            if (theBytes[iB] & mask[i]) {
+                A[ibit++] = 1;
+            } else {
+                A[ibit++] = 0;
+            }
+            if (ibit == nBits) goto done;
+        }
+    }
+    done: // Start here the CRC calculation
+    for (int i=0; i<nBits-6; ++i) {
+        if (A[i] == 1) {
+            for (int j=0; j<7; ++j) {
+                if (A[i+j] == divisor[j]) {
+                    A[i+j] = 0;             // Exclusive OR
+                } else {
+                    A[i+j] = 1;
+                }
+            }
+        }
+    }
+    //Extract the last 6 bits remaining in 'A', and pack into a uint8 as the CRC
+    uint8 crc = 0;
+    for (int i=0; i<6; ++i) {
+        crc = crc<<1;
+        if (A[nBits-6+i]) crc = crc | 0x01;        
+    }
+    free(A);
+    return crc;
+}
+
+// Recalculate the 6-bit hitlist CRC and compare with the Tracker FPGA calculation.
+bool checkCRC(int nBytes, uint8 hitList[]) {
+    uint8 masks[7] = {0xC0,0x60,0x30,0x18,0x0C,0x06,0x03};
+    uint8 crc, crcL, crcR;
+    int nBits = nBytes*8 - 2;
+    int nShift = 2;
+    // Look for the '11' that indicates the end of the hitlist.
+    // It should be in the last byte of the hitlist, otherwise something is screwed up.
+    // Then extract the preceeding 6 bits as the FPGA CRC.
+    for (int i=6; i>=0; --i) {
+        if ((hitList[nBytes-1] & masks[i]) == masks[i]) goto foundIt;
+        nBits--;
+        nShift++;
+    }
+    return false;
+    foundIt:
+    crcL = (hitList[nBytes-2]<<(8-nShift));
+    crcR = (hitList[nBytes-1]>>nShift);
+    crc = (crcL | crcR) & 0x3F;
+    uint8 crcNew = CRC6(nBits-6, hitList);  // Recalculate the 6-bit CRC
+    return (crcNew == crc);                 // Compare with the FPGA value
+}
+
 // Function to get a full data packet from the Tracker.
 int getTrackerData(uint8 idExpected) {
     int rc = 0;
@@ -1033,15 +1105,22 @@ int getTrackerData(uint8 idExpected) {
             addError(ERR_TKR_BAD_ECHO, tkrCmdCodeEcho, tkrCmdCode);
             rc = 1;
         }
-    } else {    // WTF?!?   Not sure what to do with this situation, besides flag it.
+    } else {  // WTF?!?   Not sure what to do with this situation, besides flag it.
         if (nErrors < MXERR) {
             addError(ERR_TKR_BAD_ID, IDcode, len);
         }
-        nDataReady = len;
-        if (len > 15) len = 15;
-        for (int i=0; i<nDataReady; ++i) {
-            dataOut[i] = tkr_getByte(startTime,20+i);
-        }       
+        // Wait a short time on the UART and then empty the Tracker buffer
+        // and send out whatever crap came in, hoping for the best. . .
+        CyDelay(2);
+        isr_TKR_Disable();
+        nDataReady = 0;
+        while (tkrReadPtr != tkrWritePtr) {
+            dataOut[nDataReady++] = tkrBuf[tkrReadPtr];            
+            if (tkrReadPtr < MAX_TKR-1) tkrReadPtr++;
+            else tkrReadPtr = 0;
+        }  
+        tkrReadPtr = -1;
+        isr_TKR_Enable(); 
     }
     return rc;
 }
@@ -1741,6 +1820,13 @@ void makeEvent() {
     } else {
         dataOut[39] = tkrData.nTkrBoards;
         nDataReady = 40;
+    }
+    if (doCRCcheck) {  // Check whether the hitslist CRCs match what the TKR calculated.
+        for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
+            if (!checkCRC(tkrData.boardHits[brd].nBytes, tkrData.boardHits[brd].hitList)) {
+                    addError(ERR_BAD_CRC, brd, (uint8)cntGO);
+                }
+        }
     }
     for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
         // Min. # bytes needed: board address, hitlist length, hitlist, 4-byte trailer
@@ -2663,6 +2749,13 @@ void interpretCommand(uint8 tofConfig[]) {
                     ShiftReg_B_EnableInt();
                 }
                 break;
+            case '\x4E': // Select whether to check the Tracker CRC
+                if (cmdData[0] == 1) {
+                    doCRCcheck = true;
+                } else {
+                    doCRCcheck = false;
+                }
+                break;
         } // End of command switch
     } else { // Log an error if the user is sending spurious commands while the trigger is enabled
         addError(ERR_CMD_IGNORE, command, 0);
@@ -2738,6 +2831,7 @@ void tofDMAsetup() {
 int main(void)
 {     
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  
+    doCRCcheck = false;
     triggered = false;
     tkrData.nTkrBoards = 0;
     tofA.ptr = 0;
@@ -2915,7 +3009,7 @@ int main(void)
     TrigWindow_V1_3_Count7_1_Start();
     TrigWindow_V1_4_Count7_1_Start();
     TrigWindow_V1_5_Count7_1_Start();
-    setSettlingWindow(126);
+    setSettlingWindow(24);
     
     // Start the internal real-time-clock component
     RTC_1_Start();

@@ -290,6 +290,17 @@ def setTriggerPrescale(whichOne, count):
     data2 = mkDataByte(count, addrEvnt, 2)
     ser.write(data2)
 
+def tkrSetCRCcheck(choice):
+    if choice == "yes":
+        ch=1
+    else: 
+        ch=0
+    cmdHeader = mkCmdHdr(1, 0x4E, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(ch, addrEvnt, 1)
+    ser.write(data1)
+    print("tkrSetCRCcheck: will CRC checks be made on Tracker hit lists?: " + choice)
+    
 def setSettlingWindow(count):
     if count > 126:
         print("setSettlingWindow: input count of " + str(count) + " is too large. Must be < 127")
@@ -438,13 +449,14 @@ def getChipDataAddress(bitString): #returns a string address, map to strips
 # ------------------------------------------------------------------------------------
 
 def CRC6(bitString): # The key is 1'100101
+  #print("bitString= " + bitString)
   divisor = "1100101"
   result = bitString 
   for i in range(len(result) - len(divisor)+1):
     #print result#result[0:(len(result)-len(divisor)+1)] , result[(len(result)-len(divisor)+1):]
     if (result[i] == "1"):
       for j in range(len(divisor)):
-          if (result[i+j] == divisor[j]):
+          if (result[i+j] == divisor[j]):   # Exclusive OR
             result = result[0:i+j] + "0" + result[i+j+1:len(result)]
           else:
             result = result[0:i+j] + "1" + result[i+j+1:len(result)]
