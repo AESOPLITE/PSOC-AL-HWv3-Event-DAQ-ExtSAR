@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define VERSION 13
+#define VERSION 14
 
 /*=========================================================================
  * V7 Adding ADC software reset. Changed ADC readout to SPI -Brian Lucas
@@ -210,9 +210,8 @@ uint8 thrDACsettings[] = {THRDEF, THRDEF, THRDEF, THRDEF};
 
 /* Bit definitions for the pulse control register Control_Reg_Pls */
 #define PULSE_TOF_RESET 0x01    // Resets the index counter in the TOF chip
-#define PULSE_FORCE_TRIG 0x02   // Forces an instrument trigger GO1
-#define PULSE_LOGIC_RST 0x04    // Resets the hardware logic in the PSOC
-#define PULSE_CNTR_RST 0x08     // Resets the counter on each of the PMT channels
+#define PULSE_LOGIC_RST 0x02    // Resets the hardware logic in the PSOC
+#define PULSE_CNTR_RST 0x04     // Resets the counter on each of the PMT channels
 
 // 4-bit slave addresses for the SPI interface
 // Bits 0,1,2 drive the 3-to-8 decoder and are active high
