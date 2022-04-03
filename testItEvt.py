@@ -203,12 +203,12 @@ if N>1:
     Var = t2Avg - tAvg*tAvg
     print("Mean TOF = " + str(tAvg) + " ns    Std. Dev. = " + str(math.sqrt(Var)) + " ns")
 
-tkrSetDAC(brd, 31, "threshold", 30 , "low")
+tkrSetDAC(brd, 31, "threshold", 26 , "low")
 tkrGetDAC(brd, 3, "threshold")
 
 getLyrTrgCnt(0)
 
-startTkrRateMonitor(10, 2)
+startTkrRateMonitor(2, 2)
 time.sleep(2)
 
 mask = 0x06    # T1&T4
@@ -233,7 +233,7 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
 for brd in boards:
-    tkrSetDAC(brd, 31, "threshold", 30 , "low")
+    tkrSetDAC(brd, 31, "threshold", 26 , "low")
     tkrGetDAC(brd, 3, "threshold")
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
