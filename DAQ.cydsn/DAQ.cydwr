@@ -32,29 +32,6 @@
   <Group key="Clock2">
     <Data key="ClockSolver" value="1" />
     <Group key="DesigneWideClks">
-      <Group key="5f646129-48a5-4338-859b-1aac547a7bc4">
-        <Data key="check_tolerance" value="True" />
-        <Data key="clock_version" value="v1" />
-        <Data key="derive_type" value="AUTO" />
-        <Data key="desired_freq" value="6" />
-        <Data key="desired_unit" value="6" />
-        <Data key="divider" value="4" />
-        <Data key="domain" value="0" />
-        <Data key="enabled" value="True" />
-        <Data key="minus_accuracy" value="0.01" />
-        <Data key="minus_tolerance" value="5" />
-        <Data key="name" value="dwClock_2" />
-        <Data key="netlist_name" value="dwClock_2" />
-        <Data key="placement" value="AUTO" />
-        <Data key="plus_accuracy" value="0.01" />
-        <Data key="plus_tolerance" value="5" />
-        <Data key="scope" value="GLOBAL" />
-        <Data key="src_clk_id" value="61737EF6-3B74-48f9-8B91-F7473A442AE7" />
-        <Data key="src_clk_name" value="MASTER_CLK" />
-        <Data key="start_on_reset" value="True" />
-        <Data key="sync_with_bus_clk" value="True" />
-        <Data key="user_set_domain" value="False" />
-      </Group>
       <Group key="878fbc84-cbd7-410c-a6fc-16047e950763">
         <Data key="check_tolerance" value="True" />
         <Data key="clock_version" value="v1" />
@@ -195,8 +172,8 @@
         <Data key="plus_accuracy" value="0.01" />
         <Data key="plus_tolerance" value="5" />
         <Data key="scope" value="LOCAL" />
-        <Data key="src_clk_id" value="75C2148C-3656-4d8a-846D-0CAE99AB6FF7" />
-        <Data key="src_clk_name" value="BUS_CLK" />
+        <Data key="src_clk_id" value="878fbc84-cbd7-410c-a6fc-16047e950763" />
+        <Data key="src_clk_name" value="dwClock_1" />
         <Data key="start_on_reset" value="True" />
         <Data key="sync_with_bus_clk" value="True" />
         <Data key="user_set_domain" value="False" />
@@ -755,10 +732,10 @@
       <Group key="36848591-e5f3-489d-be56-d9ddabf9ccdf">
         <Data key="check_tolerance" value="True" />
         <Data key="clock_version" value="v1" />
-        <Data key="derive_type" value="AUTO" />
-        <Data key="desired_freq" value="6" />
-        <Data key="desired_unit" value="6" />
-        <Data key="divider" value="4" />
+        <Data key="derive_type" value="NAMED_DIVIDER" />
+        <Data key="desired_freq" value="0" />
+        <Data key="desired_unit" value="15" />
+        <Data key="divider" value="0" />
         <Data key="domain" value="DIGITAL" />
         <Data key="enabled" value="True" />
         <Data key="minus_accuracy" value="0.01" />
@@ -770,8 +747,8 @@
         <Data key="plus_accuracy" value="0.01" />
         <Data key="plus_tolerance" value="5" />
         <Data key="scope" value="LOCAL" />
-        <Data key="src_clk_id" value="61737EF6-3B74-48f9-8B91-F7473A442AE7" />
-        <Data key="src_clk_name" value="MASTER_CLK" />
+        <Data key="src_clk_id" value="878fbc84-cbd7-410c-a6fc-16047e950763" />
+        <Data key="src_clk_name" value="dwClock_1" />
         <Data key="start_on_reset" value="True" />
         <Data key="sync_with_bus_clk" value="True" />
         <Data key="user_set_domain" value="False" />
