@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define VERSION 15
+#define VERSION 16
 
 /*=========================================================================
  * V7 Adding ADC software reset. Changed ADC readout to SPI -Brian Lucas
@@ -792,10 +792,7 @@ void logicReset() {
     ch3Count = 0;
     ch4Count = 0;
     ch5Count = 0;
-    Pin_SSN_A0_Write(0);
-    Pin_SSN_A1_Write(0); 
-    Pin_SSN_A2_Write(0); 
-    Pin_SSN_Main_Write(1);
+    set_SPI_SSN(SSN_None,true);
     Pin_LED1_Write(0);
     Pin_LED_TKR_Write(0);
     Pin_LED_DAT_Write(0);
@@ -1523,11 +1520,11 @@ CY_ISR(isrGO) {
     // The trigger should always be enabled for this to be called, but we could check just in case. . .
     //if (!isTriggerEnabled()) addError(ERR_TRG_NOT_ENABLED,byte32(cntGO,2),byte32(cntGO,1));
 
+    trgStatus = Status_Reg_Trg_Read();     // Save this status for the eventual event readout
     triggered = true;                      // Signal that an event is ready to read out
     timeStamp = time();                    // Save for the event readout 
     timeStamp8 = Cntr8_Timer_ReadCount();  // Save for the TOF event analysis and readout
     cntGO1save = cntGO1;                   // Save for the event readout
-    trgStatus = Status_Reg_Trg_Read();     // Save this status for the eventual event readout
     // Disable the trigger until the event readout has been completed
     Control_Reg_Trg_Write(0);  //triggerEnable(false);  avoid function call
 
@@ -2884,10 +2881,7 @@ int main(void)
     dataPacket[7] = '\x00';
     dataPacket[8] = '\xFF';
     
-    Pin_SSN_A0_Write(0); //Zero this address bit, consider using CyPins_ClearPin -B
-    Pin_SSN_A1_Write(0); //Zero this address bit
-    Pin_SSN_A2_Write(0); //Zero this address bit
-    Pin_SSN_Main_Write(1); //High to deselect Main PSOC , consider using CyPins_SetPin -B
+    set_SPI_SSN(SSN_None,true);
     
     // Turn all the LEDs off
     Pin_LED1_Write(0);
@@ -2957,7 +2951,7 @@ int main(void)
     // The peak detector output takes about 2us to settle down after its upward swing, so at 24MHz this should be at least 48 ticks to set
     // the time to start digitizing. This also affects the time to wait for the digitizers to finish (about 1 us needed) and the length
     // of time to hold the peak detectors in reset.
-    setPeakDetResetWait(28);
+    setPeakDetResetWait(32);
 
     // TOF shift registers
     ShiftReg_A_Start();
@@ -3007,7 +3001,7 @@ int main(void)
     TrigWindow_V1_3_Count7_1_Start();
     TrigWindow_V1_4_Count7_1_Start();
     TrigWindow_V1_5_Count7_1_Start();
-    setSettlingWindow(48);
+    setSettlingWindow(24);
     
     // Start the internal real-time-clock component
     RTC_1_Start();

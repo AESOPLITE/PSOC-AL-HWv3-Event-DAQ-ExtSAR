@@ -12,7 +12,7 @@
 // ========================================
 `include "cypress.v"
 //`#end` -- edit above this line, do not edit this line
-// Generated on 12/12/2021 at 14:21
+// Generated on 04/03/2022 at 17:25
 // Component: SignalCrop_v1
 module SignalCrop_v1 (
 	output  RstCtr,
@@ -22,7 +22,7 @@ module SignalCrop_v1 (
 	input   Reset,
 	input   tc
 );
-	parameter CoincWindow = 7;
+	parameter CoincWindow = 14;
 
 //`#start body` -- edit after this line, do not edit this line
 
