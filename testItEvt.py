@@ -9,7 +9,7 @@ from PSOC_cmd import *
 
 asicReset = True
 
-portName = "COM3"
+portName = "COM11"
 openCOM(portName)
 
 print("Entering testItEvt.py")
@@ -132,17 +132,14 @@ if nBoards > 0:
         tkrSetCalMask(brd, 31, hitList)
         time.sleep(0.1)
         tkrGetCalMask(brd, 3)
-        tkrGetCalMask(brd, 5)
 
         tkrSetDataMask(brd, 31, "mask", hitList)
         time.sleep(0.1)
         tkrGetDataMask(brd, 3)
-        tkrGetDataMask(brd, 5)
 
         tkrSetTriggerMask(brd, 31, "mask", hitList)
         time.sleep(0.1)
         tkrGetTriggerMask(brd, 3)
-        tkrGetTriggerMask(brd, 5)
 
         tkrSetDAC(brd, 31, "calibration", 20 , "high")
         tkrGetDAC(brd, 5, "calibration")
@@ -154,10 +151,6 @@ if nBoards > 0:
         time.sleep(0.1)
         tkrGetDataMask(brd, 5)
 
-        #tkrSetTriggerMask(brd, 31, "unmask", [])
-        #time.sleep(0.1)
-        #tkrGetTriggerMask(brd, 3)
-
     if len(boards) == 1:
         triggerDelay = 6    # 6?
         triggerTag = 0
@@ -167,7 +160,7 @@ if nBoards > 0:
         readCalEvent(triggerTag, True)
 
         #tkrGetASICconfig(0, 4)
-        tkrGetASICconfig(0, 5)
+        #tkrGetASICconfig(0, 5)
         readErrors(address)
 
     #for brd in boards:
@@ -205,7 +198,7 @@ if N>1:
     Var = t2Avg - tAvg*tAvg
     print("Mean TOF = " + str(tAvg) + " ns    Std. Dev. = " + str(math.sqrt(Var)) + " ns")
 
-tkrSetDAC(brd, 31, "threshold", 32 , "low")
+tkrSetDAC(brd, 31, "threshold", 26 , "low")
 tkrGetDAC(brd, 3, "threshold")
 
 getLyrTrgCnt(0)
@@ -235,7 +228,7 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
 for brd in boards:
-    tkrSetDAC(brd, 31, "threshold", 32 , "low")
+    tkrSetDAC(brd, 31, "threshold", 26 , "low")
     tkrGetDAC(brd, 3, "threshold")
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
@@ -243,7 +236,7 @@ print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
 #sys.exit("abort")
-ADC, Sigma, TOF, sigmaTOF = limitedRun(77, 2, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 15, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
