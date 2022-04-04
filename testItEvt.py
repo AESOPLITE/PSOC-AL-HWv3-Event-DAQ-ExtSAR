@@ -27,8 +27,8 @@ setInternalRTC(address)
 #time.sleep(1)
 getInternalRTC(address)
 
-setTofDAC(1, 50, address)   
-setTofDAC(2, 50, address)
+setTofDAC(1, 48, address)   
+setTofDAC(2, 48, address)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
@@ -93,9 +93,11 @@ if nBoards > 0:
     trigWindow = 1
     ioCurrent = 2
     maxClust = 10
+    chips = [0,1,2,3,6,7,8,9,10,11]
     for brd in boards:
-        tkrGetASICconfig(brd,3)
-        tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
+        #for chip in chips: tkrGetASICconfig(brd,chip)
+        #tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
+        #tkrAsicSoftReset(0x1F)
         tkrGetASICconfig(brd, 3)
 
     for brd in boards:
@@ -203,7 +205,7 @@ if N>1:
     Var = t2Avg - tAvg*tAvg
     print("Mean TOF = " + str(tAvg) + " ns    Std. Dev. = " + str(math.sqrt(Var)) + " ns")
 
-tkrSetDAC(brd, 31, "threshold", 26 , "low")
+tkrSetDAC(brd, 31, "threshold", 32 , "low")
 tkrGetDAC(brd, 3, "threshold")
 
 getLyrTrgCnt(0)
@@ -233,7 +235,7 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
 for brd in boards:
-    tkrSetDAC(brd, 31, "threshold", 26 , "low")
+    tkrSetDAC(brd, 31, "threshold", 32 , "low")
     tkrGetDAC(brd, 3, "threshold")
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
@@ -241,7 +243,7 @@ print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
 #sys.exit("abort")
-ADC, Sigma, TOF, sigmaTOF = limitedRun(75, 50, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(77, 2, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
