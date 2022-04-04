@@ -2292,7 +2292,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 break;
             case '\x0D':        // Modify TOF configuration (disable trigger first)
                 if (cmdData[0] < TOFSIZE-1) {
-                    tofConfig[cmdData[0]] = tofConfig[1];  // Change only a single byte
+                    tofConfig[cmdData[0]] = cmdData[1];  // Change only a single byte
                     set_SPI_SSN(SSN_TOF, true);
                     writeTOFdata(writeConfig);
                     for (int i=0; i<TOFSIZE; ++i) {
