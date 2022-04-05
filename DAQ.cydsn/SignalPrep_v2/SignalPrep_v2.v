@@ -36,7 +36,8 @@ parameter [1:0] Null = 2'b11;
 reg [1:0] State, NextState;
 reg [3:0] cnt;
 
-assign Y = (State == Cont);
+reg Y2;
+assign Y = Y2;
 always @ (State or A or cnt) begin
     case (State) 
 	    Wait: begin
@@ -63,8 +64,12 @@ always @ (posedge Clk) begin
 	end else begin
 	    State <= NextState;
         case (State)
+            Wait: begin
+                      Y2 <= A;
+                  end
             Cont: begin
                       cnt <= 0;
+                      Y2 <= 0;
                   end
             Done: begin
                       cnt <= cnt + 1;
