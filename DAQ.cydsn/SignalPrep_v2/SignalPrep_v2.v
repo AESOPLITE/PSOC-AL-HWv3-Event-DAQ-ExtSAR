@@ -2,12 +2,12 @@
 //`#start header` -- edit after this line, do not edit this line
 // ========================================
 //
-// Copyright YOUR COMPANY, THE YEAR
+// Copyright UCSC, 2022
 // All Rights Reserved
 // UNPUBLISHED, LICENSED SOFTWARE.
 //
 // CONFIDENTIAL AND PROPRIETARY INFORMATION
-// WHICH IS THE PROPERTY OF your company.
+// WHICH IS THE PROPERTY OF UCSC.
 //
 // ========================================
 `include "cypress.v"
@@ -24,15 +24,17 @@ module SignalPrep_v2 (
 
 //`#start body` -- edit after this line, do not edit this line
 
-//        Your code goes here
-
+// Look for a leading edge. Once found, look for the trailing edge.
+// Once the trailing edge if found, wait pulseWidth clock cycles
+// before looking for a leading edge again. The point is to avoid
+// secondary pulses on the output.
 parameter [1:0] Wait = 2'b00;
 parameter [1:0] Cont = 2'b01;
 parameter [1:0] Done = 2'b10;
 parameter [1:0] Null = 2'b11;
 
 reg [1:0] State, NextState;
-reg [2:0] cnt;
+reg [3:0] cnt;
 
 assign Y = (State == Cont);
 always @ (State or A or cnt) begin
@@ -42,12 +44,12 @@ always @ (State or A or cnt) begin
 				  else NextState = Wait;
 		      end
 	    Cont: begin
-		          if (cnt == pulseWidth) NextState = Done;
-				  else NextState = Cont;
+		          if (A) NextState = Cont;
+				  else NextState = Done;
 		      end
 		Done: begin
-		          if (A) NextState = Done;
-				  else NextState = Wait;
+		          if (cnt == pulseWidth) NextState = Wait;
+				  else NextState = Done;
 		      end
 		Null: begin
 		          NextState = Wait;
@@ -61,10 +63,10 @@ always @ (posedge Clk) begin
 	end else begin
 	    State <= NextState;
         case (State)
-            Wait: begin
+            Cont: begin
                       cnt <= 0;
                   end
-            Cont: begin
+            Done: begin
                       cnt <= cnt + 1;
                   end
         endcase

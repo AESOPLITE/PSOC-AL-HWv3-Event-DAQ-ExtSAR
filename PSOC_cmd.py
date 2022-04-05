@@ -1627,6 +1627,32 @@ def tkrConfigReset(FPGA):
     if (str(binascii.hexlify(echo)) != "b'03'"):
         print("tkrConfigReset: incorrect echo received (" + str(binascii.hexlify(echo)) + "), should be b'03'")   
 
+# Set the trigger delay for the tracker, for PMT triggered events
+def tkrSetPMTtrgDly(value):
+    print("tkrSetPMTtrgDly: setting to trigger delay to " + str(value))
+    cmdHeader = mkCmdHdr(1, 0x4F, addrEvnt)
+    ser.write(cmdHeader)	
+    data1 = mkDataByte(value, addrEvnt, 1)
+    ser.write(data1)    
+
+# Set the ASIC mask of a tracker board
+def tkrSetASICmask(FPGA, maskUp, maskDn):
+    address = addrEvnt
+    print("Setting the ASIC mask of Tracker FPGA " + str(FPGA) + " to " 
+	                              + str(maskUp) + str(maskDn))
+    cmdHeader = mkCmdHdr(6, 0x10, address)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(FPGA, address, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0x0E, address, 2)
+    ser.write(data2)
+    data3 = mkDataByte(2, address, 3)
+    ser.write(data3)   
+    data4 = mkDataByte(maskUp, address, 4)
+    ser.write(data4)
+    data5 = mkDataByte(maskDn, address, 5)
+    ser.write(data5)
+
 # Hard reset of ASICs on all tracker boards. Use address 31 = 0x1F to reset all ASICs.
 def tkrAsicHardReset(ASICaddress):
     address = addrEvnt

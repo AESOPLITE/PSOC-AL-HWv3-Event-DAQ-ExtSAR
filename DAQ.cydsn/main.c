@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define VERSION 17
+#define VERSION 18
 
 /*=========================================================================
  * V7 Adding ADC software reset. Changed ADC readout to SPI -Brian Lucas
@@ -1554,7 +1554,7 @@ void dataLED(bool on) {
 
 // Set the time delay following the signal edge detector, to prevent retriggering on noise
 void setSettlingWindow(uint8 dt) {
-    TrigWindow_V1_1_Count7_1_WritePeriod(dt);
+    //TrigWindow_V1_1_Count7_1_WritePeriod(dt);
     TrigWindow_V1_2_Count7_1_WritePeriod(dt);
     TrigWindow_V1_3_Count7_1_WritePeriod(dt);
     TrigWindow_V1_4_Count7_1_WritePeriod(dt);
@@ -2751,6 +2751,9 @@ void interpretCommand(uint8 tofConfig[]) {
                     doCRCcheck = false;
                 }
                 break;
+            case '\x4F': // Set the tracker trigger delay for PMT triggers
+                Count7_TrgDly_WritePeriod(cmdData[0]);
+                break;                
         } // End of command switch
     } else { // Log an error if the user is sending spurious commands while the trigger is enabled
         addError(ERR_CMD_IGNORE, command, 0);
@@ -2938,7 +2941,8 @@ int main(void)
     
     /* Start up the various hardware components */
     I2C_2_Start();
-    ShiftReg_1_Start();
+    Count7_TrgDly_Start();
+    Count7_TrgDly_WritePeriod(16);    // Default delay of the PMT trigger, in units of 83.3ns
     
     // Set up the counter used for timing. It counts a 200 Hz clock derived from the watch crystal, and every 200 counts
     // i.e. once each second, it interrupts the CPU, which then increments a 1 Hz count. The time() function adds the two
@@ -2996,7 +3000,7 @@ int main(void)
     UART_CMD_Start();   // Snail-paced UART for receiving commands from the Main PSOC
 
     // Start counters buried inside of the edge detectors for the trigger inputs
-    TrigWindow_V1_1_Count7_1_Start();
+    //TrigWindow_V1_1_Count7_1_Start();
     TrigWindow_V1_2_Count7_1_Start();
     TrigWindow_V1_3_Count7_1_Start();
     TrigWindow_V1_4_Count7_1_Start();

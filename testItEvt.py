@@ -94,11 +94,13 @@ if nBoards > 0:
     ioCurrent = 2
     maxClust = 10
     chips = [0,1,2,3,6,7,8,9,10,11]
+    #tkrSetASICmask(0,0x0F,0xFF)
     for brd in boards:
         #for chip in chips: tkrGetASICconfig(brd,chip)
-        #tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
+        tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
         #tkrAsicSoftReset(0x1F)
-        tkrGetASICconfig(brd, 3)
+        tkrGetASICconfig(brd, 0)
+        for chip in chips: tkrGetASICconfig(brd, chip)
 
     for brd in boards:
         tkrGetTemperature(brd)
@@ -131,25 +133,31 @@ if nBoards > 0:
     for brd in boards:
         tkrSetCalMask(brd, 31, hitList)
         time.sleep(0.1)
-        tkrGetCalMask(brd, 3)
+        tkrGetCalMask(brd, 0)
+        for chip in chips: tkrGetCalMask(brd, chip)
 
         tkrSetDataMask(brd, 31, "mask", hitList)
         time.sleep(0.1)
-        tkrGetDataMask(brd, 3)
+        tkrGetDataMask(brd, 0)
+        for chip in chips: tkrGetDataMask(brd, chip)
 
         tkrSetTriggerMask(brd, 31, "mask", hitList)
         time.sleep(0.1)
-        tkrGetTriggerMask(brd, 3)
+        tkrGetTriggerMask(brd, 0)
+        for chip in chips: tkrGetTriggerMask(brd, chip)
 
         tkrSetDAC(brd, 31, "calibration", 20 , "high")
-        tkrGetDAC(brd, 5, "calibration")
+        tkrGetDAC(brd, 0, "calibration")
+        for chip in chips: tkrGetDAC(brd, chip, "calibration")
 
-        tkrSetDAC(brd, 31, "threshold", 22 , "low")
-        tkrGetDAC(brd, 5, "threshold")
+        tkrSetDAC(brd, 31, "threshold", 30 , "low")
+        tkrGetDAC(brd, 0, "threshold")
+        for chip in chips: tkrGetDAC(brd, chip, "threshold")
 
         tkrSetDataMask(brd, 31, "unmask", [])
         time.sleep(0.1)
-        tkrGetDataMask(brd, 5)
+        tkrGetDataMask(brd, 0)
+        for chip in chips: tkrGetDataMask(brd, chip)
 
     if len(boards) == 1:
         triggerDelay = 6    # 6?
@@ -198,8 +206,10 @@ if N>1:
     Var = t2Avg - tAvg*tAvg
     print("Mean TOF = " + str(tAvg) + " ns    Std. Dev. = " + str(math.sqrt(Var)) + " ns")
 
-tkrSetDAC(brd, 31, "threshold", 26 , "low")
-tkrGetDAC(brd, 3, "threshold")
+for brd in boards:
+	tkrSetDAC(brd, 31, "threshold", 64 , "low")
+	tkrGetDAC(brd, 0, "threshold")
+	for chip in chips: tkrGetDAC(brd, chip, "threshold")
 
 getLyrTrgCnt(0)
 
@@ -224,19 +234,14 @@ print("Setting the second trigger mask to " + str(mask))
 setTriggerMask(2, mask)
 print("The first trigger mask is set to  " + str(hex(getTriggerMask(1))))
 print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
-
-print("Count on channel 2 = " + str(getChannelCount(2)))
-
-for brd in boards:
-    tkrSetDAC(brd, 31, "threshold", 26 , "low")
-    tkrGetDAC(brd, 3, "threshold")
+tkrSetPMTtrgDly(26)
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
 #sys.exit("abort")
-ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 15, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 50, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
