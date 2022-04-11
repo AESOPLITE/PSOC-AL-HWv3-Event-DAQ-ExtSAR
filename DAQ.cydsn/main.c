@@ -19,14 +19,10 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define VERSION 19
+#define VERSION 20
+// V20: UART command stream is searched for <CR><LF> in order to identify command strings
 
 /*=========================================================================
- * V7 Adding ADC software reset. Changed ADC readout to SPI -Brian Lucas
- * V5 DO NOT USE A VERSION earlier than this with Production Main PSOC code
- *    P6[5] changed from Sclk output to input of Backplane activiity signal
- *    SCLK for Main PSOC routed instead to the SCLK3 pin P4[2] -Brian Lucas
- * V4 This firmware version uses the external SAR ADCs for pulse-height analysis
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
  *              T3        G        T4        T1        T2       
  * Connector  J10/12    J2/11    J17/18    J15/16    J25/26
@@ -1481,6 +1477,7 @@ CY_ISR(isrUART) {
                 uint8 code = (uint8)((theByte & 0xDF00)>>8);
                 addError(ERR_UART_CMD, code, (uint8)theByte);
             }
+            if (fifoReadPtr < 0) fifoReadPtr = fifoWritePtr;
             cmdFIFO[fifoWritePtr++] = (uint8)theByte;
             cmdFIFOnBytes++;
             if (fifoWritePtr == MX_FIFO) {  // Wrap around the circular buffer
