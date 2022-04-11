@@ -1910,10 +1910,10 @@ def tkrGetDAC(FPGA, chip, select):
     ser.write(data4)
     time.sleep(0.1)
     byteList = getTkrHousekeeping()
-    #for byte in byteList:
-    #    print("tkrGetDAC for FPGA " + str(FPGA) + " chip " + str(chip) + " byte = " + str(binascii.hexlify(byte)))
     if (bytes2int(byteList[0]) != 9):
         print("tkrGetDAC: wrong number " + str(bytes2int(byteList[0])) + " of bytes returned")
+        for byte in byteList:
+            print("tkrGetDAC for FPGA " + str(FPGA) + " chip " + str(chip) + " byte = " + str(binascii.hexlify(byte)))
         return
     stuff = getBinaryString(byteList[1:3])
     if select == "threshold": 

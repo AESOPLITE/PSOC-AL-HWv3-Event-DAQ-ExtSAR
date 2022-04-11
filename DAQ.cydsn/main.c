@@ -141,7 +141,7 @@
 #define ERR_TKR_NUM_BOARDS 15u
 #define ERR_TKR_BAD_BOARD_ID 16u
 #define ERR_TKR_BOARD_SHORT 17u
-#define ERR_TKR_NO_MEMORY 18u
+#define ERR_HEAP_NO_MEMORY 18u
 #define ERR_TX_FAILED 19u
 #define ERR_BAD_CMD 20u
 #define ERR_EVT_TOO_BIG 21u
@@ -252,8 +252,15 @@ uint32 tkrClkAtStart;
 uint32 tkrClkCntStart;
 bool waitingRateCnt;
 
-// Circular FIFO buffer of UART commands from the Main PSOC
-#define CMD_LENGTH 29u
+// Circular FIFO buffer of bytes received from the Main PSOC via the UART.
+// This buffer gets searched for 29-byte commands, which then go into the cmd_buffer structure
+#define MX_FIFO 100
+volatile uint8 cmdFIFO[MX_FIFO];
+volatile int fifoWritePtr, fifoReadPtr;
+volatile int cmdFIFOnBytes;
+
+// Circular FIFO buffer of 29-byte UART commands from the Main PSOC
+#define CMD_LENGTH 29
 #define MX_CMDS 32u
 volatile struct MainPSOCcmds {
     uint8 buf[CMD_LENGTH];    // An actual command is made up of multiple buf elements
@@ -910,7 +917,7 @@ uint8 CRC6(int nBits, uint8 theBytes[]) {
     // First, expand the bytes of the hitlist into a bitstring.
     uint8* A = (uint8*) malloc(nBits);
     if (A == NULL) {
-        addErrorOnce(ERR_TKR_NO_MEMORY, nBits, 0x55);
+        addErrorOnce(ERR_HEAP_NO_MEMORY, nBits, 0x55);
         return 0x00;
     }
     A[0]=1;  // The CRC was calculated in the FPGA with the start bit, so we add it back here.
@@ -1045,7 +1052,7 @@ int getTrackerData(uint8 idExpected) {
             }
             tkrData.boardHits[lyr].hitList = (uint8*) malloc(nBrdBytes);
             if (tkrData.boardHits[lyr].hitList == NULL) {   // Ran out of heap memory. Not good!
-                addError(ERR_TKR_NO_MEMORY, nBrdBytes-2, brd);
+                addError(ERR_HEAP_NO_MEMORY, nBrdBytes-2, brd);
                 rc = 60;
                 continue;
             }
@@ -1467,24 +1474,17 @@ CY_ISR(isrCh5)
 
 // Receive and store commands from the Main PSOC via the UART, using a circular FIFO buffer
 CY_ISR(isrUART) {
-    if (cmdWritePtr != cmdReadPtr) {  
+    if (fifoWritePtr != fifoReadPtr) {  
         while (UART_CMD_ReadRxStatus() & UART_CMD_RX_STS_FIFO_NOTEMPTY) {
             uint16 theByte = UART_CMD_GetByte();
             if ((theByte & 0xDF00) != 0) {
                 uint8 code = (uint8)((theByte & 0xDF00)>>8);
                 addError(ERR_UART_CMD, code, (uint8)theByte);
             }
-            cmd_buffer[cmdWritePtr].buf[cmd_buffer[cmdWritePtr].nBytes] = (uint8)theByte;
-            cmd_buffer[cmdWritePtr].nBytes++;
-            if (cmd_buffer[cmdWritePtr].nBytes == CMD_LENGTH) {  // This command is fully received
-                // cmdReadPtr == 255 means that there is currently nothing to be read in the FIFO
-                if (cmdReadPtr >= MX_CMDS) cmdReadPtr = cmdWritePtr;
-                cmdWritePtr = ptrNext(cmdWritePtr);  // Increment pointer in the circular FIFO
-                if (cmdWritePtr == cmdReadPtr) {     // This will almost certainly make a mess if it happens!
-                    addError(ERR_CMD_BUF_OVERFLOW, cmdWritePtr, 0);
-                } else {
-                    cmd_buffer[cmdWritePtr].nBytes = 0;
-                }
+            cmdFIFO[fifoWritePtr++] = (uint8)theByte;
+            cmdFIFOnBytes++;
+            if (fifoWritePtr == MX_FIFO) {  // Wrap around the circular buffer
+                fifoWritePtr = 0;
             }
         }
     } else {  // Throw away the data if the software buffer is full. Not good!
@@ -2846,6 +2846,10 @@ int main(void)
     readTracker = false;
     debugTOF = false;
     
+    fifoWritePtr = 0;
+    fifoReadPtr = -1;
+    cmdFIFOnBytes = 0;
+    
     runNumber = 0;
     timeStamp = time();
     
@@ -3173,6 +3177,54 @@ int main(void)
                 addError(ERR_CMD_TIMEOUT,command,dCnt);
             }
         }        
+        
+        // Parse the FIFO of commands from the Main PSOC, via UART. Identify commands
+        // from the <CR><LF> characters, and move complete commands into the command
+        // buffer.
+        if (cmdFIFOnBytes >= CMD_LENGTH) {
+            int numBytes = cmdFIFOnBytes;   // Save this in case an interrupt adds more to the buffer
+            // Search for the <CR><LF> termination of a command
+            uint8 toFind = 0x0D;   // CR byte
+            uint8 *byteBuf = (uint8*) malloc(numBytes);  // Save the bytes in a temporary buffer
+            if (byteBuf == NULL) {
+                addErrorOnce(ERR_HEAP_NO_MEMORY,numBytes,0x57);
+            } else {
+                for (int i=0; i<numBytes; ++i) {                   
+                    byteBuf[i] = cmdFIFO[fifoReadPtr];
+                    if (byteBuf[i] == toFind) {
+                        if (toFind == 0x0A) {
+                            // We found the end of a command; check if an entire 29-byte command is present
+                            if (i>= 28) {
+                                // Copy the new command into the command buffer; any extra preceeding bytes get flushed
+                                for (int j=i-28; j<=i; ++j) {
+                                    cmd_buffer[cmdWritePtr].buf[cmd_buffer[cmdWritePtr].nBytes++] = byteBuf[j];
+                                }        
+                                if (cmdReadPtr > MX_CMDS) {
+                                    cmdReadPtr = cmdWritePtr;
+                                }
+                                cmdWritePtr = ptrNext(cmdWritePtr);  // Increment pointer in the circular command FIFO
+                                if (cmdWritePtr == cmdReadPtr) {     // This will almost certainly make a mess if it happens!
+                                    addError(ERR_CMD_BUF_OVERFLOW, cmdWritePtr, 0);
+                                } else {
+                                    cmd_buffer[cmdWritePtr].nBytes = 0;
+                                }
+                            }
+                            toFind = 0x0D;  // Start searching for a new end-of-command
+                        } else {
+                            toFind = 0x0A;  // LF byte
+                        }
+                    }
+                    fifoReadPtr++; cmdFIFOnBytes--;  // Increment pointer into the circular command-byte FIFO
+                    if (fifoReadPtr == MX_FIFO) fifoReadPtr = 0;
+                    if (fifoReadPtr == fifoWritePtr) {
+                        fifoReadPtr = -1;
+                        cmdFIFOnBytes = 0;
+                        break;
+                    }
+                }
+                free(byteBuf);
+            }
+        }
 
         // Get a 9-byte command input from the UART or USB-UART
         // The two should not be used at the same time (no reason for that, anyway)
