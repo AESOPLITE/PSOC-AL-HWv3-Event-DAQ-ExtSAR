@@ -3179,7 +3179,7 @@ int main(void)
         // from the <CR><LF> characters, and move complete commands into the command
         // buffer.
         if (cmdFIFOnBytes >= CMD_LENGTH) {
-            int numBytes = cmdFIFOnBytes;   // Save this in case an interrupt adds more to the buffer
+            int numBytes = cmdFIFOnBytes;   
             // Search for the <CR><LF> termination of a command
             uint8 toFind = 0x0D;   // CR byte
             uint8 *byteBuf = (uint8*) malloc(numBytes);  // Save the bytes in a temporary buffer
@@ -3211,6 +3211,7 @@ int main(void)
                             toFind = 0x0A;  // LF byte
                         }
                     }
+                    isr_UART_Disable();
                     fifoReadPtr++; cmdFIFOnBytes--;  // Increment pointer into the circular command-byte FIFO
                     if (fifoReadPtr == MX_FIFO) fifoReadPtr = 0;
                     if (fifoReadPtr == fifoWritePtr) {
@@ -3218,6 +3219,7 @@ int main(void)
                         cmdFIFOnBytes = 0;
                         break;
                     }
+                    isr_UART_Enable();
                 }
                 free(byteBuf);
             }
