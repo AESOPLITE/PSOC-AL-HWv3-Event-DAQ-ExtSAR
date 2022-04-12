@@ -3235,7 +3235,6 @@ int main(void)
                 }
             }
             if (count == 0 && cmdReadPtr < MX_CMDS) { // Looking for a command from UART 
-                isr_UART_Disable();  // Temporarily disable the interrupt handling while reading the buffer
                 count = CMD_LENGTH;
                 for (int i=0; i<count; ++i) {
                     buffer[i] = cmd_buffer[cmdReadPtr].buf[i];
@@ -3246,7 +3245,6 @@ int main(void)
                 } else {
                     cmdReadPtr = 255;   // 255 means that no command is buffered for reading
                 }
-                isr_UART_Enable();
             }
         }
         if (count == CMD_LENGTH) {  // We got a complete command string
