@@ -176,6 +176,9 @@ bool eventDataReady;
 bool awaitingCommand;             // The system is ready to accept a new command when true
 bool ADCsoftReset;                // Used to force a soft reset of the external SAR ADCs on the first event.
 bool doCRCcheck;                  // Whether to check the Tracker hitlist CRC
+uint16 cmdCountGLB = 0;           // Count of all command packets received
+uint16 cmdCount = 0;              // Count of all event PSOC commands received
+uint8 nCmdTimeOut = 0;            // Count the number of command timeouts
 
 // Register pointers for the power monitoring chips
 const uint8 INA226_Config_Reg = 0x00;
@@ -330,18 +333,18 @@ uint32 time() {   // Returns the time in 5 millisecond units
 }
 
 // Channel and trigger rate counters
-volatile uint16 ch1Count;  // TODO: make these counter 32 bits?
-volatile uint16 ch2Count;
-volatile uint16 ch3Count;
-volatile uint16 ch4Count;
-volatile uint16 ch5Count;
+volatile uint32 ch1Count;  
+volatile uint32 ch2Count;
+volatile uint32 ch3Count;
+volatile uint32 ch4Count;
+volatile uint32 ch5Count;
 volatile uint32 cntGO;
 volatile uint32 cntGO1;
 uint16 runNumber;
 
 // Saved counts for end of run, from the 8-bit hardware counters and the 16-bit software counters
 uint8 ch1CtrSave, ch2CtrSave, ch3CtrSave, ch4CtrSave, ch5CtrSave;
-uint16 ch1CountSave, ch2CountSave, ch3CountSave, ch4CountSave, ch5CountSave;
+uint32 ch1CountSave, ch2CountSave, ch3CountSave, ch4CountSave, ch5CountSave;
 
 // Variables for commands received
 uint8 command = 0;                 // Most recent command code
@@ -2426,27 +2429,35 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 break;
             case '\x37':    // Read a channel counter
-                nDataReady = 3;
+                nDataReady = 5;
                 switch (cmdData[0]) {
                     case 0x01:
-                        dataOut[2] = Cntr8_V1_1_ReadCount();
-                        dataOut[1] = (uint8)(ch1Count & 0x00FF);
-                        dataOut[0] = (uint8)((ch1Count & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_1_ReadCount();
+                        dataOut[3] = byte32(ch1Count, 3);
+                        dataOut[2] = byte32(ch1Count, 2);
+                        dataOut[1] = byte32(ch1Count, 1);
+                        dataOut[0] = byte32(ch1Count, 0);
                         break;
                     case 0x02:
-                        dataOut[2] = Cntr8_V1_2_ReadCount();
-                        dataOut[1] = (uint8)(ch2Count & 0x00FF);
-                        dataOut[0] = (uint8)((ch2Count & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_2_ReadCount();
+                        dataOut[3] = byte32(ch2Count, 3);
+                        dataOut[2] = byte32(ch2Count, 2);
+                        dataOut[1] = byte32(ch2Count, 1);
+                        dataOut[0] = byte32(ch2Count, 0);
                         break;
                     case 0x03:
-                        dataOut[2] = Cntr8_V1_3_ReadCount();
-                        dataOut[1] = (uint8)(ch3Count & 0x00FF);
-                        dataOut[0] = (uint8)((ch3Count & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_3_ReadCount();
+                        dataOut[3] = byte32(ch3Count, 3);
+                        dataOut[2] = byte32(ch3Count, 2);
+                        dataOut[1] = byte32(ch3Count, 1);
+                        dataOut[0] = byte32(ch3Count, 0);
                         break;
                     case 0x04:
-                        dataOut[2] = Cntr8_V1_4_ReadCount();
-                        dataOut[1] = (uint8)(ch4Count & 0x00FF);
-                        dataOut[0] = (uint8)((ch4Count & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_4_ReadCount();
+                        dataOut[3] = byte32(ch4Count, 3);
+                        dataOut[2] = byte32(ch4Count, 2);
+                        dataOut[1] = byte32(ch4Count, 1);
+                        dataOut[0] = byte32(ch4Count, 0);
                         break;
                     case 0x05:
                         dataOut[2] = Cntr8_V1_5_ReadCount();
@@ -2492,6 +2503,13 @@ void interpretCommand(uint8 tofConfig[]) {
                 endData[6] = byte32(cntGO, 2);
                 endData[7] = byte32(cntGO, 3);
                 break;
+            case '\x50':  // Send counter information
+                nDataReady = 5;
+                dataOut[0] = byte16(cmdCountGLB, 0); 
+                dataOut[1] = byte16(cmdCountGLB, 1); 
+                dataOut[2] = byte16(cmdCount, 0);
+                dataOut[3] = byte16(cmdCount, 1);
+                dataOut[4] = nCmdTimeOut;
             case '\x3C':  // Start a run
                 InterruptState = CyEnterCriticalSection();
                 for (int j=0; j<TOFMAX_EVT; ++j) {
@@ -3063,10 +3081,10 @@ int main(void)
     set_SPI_SSN(SSN_TOF, true);
     writeTOFdata(TOF_enable); 
     
-    int cmdCountGLB = 0;               // Count of all command packets received
-    int cmdCount = 0;                  // Count of all event PSOC commands received
+    cmdCountGLB = 0;               // Count of all command packets received
+    cmdCount = 0;                  // Count of all event PSOC commands received
     int dCnt = 0;                      // To count the number of data bytes received
-    int nCmdTimeOut = 0;
+    nCmdTimeOut = 0;
     const uint8 eventPSOCaddress = '\x08';
     
     // Set up the default trigger configuration
@@ -3164,12 +3182,19 @@ int main(void)
         }
         
         // Time-out protection in case the expected data for a command are never sent.
-        // This needs more work, because it really never manages to recover from this without a reset.
+        // The command buffers are completely flushed, hoping for a fresh start
         if (!awaitingCommand) {
             if (time() - cmdStartTime > TIMEOUT) {
+                int InterruptState = CyEnterCriticalSection();
                 awaitingCommand = true;
                 cmdDone = false;
-                nDataBytes = 0;     // Hopefully this will just flush the bad command
+                nDataBytes = 0;     
+                cmdWritePtr = 0;
+                cmdReadPtr = 255;
+                fifoWritePtr = 0;
+                fifoReadPtr = -1;
+                cmdFIFOnBytes = 0;
+                CyExitCriticalSection(InterruptState);
                 nCmdTimeOut++;
                 addError(ERR_CMD_TIMEOUT,command,dCnt);
             }
@@ -3247,7 +3272,7 @@ int main(void)
                 }
             }
         }
-        if (count == CMD_LENGTH) {  // We got a complete command string
+        if (count == CMD_LENGTH) {  // We got a complete command string in triplicate. Accept it if 2 out of 3 agree.
             bool badCMD = false;
             for (int i=0; i<9; ++i) {   // Check that all 3 command copies are identical
                 if (buffer[i] != buffer[i+9] || buffer[i] != buffer[i+18]) {
@@ -3257,7 +3282,7 @@ int main(void)
             }  
             if (badCMD) {
                 badCMD = false;
-                for (int i=0; i<9; ++i) {   // Check that first two command copies are identical
+                for (int i=0; i<9; ++i) {   // Check that the first two command copies are identical
                     if (buffer[i] != buffer[i+9]) {
                         badCMD = true;
                         break;
@@ -3265,7 +3290,7 @@ int main(void)
                 }
                 if (badCMD) {
                     badCMD = false;
-                    for (int i=0; i<9; ++i) {   // Check that first and third command copies are identical
+                    for (int i=0; i<9; ++i) {   // Check that the first and third command copies are identical
                         if (buffer[i] != buffer[i+18]) {
                             badCMD = true;
                             break;
@@ -3273,7 +3298,7 @@ int main(void)
                     }
                     if (badCMD) {
                         badCMD = false;
-                        for (int i=0; i<9; ++i) {   // Check that last two command copies are identical
+                        for (int i=0; i<9; ++i) {   // Check that the last two command copies are identical
                             if (buffer[i+9] != buffer[i+18]) {
                                 badCMD = true;
                                 addError(ERR_BAD_CMD, code[buffer[i+9]], i);
@@ -3309,17 +3334,17 @@ int main(void)
                             uint8 byteCnt = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
                             if (byteCnt != 0) {
                                 cmdData[byteCnt-1] = dataByte;
-                                dCnt++;
-                                if (dCnt == nDataBytes) cmdDone = true; 
                             } else {
-                                addError(ERR_BAD_BYTE, command, nDataBytes);
+                                addError(ERR_BAD_BYTE, command, dCnt);
                                 badCMD = true;
                             }
+                            dCnt++;
+                            if (dCnt == nDataBytes) cmdDone = true; 
                         }
                     }
                     if (cmdDone && badCMD) {
                         cmdDone = false;
-                        awaitingCommand = true;  // Abort a bad command
+                        awaitingCommand = true;  // Abort a command with a bad data byte
                         nDataBytes = 0;
                     }
                     if (cmdDone && !badCMD) {

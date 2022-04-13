@@ -1042,7 +1042,7 @@ def getChannelCount(channel):
     ser.write(data1)
     cmd,cmdData,dataBytes = getData(addrEvnt)
     # The hardware counter period is 255, not 256, hence the 255 in this expression
-    count = (bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1]))*255 + bytes2int(dataBytes[2])
+    count = (bytes2int(dataBytes[0])*16777216 + bytes2int(dataBytes[1])*65536 + bytes2int(dataBytes[2])*256 + bytes2int(dataBytes[3]))*255 + bytes2int(dataBytes[4])
     return count
     
 # Read the PMT channel counts from end of run
@@ -1053,7 +1053,7 @@ def getEndOfRunChannelCount(channel):
     data1 = mkDataByte(channel, PSOCaddress, 1)
     ser.write(data1)
     cmd,cmdData,dataBytes = getData(addrEvnt)
-    count = (bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1]))*255 + bytes2int(dataBytes[2])
+    count = (bytes2int(dataBytes[0])*16777216 + bytes2int(dataBytes[1])*65536 + bytes2int(dataBytes[2])*256 + bytes2int(dataBytes[3]))*255 + bytes2int(dataBytes[4])
     return count
 
 # Set up the Event PSOC trigger masks
