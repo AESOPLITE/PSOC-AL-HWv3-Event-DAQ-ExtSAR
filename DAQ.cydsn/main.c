@@ -160,6 +160,15 @@
 #define ERR_UART_CMD 38u
 #define ERR_UART_TKR 39u
 #define ERR_BAD_CRC 40u
+#define ERR_FIFO_OVERFLOW 41u
+
+#define WRAPINC(a,b) ((a + 1) % (b))
+#define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
+#define MIN(a,b) (((a)<(b))?(a):(b))
+#define MAX(a,b) (((a)>(b))?(a):(b))
+#define WRAPDEC(a,b) ((a + ((b) - 1)) % (b))
+#define CR	(0x0Du) //Carriage return in hex
+#define LF	(0x0Au) //Line feed in hex
 
 // Identifiers for types of Tracker data
 #define TKR_EVT_DATA 0xD3
@@ -253,19 +262,18 @@ bool waitingRateCnt;
 
 // Circular FIFO buffer of bytes received from the Main PSOC via the UART.
 // This buffer gets searched for 29-byte commands, which then go into the cmd_buffer structure
-#define MX_FIFO 100
+#define MX_FIFO 57
 volatile uint8 cmdFIFO[MX_FIFO];
 volatile int fifoWritePtr, fifoReadPtr;
-volatile int cmdFIFOnBytes;
 
 // Circular FIFO buffer of 29-byte UART commands from the Main PSOC
 #define CMD_LENGTH 29
 #define MX_CMDS 32u
-volatile struct MainPSOCcmds {
+struct MainPSOCcmds {
     uint8 buf[CMD_LENGTH];    // An actual command is made up of multiple buf elements
     uint8 nBytes;
 } cmd_buffer[MX_CMDS];
-volatile uint8 cmdWritePtr, cmdReadPtr;
+uint8 cmdWritePtr, cmdReadPtr;
 
 // Circular FIFO buffer for bytes coming from the Tracker UART
 #define MAX_TKR 1024
@@ -1269,15 +1277,6 @@ void calibrateAllInputTiming() {
     }
 }
 
-// Function to increment the pointer into the circular command buffer
-uint8 ptrNext(uint8 ptr) {
-    if (ptr < MX_CMDS-1) {
-        return ptr + 1;
-    } else {
-        return 0;
-    }
-}
-
 // Copy TOF information from the buffer into which the DMA writes
 void copyTOF_DMA(char which, bool cleanUp) {
     if (which != 'B') {
@@ -1293,7 +1292,6 @@ void copyTOF_DMA(char which, bool cleanUp) {
         if (cleanUp) {  // Grab any events that may be stuck in the shift register FIFO. This normally doesn't find anything
                         // as long as the DMA was started up with the FIFO empty, but we check anyway, just in case.
             while (ShiftReg_A_GetFIFOStatus(ShiftReg_A_OUT_FIFO) != ShiftReg_A_RET_FIFO_EMPTY) {
-                LED2_OnOff(true);
                 uint32 AT = ShiftReg_A_ReadData();
                 tofA.shiftReg[tofA.ptr] = AT;
                 tofA.clkCnt[tofA.ptr] = Cntr8_Timer_ReadCount();  // Note: this timer value may be off by now
@@ -1315,7 +1313,6 @@ void copyTOF_DMA(char which, bool cleanUp) {
         }
         if (cleanUp) {  // Grab any events that may be stuck in the shift register FIFO
             while (ShiftReg_B_GetFIFOStatus(ShiftReg_B_OUT_FIFO) != ShiftReg_B_RET_FIFO_EMPTY) {
-                LED2_OnOff(true);
                 uint32 BT = ShiftReg_B_ReadData();
                 tofB.shiftReg[tofB.ptr] = BT;
                 tofB.clkCnt[tofB.ptr] = Cntr8_Timer_ReadCount();  // Note: this timer value may be off by now
@@ -1473,22 +1470,18 @@ CY_ISR(isrCh5)
 
 // Receive and store commands from the Main PSOC via the UART, using a circular FIFO buffer
 CY_ISR(isrUART) {
-    if (fifoWritePtr != fifoReadPtr) {  
-        while (UART_CMD_ReadRxStatus() & UART_CMD_RX_STS_FIFO_NOTEMPTY) {
-            uint16 theByte = UART_CMD_GetByte();
-            if ((theByte & 0xDF00) != 0) {
-                uint8 code = (uint8)((theByte & 0xDF00)>>8);
-                addError(ERR_UART_CMD, code, (uint8)theByte);
-            }
-            if (fifoReadPtr < 0) fifoReadPtr = fifoWritePtr;
-            cmdFIFO[fifoWritePtr++] = (uint8)theByte;
-            cmdFIFOnBytes++;
-            if (fifoWritePtr == MX_FIFO) {  // Wrap around the circular buffer
-                fifoWritePtr = 0;
-            }
+    while (UART_CMD_ReadRxStatus() & UART_CMD_RX_STS_FIFO_NOTEMPTY) {
+        uint16 theByte = UART_CMD_GetByte();
+        if ((theByte & 0xDF00) != 0) {
+            uint8 code = (uint8)((theByte & 0xDF00)>>8);
+            addError(ERR_UART_CMD, code, (uint8)theByte);
         }
-    } else {  // Throw away the data if the software buffer is full. Not good!
-        while (UART_CMD_ReadRxStatus() & UART_CMD_RX_STS_FIFO_NOTEMPTY) UART_CMD_GetByte();
+        cmdFIFO[fifoWritePtr] = (uint8)theByte;
+        fifoWritePtr = WRAPINC(fifoWritePtr, MX_FIFO);
+        if (fifoWritePtr == fifoReadPtr) {
+            fifoReadPtr = WRAPINC(fifoReadPtr, MX_FIFO);  // Throw out the oldest byte
+            addErrorOnce(ERR_FIFO_OVERFLOW, byte32(clkCnt, 0), byte32(clkCnt, 1));
+        }
     }
 }
 
@@ -1917,7 +1910,6 @@ void tkrRateMonitor(bool *waitingRateCnt) {
             }
             if (!tkrErr) {
                 if (nTkrMonSamples == tkrMonitorNumAvg) {
-                    //LED2_OnOff(true);
                     for (int brd=0; brd<numTkrBrds; ++ brd) {
                         tkrMonitorRates[brd] = tkrMonitorSums[brd]/nTkrMonSamples;
                         tkrMonitorSums[brd] = theRate[brd];
@@ -2460,9 +2452,11 @@ void interpretCommand(uint8 tofConfig[]) {
                         dataOut[0] = byte32(ch4Count, 0);
                         break;
                     case 0x05:
-                        dataOut[2] = Cntr8_V1_5_ReadCount();
-                        dataOut[1] = (uint8)(ch5Count & 0x00FF);
-                        dataOut[0] = (uint8)((ch5Count & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_5_ReadCount();
+                        dataOut[3] = byte32(ch5Count, 3);
+                        dataOut[2] = byte32(ch5Count, 2);
+                        dataOut[1] = byte32(ch5Count, 1);
+                        dataOut[0] = byte32(ch5Count, 0);
                         break;
                 }
                 break;
@@ -2571,32 +2565,42 @@ void interpretCommand(uint8 tofConfig[]) {
                 dataOut[0] = reg;
                 break;
             case '\x33':    // Read a saved channel counter, from end of run
-                nDataReady = 3;
+                nDataReady = 5;
                 switch (cmdData[0]) {
                     case 0x01:
-                        dataOut[2] = ch1CtrSave;
-                        dataOut[1] = (uint8)(ch1CountSave & 0x00FF);
-                        dataOut[0] = (uint8)((ch1CountSave & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_1_ReadCount();
+                        dataOut[3] = byte32(ch1CountSave, 3);
+                        dataOut[2] = byte32(ch1CountSave, 2);
+                        dataOut[1] = byte32(ch1CountSave, 1);
+                        dataOut[0] = byte32(ch1CountSave, 0);
                         break;
                     case 0x02:
-                        dataOut[2] = ch2CtrSave;
-                        dataOut[1] = (uint8)(ch2CountSave & 0x00FF);
-                        dataOut[0] = (uint8)((ch2CountSave & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_2_ReadCount();
+                        dataOut[3] = byte32(ch2CountSave, 3);
+                        dataOut[2] = byte32(ch2CountSave, 2);
+                        dataOut[1] = byte32(ch2CountSave, 1);
+                        dataOut[0] = byte32(ch2CountSave, 0);
                         break;
                     case 0x03:
-                        dataOut[2] = ch3CtrSave;
-                        dataOut[1] = (uint8)(ch3CountSave & 0x00FF);
-                        dataOut[0] = (uint8)((ch3CountSave & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_3_ReadCount();
+                        dataOut[3] = byte32(ch3CountSave, 3);
+                        dataOut[2] = byte32(ch3CountSave, 2);
+                        dataOut[1] = byte32(ch3CountSave, 1);
+                        dataOut[0] = byte32(ch3CountSave, 0);
                         break;
                     case 0x04:
-                        dataOut[2] = ch4CtrSave;
-                        dataOut[1] = (uint8)(ch4CountSave & 0x00FF);
-                        dataOut[0] = (uint8)((ch4CountSave & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_4_ReadCount();
+                        dataOut[3] = byte32(ch4CountSave, 3);
+                        dataOut[2] = byte32(ch4CountSave, 2);
+                        dataOut[1] = byte32(ch4CountSave, 1);
+                        dataOut[0] = byte32(ch4CountSave, 0);
                         break;
                     case 0x05:
-                        dataOut[2] = ch5CtrSave;
-                        dataOut[1] = (uint8)(ch5CountSave & 0x00FF);
-                        dataOut[0] = (uint8)((ch5CountSave & 0xFF00)>>8);
+                        dataOut[4] = Cntr8_V1_5_ReadCount();
+                        dataOut[3] = byte32(ch5CountSave, 3);
+                        dataOut[2] = byte32(ch5CountSave, 2);
+                        dataOut[1] = byte32(ch5CountSave, 1);
+                        dataOut[0] = byte32(ch5CountSave, 0);
                         break;
                 }
                 break;
@@ -2862,13 +2866,13 @@ int main(void)
     debugTOF = false;
     
     fifoWritePtr = 0;
-    fifoReadPtr = -1;
-    cmdFIFOnBytes = 0;
+    fifoReadPtr = 0;
     
     runNumber = 0;
     timeStamp = time();
     
-    uint8 buffer[BUFFER_LEN];  // Buffer for incoming UART commands
+    uint8 *buffer;        // Buffer for incoming commands
+    uint8 USBUART_buf[BUFFER_LEN];
     
     uint8 code[256];  // ASCII code translation to hex nibbles
     for (int i=0; i<256; ++i) code[i] = 0;
@@ -2954,7 +2958,7 @@ int main(void)
     tkrReadPtr = -1;    // Negative indicates that no data are available to read
     
     // Initialize pointers for the UART command buffer
-    cmdReadPtr = 255;   // Here, 255 means that no data are available in the buffer to be read.
+    cmdReadPtr = 0;   
     cmdWritePtr = 0;
     for (uint i=0; i<MX_CMDS; ++i) cmd_buffer[i].nBytes = 0;
     
@@ -3083,7 +3087,7 @@ int main(void)
     
     cmdCountGLB = 0;               // Count of all command packets received
     cmdCount = 0;                  // Count of all event PSOC commands received
-    int dCnt = 0;                      // To count the number of data bytes received
+    int dCnt = 0;                  // To count the number of data bytes received
     nCmdTimeOut = 0;
     const uint8 eventPSOCaddress = '\x08';
     
@@ -3190,10 +3194,9 @@ int main(void)
                 cmdDone = false;
                 nDataBytes = 0;     
                 cmdWritePtr = 0;
-                cmdReadPtr = 255;
+                cmdReadPtr = 0;
                 fifoWritePtr = 0;
-                fifoReadPtr = -1;
-                cmdFIFOnBytes = 0;
+                fifoReadPtr = 0;
                 CyExitCriticalSection(InterruptState);
                 nCmdTimeOut++;
                 addError(ERR_CMD_TIMEOUT,command,dCnt);
@@ -3201,52 +3204,31 @@ int main(void)
         }        
         
         // Parse the FIFO of commands from the Main PSOC, via UART. Identify commands
-        // from the <CR><LF> characters, and move complete commands into the command
-        // buffer.
-        if (cmdFIFOnBytes >= CMD_LENGTH) {
-            int numBytes = cmdFIFOnBytes;   
-            // Search for the <CR><LF> termination of a command
-            uint8 toFind = 0x0D;   // CR byte
-            uint8 *byteBuf = (uint8*) malloc(numBytes);  // Save the bytes in a temporary buffer
-            if (byteBuf == NULL) {
-                addErrorOnce(ERR_HEAP_NO_MEMORY,numBytes,0x57);
-            } else {
-                for (int i=0; i<numBytes; ++i) {                   
-                    byteBuf[i] = cmdFIFO[fifoReadPtr];
-                    if (byteBuf[i] == toFind) {
-                        if (toFind == 0x0A) {
-                            // We found the end of a command; check if an entire 29-byte command is present
-                            if (i>= 28) {
-                                // Copy the new command into the command buffer; any extra preceeding bytes get flushed
-                                for (int j=i-28; j<=i; ++j) {
-                                    cmd_buffer[cmdWritePtr].buf[cmd_buffer[cmdWritePtr].nBytes++] = byteBuf[j];
-                                }        
-                                if (cmdReadPtr > MX_CMDS) {
-                                    cmdReadPtr = cmdWritePtr;
-                                }
-                                cmdWritePtr = ptrNext(cmdWritePtr);  // Increment pointer in the circular command FIFO
-                                if (cmdWritePtr == cmdReadPtr) {     // This will almost certainly make a mess if it happens!
-                                    addError(ERR_CMD_BUF_OVERFLOW, cmdWritePtr, 0);
-                                } else {
-                                    cmd_buffer[cmdWritePtr].nBytes = 0;
-                                }
-                            }
-                            toFind = 0x0D;  // Start searching for a new end-of-command
-                        } else {
-                            toFind = 0x0A;  // LF byte
-                        }
-                    }
+        // from the <CR><LF> characters, and move complete commands into the command buffer.
+        int numBytes = ACTIVELEN(fifoReadPtr, fifoWritePtr, MX_FIFO);
+        if (numBytes >= CMD_LENGTH) {   
+            // Search backkwards for the <CR><LF> termination of the latest command
+            int tmpRdPtr = WRAPDEC(fifoWritePtr, MX_FIFO);
+            for (int i=0; i<numBytes+1-CMD_LENGTH; ++i) {
+                if (cmdFIFO[tmpRdPtr] == LF && cmdFIFO[WRAPDEC(tmpRdPtr, MX_FIFO)] == CR) {
                     isr_UART_Disable();
-                    fifoReadPtr++; cmdFIFOnBytes--;  // Increment pointer into the circular command-byte FIFO
-                    if (fifoReadPtr == MX_FIFO) fifoReadPtr = 0;
-                    if (fifoReadPtr == fifoWritePtr) {
-                        fifoReadPtr = -1;
-                        cmdFIFOnBytes = 0;
-                        break;
+                    fifoReadPtr = (tmpRdPtr + 1 - CMD_LENGTH + MX_FIFO) % MX_FIFO;
+                    for (int j=0; j<CMD_LENGTH; ++j) {
+                        cmd_buffer[cmdWritePtr].buf[j] = cmdFIFO[fifoReadPtr];
+                        fifoReadPtr = WRAPINC(fifoReadPtr, MX_FIFO);
                     }
                     isr_UART_Enable();
+                    cmd_buffer[cmdWritePtr].nBytes = CMD_LENGTH;
+                    if (WRAPINC(cmdWritePtr, MX_CMDS) == cmdReadPtr) {
+                        addError(ERR_CMD_BUF_OVERFLOW, byte32(clkCnt,0), byte32(clkCnt,1)); // This will almost certainly make a mess if it happens!
+                    } else {
+                        cmdWritePtr = WRAPINC(cmdWritePtr, MX_CMDS);  
+                        cmd_buffer[cmdWritePtr].nBytes = 0;
+                    }
+                    break;
                 }
-                free(byteBuf);
+                if (tmpRdPtr == fifoReadPtr) break;  // This check shouldn't be necessary
+                tmpRdPtr = WRAPDEC(tmpRdPtr, MX_FIFO);
             }
         }
 
@@ -3255,21 +3237,16 @@ int main(void)
         int count = 0;
         if (nDataReady == 0) { // Don't interpret a new command if data are still going out
             if (USBUART_GetConfiguration() != 0u) {    // Looking for a command from USB-UART
+                buffer = USBUART_buf;
                 if (USBUART_DataIsReady()) {
                     count = USBUART_GetAll(buffer);
                 }
             }
-            if (count == 0 && cmdReadPtr < MX_CMDS) { // Looking for a command from UART 
-                count = CMD_LENGTH;
-                for (int i=0; i<count; ++i) {
-                    buffer[i] = cmd_buffer[cmdReadPtr].buf[i];
-                }
+            if (count == 0 && cmdReadPtr != cmdWritePtr) { // Looking for a command from UART 
+                count = cmd_buffer[cmdReadPtr].nBytes;
+                buffer = cmd_buffer[cmdReadPtr].buf;
                 cmd_buffer[cmdReadPtr].nBytes = 0;
-                if (ptrNext(cmdReadPtr) != cmdWritePtr) {
-                    cmdReadPtr = ptrNext(cmdReadPtr);  // Another command is already buffered
-                } else {
-                    cmdReadPtr = 255;   // 255 means that no command is buffered for reading
-                }
+                cmdReadPtr = WRAPINC(cmdReadPtr, MX_CMDS);
             }
         }
         if (count == CMD_LENGTH) {  // We got a complete command string in triplicate. Accept it if 2 out of 3 agree.
