@@ -1053,6 +1053,7 @@ def getEndOfRunChannelCount(channel):
     data1 = mkDataByte(channel, PSOCaddress, 1)
     ser.write(data1)
     cmd,cmdData,dataBytes = getData(addrEvnt)
+	# The hardware counter period is 255, not 256, hence the 255 in this expression
     count = (bytes2int(dataBytes[0])*16777216 + bytes2int(dataBytes[1])*65536 + bytes2int(dataBytes[2])*256 + bytes2int(dataBytes[3]))*255 + bytes2int(dataBytes[4])
     return count
 
@@ -2268,7 +2269,7 @@ def tkrLoadASICconfig(FPGA, address, oneShot, gain, shaping, bufSpeed, trigDelay
     maxClust = maxClust & 0x0F
     if maxClust > 10: maxClust = 10
     nib1 = 0x0F;
-    nib2 = 0x01 | (oneShot << 2) | (gain << 3) 
+    nib2 = (oneShot << 2) | (gain << 3) 
     nib3 = shaping | (bufSpeed << 1)
     nib4 = trigDelay & 0x0F
     nib5 = (trigDelay & 0x10)>>4 | trigWindow<<1 | ioCurrent<<2
