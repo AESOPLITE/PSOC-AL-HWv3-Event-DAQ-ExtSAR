@@ -1787,10 +1787,22 @@ def getTkrHousekeeping():
     return dataBytes
 
 def getEvtVersionNumber():
-    cmdHeader = mkCmdHdr(0, 0x07, address)
+    cmdHeader = mkCmdHdr(0, 0x07, addrEvnt)
     ser.write(cmdHeader)
-    dataBytes = getTkrHousekeeping()
-    print("getEvtVersionNumber: Event PSOC code Version Number = " + str(bytes2int(dataBytes[6])) + "." + str(bytes2int(dataBytes[7])))
+    time.sleep(0.2)
+    command,cmdDataBytes,dataBytes = getData(addrEvnt)
+    #print("getEvtVersionNumber: command = " + str(binascii.hexlify(command)))
+    print("getEvtVersionNumber: Event PSOC code Version Number = " + str(bytes2int(dataBytes[0])) + "." + str(bytes2int(dataBytes[1])))
+
+def getRunCounters():
+    cmdHeader = mkCmdHdr(0, 0x50, addrEvnt)
+    ser.write(cmdHeader)
+    time.sleep(0.1)
+    command,cmdDataBytes,dataBytes = getData(addrEvnt)
+    print("getRunCounters: Global command count = " + str(bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])))
+    print("getRunCounters: Command count = " + str(bytes2int(dataBytes[2])*256 + bytes2int(dataBytes[3])))
+    print("getRunCounters: Number of command timeouts = " + str(bytes2int(dataBytes[4])))
+    print("getRunCounters: Number of Tracker resets = " + str(bytes2int(dataBytes[5])))
 
 def tkrGetCodeVersion(FPGA):
     address = addrEvnt

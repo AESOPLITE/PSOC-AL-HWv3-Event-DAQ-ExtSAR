@@ -164,6 +164,7 @@
 #define ERR_UART_TKR 39u
 #define ERR_BAD_CRC 40u
 #define ERR_FIFO_OVERFLOW 41u
+#define ERR_GET_TKR_EVENT 42u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -191,6 +192,7 @@ bool doCRCcheck;                  // Whether to check the Tracker hitlist CRC
 uint16 cmdCountGLB = 0;           // Count of all command packets received
 uint16 cmdCount = 0;              // Count of all event PSOC commands received
 uint8 nCmdTimeOut = 0;            // Count the number of command timeouts
+uint8 numTkrResets = 0;
 
 // Register pointers for the power monitoring chips
 const uint8 INA226_Config_Reg = 0x00;
@@ -1248,11 +1250,18 @@ uint8 minTdif(uint8 t1, uint8 t2) {
     else return tD2;
 }
 
-// Reset all of the Tracker board FPGAs (soft reset)
+// Reset all of the Tracker board FPGAs (soft reset) and the ASICs (soft reset)
+// Unfortunately, the ASIC reset destroys the configuration, so the ASICs have to be reconfigured.
 void resetAllTrackerLogic() {
     for (uint8 brd=0; brd<numTkrBrds; ++brd) {
-        sendSimpleTrackerCmd(brd, 0x04);
+        tkrCmdCode = 0x04;
+        sendSimpleTrackerCmd(brd, tkrCmdCode);         
     }
+    tkrCmdCode = 0x0C;
+    cmdData[0] = 0x1F;
+    sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);
+    nDataReady = 0;
+    CyDelay(1);  // Give it time to reset the ASIC defaults in all chips.
 }
 
 // Read the ASIC configuration register 
@@ -1593,7 +1602,7 @@ void makeEvent() {
     adcArray[2] = 0;
     adcArray[3] = 0;
     adcArray[4] = 0;
-    int dummy = 0;
+    int dummy = 0;   // Variable to do some useless calculation on, just to delay the CPU a little bit
     for (int ch=0; ch<5; ++ch) {
         set_ADC_SSN(SSN_SAR[ch]);
         int InterruptState = CyEnterCriticalSection();
@@ -1602,7 +1611,7 @@ void makeEvent() {
             if (ch == 7) dummy = dummy + 3; // Delay to stop the read operation between 2nd and 8th SCLK cycles, for soft reset
             else dummy = dummy + 4;         // This delay results in the CS going down at the start of the 5th SCLK cycle.
             set_ADC_SSN(0);                   
-            adcArray[ch] = 4095;
+            adcArray[ch] = 4095;            // /rubbish DAC reading for the first event
         } else {
             while ((Status_Reg_M_Read() & 0x20) == 0);
             adcArray[ch] = ShiftReg_ADC_ReadRegValue();
@@ -1638,23 +1647,26 @@ void makeEvent() {
                 addError(ERR_TKR_BAD_STATUS, tkrDataReady, nTry+1);
                 break;
             }
-        }           
-    }
-    if (tkrDataReady == TKR_DATA_READY) {
-        // Start the read of the Tracker data by sending a read-event command
-        tkrCmdCode = 0x01;
-        cmdData[0] = 0x00;
-        while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-            addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, tkrDataReady);
-        }
-        uint8 rc = sendTrackerCmd(0x00, tkrCmdCode, 0x01, cmdData, TKR_EVT_DATA);    
+        }        
+        uint8 rc = 0xDF;
+        if (tkrDataReady == TKR_DATA_READY) {
+            // Start the read of the Tracker data by sending a read-event command
+            tkrCmdCode = 0x01;
+            cmdData[0] = 0x00;
+            while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
+                addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, tkrDataReady);
+            }
+            rc = sendTrackerCmd(0x00, tkrCmdCode, 0x01, cmdData, TKR_EVT_DATA);    
+        } 
         if (rc != 0) {
-            addError(ERR_GET_TKR_DATA, rc, 0x77);
+            addErrorOnce(ERR_GET_TKR_EVENT, rc, byte32(cntGO, 0));
+            UART_TKR_ClearTxBuffer();
             UART_TKR_ClearRxBuffer(); 
             resetAllTrackerLogic();
             makeDummyTkrEvent(0, 0, 0, 6);
+            numTkrResets++;
         }
-    } else {   // Make up an empty tracker event if no data were ready
+    } else {
         makeDummyTkrEvent(0, 0, 0, 6);
     }
 
@@ -2480,12 +2492,14 @@ void interpretCommand(uint8 tofConfig[]) {
                 endData[7] = byte32(cntGO, 3);
                 break;
             case '\x50':  // Send counter information
-                nDataReady = 5;
+                nDataReady = 6;
                 dataOut[0] = byte16(cmdCountGLB, 0); 
                 dataOut[1] = byte16(cmdCountGLB, 1); 
                 dataOut[2] = byte16(cmdCount, 0);
                 dataOut[3] = byte16(cmdCount, 1);
                 dataOut[4] = nCmdTimeOut;
+                dataOut[5] = numTkrResets;
+                break;
             case '\x3C':  // Start a run
                 InterruptState = CyEnterCriticalSection();
                 for (int j=0; j<TOFMAX_EVT; ++j) {
@@ -2507,6 +2521,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 readTracker = (cmdData[2] == 1);
                 debugTOF = (cmdData[3] == 1);
                 cntGO = 0;
+                numTkrResets = 0;
                 triggerEnable(true);
                 Control_Reg_Pls_Write(PULSE_CNTR_RST);
                 // Enable the tracker trigger
@@ -2678,7 +2693,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 dataOut[8] = year/256;
                 dataOut[9] = year%256;
                 break;
-            case '\x47': // Reset the tracker state machines
+            case '\x47': // Reset the tracker state machines and Tracker ASICs
                 resetAllTrackerLogic();
                 break;
             case '\x48': // Calibrate the input timing on one or every Tracker FPGA board
@@ -3071,6 +3086,7 @@ int main(void)
     cmdCount = 0;                  // Count of all event PSOC commands received
     int dCnt = 0;                  // To count the number of data bytes received
     nCmdTimeOut = 0;
+    numTkrResets = 0;
     const uint8 eventPSOCaddress = '\x08';
     
     // Set up the default trigger configuration
