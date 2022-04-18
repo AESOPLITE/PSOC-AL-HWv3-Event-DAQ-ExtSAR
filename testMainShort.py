@@ -89,7 +89,7 @@ print(" ")
 print("Start the Tracker setup:")
 tkrFPGAreset(0x00)
 
-calibrateAllFPGAinputTiming()
+#calibrateAllFPGAinputTiming()
 
 tkrConfigReset(0x00)
 

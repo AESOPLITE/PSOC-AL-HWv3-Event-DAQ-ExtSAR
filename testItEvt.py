@@ -16,6 +16,8 @@ print("Entering testItEvt.py")
 
 address = 8   # Address of the event PSOC
 
+getEvtVersionNumber()
+
 print("Set up the Event PSOC to send its output over the UART")
 setOutputMode("UART")
 
@@ -216,7 +218,7 @@ getLyrTrgCnt(0)
 startTkrRateMonitor(2, 2)
 time.sleep(2)
 
-mask = 0x06    # T1&T4
+mask = 0x07    # T1
 print("Setting the first trigger mask to " + str(mask))
 setTriggerMask(1, mask)
 print("The first trigger mask is set to  " + str(hex(getTriggerMask(1))))
@@ -241,7 +243,7 @@ print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
 #sys.exit("abort")
-ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 50, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 5, True, False, True)
 
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))

@@ -1654,6 +1654,20 @@ def tkrSetASICmask(FPGA, maskUp, maskDn):
     data5 = mkDataByte(maskDn, address, 5)
     ser.write(data5)
 
+# Dump all the bytes accumulated in the Tracker output RAM buffer (for debugging)
+def dmpTkrRAMbuffer():
+    cmdHeader = mkCmdHdr(2, 0x10, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(0, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0x0D, addrEvnt, 2)
+    ser.write(data2)
+    time.sleep(0.1)
+    byteList = getTkrHousekeeping()
+    print("dmpTkrRAMbuffer: " + str(bytes2int(byteList[0])) + " bytes returned")
+    for byte in byteList:
+        print("dmpTkrRAMbuffer: byte = " + str(binascii.hexlify(byte)))
+
 # Hard reset of ASICs on all tracker boards. Use address 31 = 0x1F to reset all ASICs.
 def tkrAsicHardReset(ASICaddress):
     address = addrEvnt
@@ -1771,6 +1785,12 @@ def tkrAsicPowerOn():
 def getTkrHousekeeping():
     command,cmdDataBytes,dataBytes = getData(addrEvnt)
     return dataBytes
+
+def getEvtVersionNumber():
+    cmdHeader = mkCmdHdr(0, 0x07, address)
+    ser.write(cmdHeader)
+    dataBytes = getTkrHousekeeping()
+    print("getEvtVersionNumber: Event PSOC code Version Number = " + str(bytes2int(dataBytes[6])) + "." + str(bytes2int(dataBytes[7])))
 
 def tkrGetCodeVersion(FPGA):
     address = addrEvnt

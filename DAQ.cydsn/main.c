@@ -19,7 +19,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define VERSION 20
+#define MAJOR_VERSION 20
+#define MINOR_VERSION 2
 // V20: UART command stream is searched for <CR><LF> in order to identify command strings
 
 /*=========================================================================
@@ -118,6 +119,8 @@
 #define CALMASK 1u
 #define DATAMASK 2u
 #define TRIGMASK 3u
+#define TKR_DATA_READY 0x59
+#define TKR_DATA_NOT_READY 0x4E
 
 // Error codes
 #define ERR_DAC_LOAD 1u
@@ -1147,7 +1150,7 @@ void tkrLED(bool on) {
 }
 
 // Send a command to the tracker via the UART
-void sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rtnType) {
+uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rtnType) {
     tkrLED(true);
     tkrCmdCode = code;
     while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
@@ -1175,10 +1178,12 @@ void sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint r
             tkrLED(false);
             break;
         }
-    }                                
+    }        
+    uint8 rc = 0;
     if (tkrCmdCode == 0x67 || tkrCmdCode == 0x6C) {
         tkrLED(false);
-        return;    // These commands have no echo or data to return
+        rc = 0xCF;
+        return rc;    // These commands have no echo or data to return
     }
     // Now look for the bytes coming back from the Tracker.
     if (tkrCmdCode >= 0x20 && tkrCmdCode <= 0x25) {
@@ -1186,12 +1191,13 @@ void sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint r
     } else if (tkrCmdCode == 0x46) {
         getTKRi2cData();
     } else {
-        uint8 rc = getTrackerData(rtnType);
+        rc = getTrackerData(rtnType);
         if (rc != 0) {
             addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
         }
     }
     tkrLED(false);
+    return rc;
 }
 
 // Function to send a command to the tracker that has no data bytes sent or returned
@@ -1611,29 +1617,16 @@ void makeEvent() {
     uint8 tkrDataReady = 0;
     uint8 nTry =0;
     if (readTracker) {
-        while (tkrDataReady != 0x59) {
+        while (tkrDataReady != TKR_DATA_READY) {
             tkrCmdCode = 0x57;   // Command to check whether Tkr data are ready
-            while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-                addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, nTry);
-            }
-            UART_TKR_WriteTxData(0x00);          // Address byte
-            UART_TKR_WriteTxData(tkrCmdCode);    // Check event-ready status (0x57)
-            UART_TKR_WriteTxData(0x00);          // Number of data bytes
-            // Wait for the Tx FIFO to empty
-            uint32 tStart = time();
-            while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-                if (time() - tStart > 200) {
-                    addError(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0xCF);
-                }
-            }
-            getTrackerData(TKR_HOUSE_DATA);
+            sendTrackerCmd(0x00, tkrCmdCode, 0x00, cmdData, TKR_HOUSE_DATA);
             if (nTkrHouseKeeping > 0) {
                 nTkrHouseKeeping = 0;    // Keep the housekeeping data from being sent out to the world
-                if (tkrHouseKeeping[0] == 0x59) {
-                    tkrDataReady = 0x59;    // Yes, an event is ready
+                if (tkrHouseKeeping[0] == TKR_DATA_READY) {
+                    tkrDataReady = TKR_DATA_READY;    // Yes, an event is ready
                     break;
-                } else if (tkrHouseKeeping[0] == 0x4E) {
-                    tkrDataReady = 0x4E;    // No, an event is not ready
+                } else if (tkrHouseKeeping[0] == TKR_DATA_NOT_READY) {
+                    tkrDataReady = TKR_DATA_NOT_READY;    // No, an event is not ready
                 } else {
                     addError(ERR_TKR_BAD_STATUS, tkrHouseKeeping[0], nTry);
                 }
@@ -1647,32 +1640,20 @@ void makeEvent() {
             }
         }           
     }
-    if (tkrDataReady == 0x59) {
+    if (tkrDataReady == TKR_DATA_READY) {
         // Start the read of the Tracker data by sending a read-event command
-        tkrLED(true);
         tkrCmdCode = 0x01;
+        cmdData[0] = 0x00;
         while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
             addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, tkrDataReady);
         }
-        UART_TKR_WriteTxData(0x00);          // Address byte
-        UART_TKR_WriteTxData(tkrCmdCode);    // Read event command
-        UART_TKR_WriteTxData(0x01);          // Number of data bytes
-        UART_TKR_WriteTxData(0x00);          // Use internally generated trigger tags
-        // Wait for the Tx FIFO to empty
-        uint32 tStart = time();
-        while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-            if (time() - tStart > 200) {
-                addError(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0xDF);
-            }
-        }
-        // Read the Tracker event data in from the UART and into internal arrays
-        int rc = getTrackerData(TKR_EVT_DATA);        
+        uint8 rc = sendTrackerCmd(0x00, tkrCmdCode, 0x01, cmdData, TKR_EVT_DATA);    
         if (rc != 0) {
             addError(ERR_GET_TKR_DATA, rc, 0x77);
             UART_TKR_ClearRxBuffer(); 
             resetAllTrackerLogic();
+            makeDummyTkrEvent(0, 0, 0, 6);
         }
-        tkrLED(false);
     } else {   // Make up an empty tracker event if no data were ready
         makeDummyTkrEvent(0, 0, 0, 6);
     }
@@ -2162,8 +2143,9 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 break;
             case '\x07':        // Return the version number
-                nDataReady = 1;
-                dataOut[0] = VERSION;
+                nDataReady = 2;
+                dataOut[0] = MAJOR_VERSION;
+                dataOut[1] = MINOR_VERSION;
                 break;
             case '\x10':        // Send an arbitrary command to the tracker
                 tkrCmdCode = cmdData[1];
