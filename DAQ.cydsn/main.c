@@ -20,7 +20,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 20
-#define MINOR_VERSION 2
+#define MINOR_VERSION 4
 // V20: UART command stream is searched for <CR><LF> in order to identify command strings
 
 /*=========================================================================
@@ -193,6 +193,8 @@ uint16 cmdCountGLB = 0;           // Count of all command packets received
 uint16 cmdCount = 0;              // Count of all event PSOC commands received
 uint8 nCmdTimeOut = 0;            // Count the number of command timeouts
 uint8 numTkrResets = 0;
+uint32 readTimeAvg = 0;
+uint32 nReadAvg = 0;
 
 // Register pointers for the power monitoring chips
 const uint8 INA226_Config_Reg = 0x00;
@@ -255,7 +257,7 @@ const uint8 readResults =  0x60;   // Not used
 RTC_1_TIME_DATE* timeDate;
 
 // Data structures for tracker rate monitoring
-uint32 tkrMonitorInterval;   // time interval in 5ms tics between successive 1-second rate accumulations
+uint8 tkrMonitorInterval;   // time interval in seconds between successive 1-second rate accumulations
 uint8 tkrMonitorNumAvg;      // number of 1-second rate measurements to average
 uint16 tkrMonitorRates[MAX_TKR_BOARDS];
 uint tkrMonitorSums[MAX_TKR_BOARDS];
@@ -263,7 +265,19 @@ uint nTkrMonSamples;
 bool monitorTkrRates;
 uint32 tkrClkAtStart;
 uint32 tkrClkCntStart;
-bool waitingRateCnt;
+bool waitingTkrRateCnt;
+
+#define MAX_PMT_CHANNELS 5
+// Data structures for PMT singles rate monitoring
+uint8  pmtDeltaT = 10;       // rough time in seconds for each rate measurement
+uint32 pmtMonitorInterval;   // time interval in seconds between successive rate accumulations
+uint32 pmtCntInit[MAX_PMT_CHANNELS];
+uint16 pmtMonitorSums[MAX_PMT_CHANNELS];
+uint16 pmtMonitorTime;
+bool monitorPmtRates;
+uint32 pmtClkAtStart;
+uint32 pmtClkCntStart;
+bool waitingPmtRateCnt;
 
 // Circular FIFO buffer of bytes received from the Main PSOC via the UART.
 // This buffer gets searched for 29-byte commands, which then go into the cmd_buffer structure
@@ -1371,6 +1385,29 @@ uint8 readTOFdata() {
     return dataByte;
 }
 
+// Get the current count from one of the channel singles-rate counters
+uint32 getChCount(int cntr) {
+    uint32 count = 0;
+    switch (cntr) {
+        case 0:
+          count = ch1Count*255 + Cntr8_V1_1_ReadCount();
+          break;
+        case 1:
+          count = ch2Count*255 + Cntr8_V1_2_ReadCount();
+          break;       
+        case 2:
+          count = ch3Count*255 + Cntr8_V1_3_ReadCount();
+          break;
+        case 3:
+          count = ch4Count*255 + Cntr8_V1_4_ReadCount();
+          break;
+        case 4:
+          count = ch5Count*255 + Cntr8_V1_5_ReadCount();
+          break;
+    }
+    return count;
+}
+
 // Move TOF data out of the DMA buffers each time the maximum number of DMA TDs is used up
 CY_ISR(isrTOFnrqA) {
     copyTOF_DMA('A', false);
@@ -1703,7 +1740,7 @@ void makeEvent() {
         uint32 BT = tofB.shiftReg[jptr];
         uint16 stopB = (uint16)(BT & 0x0000FFFF);          // Stop time for channel B
         uint16 refB = (uint16)((BT & 0xFFFF0000)>>16);     // Reference clock for channel B
-        int timej = refB*8333 + stopB;                     // Full time for channel B in 10 picosecond units
+        int32 timej = refB*8333 + stopB;                     // Full time for channel B in 10 picosecond units
         ++nJ;
         for (int i=0; i<nI; ++i) {                          // Loop over the channel A hits
             int iptr = idx[i];
@@ -1711,7 +1748,7 @@ void makeEvent() {
             uint32 AT = tofA.shiftReg[iptr];
             uint16 stopA = (uint16)(AT & 0x0000FFFF);       // Stop time for channel A
             uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);  // Reference clock for channel A
-            int timei = refA*8333 + stopA;                  // Full time for channel A in 10 picosecond units
+            int32 timei = refA*8333 + stopA;                  // Full time for channel A in 10 picosecond units
             // Here we try to handle cases in which a reference clock rolled over
             int16 dt;
             if (refA >= 60001 && refB == 0) {
@@ -1875,16 +1912,16 @@ void makeEvent() {
     ch5CountSave = ch5Count;
 } // end of subroutine makeEvent
 
-void tkrRateMonitor(bool *waitingRateCnt) {
+void tkrRateMonitor(bool *waitingTkrRateCnt) {
     uint32 diff;
-    if (*waitingRateCnt) {
-        if (clkCnt > tkrClkCntStart) {
-            diff = clkCnt - tkrClkCntStart;
+    if (*waitingTkrRateCnt) {
+        if (time() > tkrClkCntStart) {
+            diff = time() - tkrClkCntStart;
         } else {
-            diff = 0xffffffff - (tkrClkCntStart - clkCnt - 1);                       
+            diff = 0xffffffff - (tkrClkCntStart - time() - 1);                       
         }     
         if (diff >= 220) {  // Allow 1 second for the Tracker to finish its count
-            *waitingRateCnt = false;
+            *waitingTkrRateCnt = false;
             bool trgStat = isTriggerEnabled();
             if (trgStat) triggerEnable(false);
             bool tkrErr = false;
@@ -1914,27 +1951,71 @@ void tkrRateMonitor(bool *waitingRateCnt) {
                     }
                     nTkrMonSamples++;
                 }
-                tkrClkAtStart = clkCnt;
+                tkrClkAtStart = time();
             }
             if (trgStat) triggerEnable(true);
         }
     } else {
-        if (clkCnt > tkrClkAtStart) {
-            diff = clkCnt - tkrClkAtStart;
+        if (time() > tkrClkAtStart) {
+            diff = time() - tkrClkAtStart;
         } else {
-            diff = 0xffffffff - (tkrClkAtStart - clkCnt - 1);                       
+            diff = 0xffffffff - (tkrClkAtStart - time() - 1);                       
         }
-        if (diff >= tkrMonitorInterval) {
+        if (diff >= tkrMonitorInterval*200) {
             // Send a command to the tracker to accumulate trigger counts for 1 second
             bool trgStat = isTriggerEnabled();
             if (trgStat) triggerEnable(false);
             sendSimpleTrackerCmd(0, 0x6C);
-            tkrClkCntStart = clkCnt;
-            *waitingRateCnt = true;
+            tkrClkCntStart = time();
+            *waitingTkrRateCnt = true;
             if (trgStat) triggerEnable(true);
         }
     }
 } // end of subroutine trkRateMonitor
+
+// Monitoring of PMT singles rates
+void pmtRateMonitor(bool *waitingPmtRateCnt) {
+    uint32 diff;
+    if (*waitingPmtRateCnt) {
+        uint32 now = time();
+        if (now > pmtClkCntStart) {
+            diff = now - pmtClkCntStart;
+        } else {
+            diff = 0xffffffff - (pmtClkCntStart - now - 1);
+        }     
+        if (diff >= 200*pmtDeltaT) {  // Allow at least 10 seconds, to get good precision
+            *waitingPmtRateCnt = false;
+            int InterruptState = CyEnterCriticalSection();
+            now = time();
+            if (now > pmtClkCntStart) {
+                pmtMonitorTime = (uint16)(now - pmtClkCntStart);
+            } else {
+                pmtMonitorTime = (uint16)(0xffffffff - (pmtClkCntStart - now - 1));                       
+            }  
+            for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
+                pmtMonitorSums[cntr] = (uint16)(getChCount(cntr) - pmtCntInit[cntr]);
+            }
+            pmtClkAtStart = now;
+            CyExitCriticalSection(InterruptState);
+        }
+    } else {
+        uint32 now = time();
+        if (now > pmtClkAtStart) {
+            diff = now - pmtClkAtStart;
+        } else {
+            diff = 0xffffffff - (pmtClkAtStart - now - 1);                       
+        }
+        if (diff >= 200*pmtMonitorInterval) {
+            int InterruptState = CyEnterCriticalSection();
+            pmtClkCntStart = time();
+            *waitingPmtRateCnt = true;
+            for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
+                pmtCntInit[cntr] = getChCount(cntr);
+            }
+            CyExitCriticalSection(InterruptState);
+        }
+    }
+} // end of subroutine pmtRateMonitor
 
 // Data goes out by USBUART, for bench testing, or by SPI to the main PSOC
 // Format: 3 byte aligned packeckets with a 3 byte header (0xDC00FF) and 3 byte EOR (0xFF00FF)       
@@ -2023,6 +2104,9 @@ uint8 sendEvtData(uint8 nDataBytes, uint8 dataPacket[], uint8 command, uint8 cmd
 
         nDataReady = 0;
         if (eventDataReady) {   // re-enable the trigger after event data has been output
+            int readoutTime = time() - timeStamp;
+            readTimeAvg += readoutTime;
+            nReadAvg++;
             if (!endingRun) {
                 triggerEnable(true);
                 TOFenable(true);
@@ -2506,6 +2590,8 @@ void interpretCommand(uint8 tofConfig[]) {
                     tofA.filled[j] = false;
                     tofB.filled[j] = false;
                 }
+                readTimeAvg = 0;
+                nReadAvg = 0;
                 clkCnt = 0;
                 tofA.ptr = 0;
                 tofB.ptr = 0;
@@ -2713,20 +2799,48 @@ void interpretCommand(uint8 tofConfig[]) {
                 nDataReady = 2*(1+numTkrBrds);
                 break;
             case '\x4A': // Set up and initiate tracker rate monitoring
-                if (cmdData[0] == 0 && cmdData[1] == 0) {
+                if (cmdData[0] == 0 || cmdData[1] == 0) {
                     monitorTkrRates = false;
+                    waitingTkrRateCnt = false;
                     break;
                 }
-                tkrMonitorInterval = cmdData[0]*200;  // Number of seconds between monitoring events
-                if (tkrMonitorInterval < 250) tkrMonitorInterval = 250;
-                tkrMonitorNumAvg = cmdData[1];
+                tkrMonitorInterval = cmdData[0];  // Number of seconds between monitoring events
+                if (tkrMonitorInterval < 2) tkrMonitorInterval = 2;
+                tkrMonitorNumAvg = cmdData[1];    // Number of successive measurements to average over
                 nTkrMonSamples = 0;
                 for (int brd=0; brd<numTkrBrds; ++brd) {
                     tkrMonitorSums[brd] = 0;
                 }
-                tkrClkAtStart = clkCnt;        
+                tkrClkAtStart = time();        
                 monitorTkrRates = true;
-                waitingRateCnt = false;
+                waitingTkrRateCnt = false;
+                break;
+            case '\x52': // Set up and initiate PMT singles rate monitoring
+                if (cmdData[0] == 0 || cmdData[1] == 0) {
+                    monitorPmtRates = false;
+                    waitingPmtRateCnt = false;
+                    break;
+                }
+                pmtDeltaT = cmdData[0];             // Number of seconds over which to accumulate counts
+                pmtMonitorInterval = cmdData[1];    // Interval in seconds between successive measurements
+                if (pmtMonitorInterval < 2*pmtDeltaT) pmtMonitorInterval = 2*pmtDeltaT;
+                InterruptState = CyEnterCriticalSection();
+                pmtClkCntStart = time();
+                for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
+                    pmtCntInit[cntr] = getChCount(cntr);
+                }
+                CyExitCriticalSection(InterruptState);
+                monitorPmtRates = true;
+                waitingPmtRateCnt = true;
+                break;
+            case '\x53':  // Get the PMT counter rates
+                dataOut[0] = byte16(pmtMonitorTime,0);
+                dataOut[1] = byte16(pmtMonitorTime,1);
+                for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
+                    dataOut[2+2*cntr] = byte16(pmtMonitorSums[cntr], 0);
+                    dataOut[2+2*cntr+1] = byte16(pmtMonitorSums[cntr], 1);
+                }
+                nDataReady = 12;
                 break;
             case '\x4B': // Set the delay between trigger and peak detector readout
                 if (cmdData[0] < 127) setPeakDetResetWait(cmdData[0]);
@@ -2769,7 +2883,18 @@ void interpretCommand(uint8 tofConfig[]) {
                 break;
             case '\x4F': // Set the tracker trigger delay for PMT triggers
                 Count7_TrgDly_WritePeriod(cmdData[0]);
-                break;                
+                break;
+            case '\x51': // Get the average event readout time
+                nDataReady = 8;
+                dataOut[0] = byte32(readTimeAvg, 0);
+                dataOut[1] = byte32(readTimeAvg, 1);
+                dataOut[2] = byte32(readTimeAvg, 2);
+                dataOut[3] = byte32(readTimeAvg, 3);
+                dataOut[4] = byte32(nReadAvg, 0);
+                dataOut[5] = byte32(nReadAvg, 1);
+                dataOut[6] = byte32(nReadAvg, 2);
+                dataOut[7] = byte32(nReadAvg, 3);
+                break;
         } // End of command switch
     } else { // Log an error if the user is sending spurious commands while the trigger is enabled
         addError(ERR_CMD_IGNORE, command, 0);
@@ -2850,6 +2975,8 @@ int main(void)
     tkrData.nTkrBoards = 0;
     tofA.ptr = 0;
     tofB.ptr = 0;
+    readTimeAvg = 0;
+    nReadAvg = 0;
     outputTOF = false;
     for (int i=0; i<TOFMAX_EVT; ++i) {
         tofA.filled[i] = false;
@@ -3139,7 +3266,7 @@ int main(void)
     eventDataReady = false;
     awaitingCommand = true;   
     
-    time_t cmdStartTime = time();
+    uint32 cmdStartTime = time();
     cmdDone = false;        // If true, A command has been fully received but data have not yet been sent back
     set_SPI_SSN(0, true);   // Deselect all SPI slaves
     triggerEnable(false);
@@ -3149,7 +3276,10 @@ int main(void)
         tkrMonitorRates[brd] = 0;
     }   
     monitorTkrRates = false;
-    waitingRateCnt = false;
+    waitingTkrRateCnt = false;
+    
+    monitorPmtRates = false;
+    waitingPmtRateCnt = false;
     
     ADCsoftReset=true;
     
@@ -3163,9 +3293,14 @@ int main(void)
             USBUART_CDC_Init();
         }
 
-        //Tracker rate monitoring
+        // Tracker rate monitoring
         if (monitorTkrRates) {
-            tkrRateMonitor(&waitingRateCnt);
+            tkrRateMonitor(&waitingTkrRateCnt);
+        }
+        
+        // PMT singles rate monitoring
+        if (monitorPmtRates) {
+            pmtRateMonitor(&waitingPmtRateCnt);
         }
         
         if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 

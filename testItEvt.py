@@ -16,14 +16,15 @@ print("Entering testItEvt.py")
 
 address = 8   # Address of the event PSOC
 
-getEvtVersionNumber()
-
 print("Set up the Event PSOC to send its output over the UART")
 setOutputMode("UART")
+time.sleep(0.1)
 
 #LED2("on", address)
 #time.sleep(1)
 #LED2("off", address)
+
+getEvtVersionNumber()
 
 setInternalRTC(address)
 #time.sleep(1)
@@ -35,7 +36,7 @@ for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, address)) + " counts.")
 
 pmtThr = 8
-ch5Thresh = 90
+ch5Thresh = 40
 pmtThresh = [pmtThr,pmtThr,pmtThr,pmtThr,ch5Thresh]
 for chan in range(1,5):
     setPmtDAC(chan, pmtThresh[chan-1], addrEvnt)
@@ -52,6 +53,10 @@ readTofConfig()
 
 #ret = ser.read()
 #print(ret)
+
+startPmtRateMonitor(4, 10)
+time.sleep(5)
+getPmtRates()
 
 readErrors(address)
 tkrSetCRCcheck("yes")
@@ -243,8 +248,9 @@ print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 readErrors(address)
 #sys.exit("abort")
-ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 5, True, False, True)
-
+ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 30, True, False, True)
+getRunCounters()
+getAvgReadoutTime()
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
 print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
@@ -257,6 +263,8 @@ for ch in range(5):
     cnt = getEndOfRunChannelCount(ch+1)
     print("Counter for channel " + chName[ch] + " = " + str(cnt))
 
+stopPmtRateMonitor()
+getPmtRates()
 stopTkrRateMonitor()
 getTkrLyrRates()
 

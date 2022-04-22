@@ -93,7 +93,7 @@ def getData(address):
     ret = b''
     debug = False
     if debug: print("Entering getData for PSOC address " + str(address))
-    for i in range(36):  #Sometimes the read starts with blank bytes, so search for the header
+    for i in range(360):  #Sometimes the read starts with blank bytes, so search for the header
         ret = ser.read(1)
         if debug: print("getData: i= " + str(i) + " ret = " + str(ret))
         if ret == b'\xDC': break
@@ -171,6 +171,56 @@ def getShortData(address, nBytes):
         print("getShortData: invalid trailer returned: " + str(trailer))
     return ret
 
+def startPmtRateMonitor(deltaT, Interval):
+    print("startPmtRateMonitor: integration time = " + str(deltaT) + " seconds. Interval between measurements = " + str(Interval) + " seconds")
+    cmdHeader = mkCmdHdr(2, 0x52, addrEvnt)
+    ser.write(cmdHeader)    
+    data1 = mkDataByte(deltaT, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(Interval, addrEvnt, 2)
+    ser.write(data2)  
+    
+def stopPmtRateMonitor():
+    print("stopPmtRateMonitor: stopping the monitoring of PMT rates.")
+    cmdHeader = mkCmdHdr(2, 0x52, addrEvnt)
+    ser.write(cmdHeader)    
+    data1 = mkDataByte(0, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0, addrEvnt, 2)
+    ser.write(data2)
+
+def getPmtRates():
+    print("getPmtRates: getting singles rates from all PMTs")
+    cmdHeader = mkCmdHdr(0, 0x53, addrEvnt)
+    ser.write(cmdHeader)    
+    time.sleep(0.2)
+    cmd,cmdData,dataBytes = getData(addrEvnt)
+    timeInterval = float(bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1]))/200.
+    print("getPmtRates: time interval = " + str(timeInterval) + " seconds")
+    if timeInterval == 0:
+        print("getPmtRates error: zero time interval")
+        return
+    Ch1 = bytes2int(dataBytes[2])*256 + bytes2int(dataBytes[3])
+    Ch2 = bytes2int(dataBytes[4])*256 + bytes2int(dataBytes[5])
+    Ch3 = bytes2int(dataBytes[6])*256 + bytes2int(dataBytes[7])
+    Ch4 = bytes2int(dataBytes[8])*256 + bytes2int(dataBytes[9])
+    Ch5 = bytes2int(dataBytes[10])*256 + bytes2int(dataBytes[11])
+    #print("getPmtRates: Ch1= " + str(Ch1))
+    #print("getPmtRates: Ch2= " + str(Ch2))
+    #print("getPmtRates: Ch3= " + str(Ch3))
+    #print("getPmtRates: Ch4= " + str(Ch4))
+    #print("getPmtRates: Ch5= " + str(Ch5))
+    Guard = float(Ch1)/(timeInterval)
+    T3 = float(Ch2)/(timeInterval)
+    T1 = float(Ch3)/(timeInterval)
+    T4 = float(Ch4)/(timeInterval)
+    T2 = float(Ch5)/(timeInterval)
+    print("Guard rate = " + str(Guard) + " Hz")
+    print("T3 rate =    " + str(T3) + " Hz")
+    print("T1 rate =    " + str(T1) + " Hz")
+    print("T4 rate =    " + str(T4) + " Hz")
+    print("T2 rate =    " + str(T2) + " Hz")
+
 def startTkrRateMonitor(interval, numAvg):
     print("startTkrRateMonitor: interval = " + str(interval) + " seconds. Average " + str(numAvg) + " 1-second measurements")
     cmdHeader = mkCmdHdr(2, 0x4a, addrEvnt)
@@ -190,7 +240,7 @@ def stopTkrRateMonitor():
     ser.write(data2)
     
 def getTkrLyrRates():
-    print("getTkrLyrRates: getting trigger rates from all tracker layers")
+    print("getTkrLyrRates: getting rates from all tracker layers")
     cmdHeader = mkCmdHdr(0, 0x49, addrEvnt)
     ser.write(cmdHeader)    
     time.sleep(2)
@@ -1053,7 +1103,7 @@ def getEndOfRunChannelCount(channel):
     data1 = mkDataByte(channel, PSOCaddress, 1)
     ser.write(data1)
     cmd,cmdData,dataBytes = getData(addrEvnt)
-	# The hardware counter period is 255, not 256, hence the 255 in this expression
+    # The hardware counter period is 255, not 256, hence the 255 in this expression
     count = (bytes2int(dataBytes[0])*16777216 + bytes2int(dataBytes[1])*65536 + bytes2int(dataBytes[2])*256 + bytes2int(dataBytes[3]))*255 + bytes2int(dataBytes[4])
     return count
 
@@ -1632,7 +1682,7 @@ def tkrConfigReset(FPGA):
 def tkrSetPMTtrgDly(value):
     print("tkrSetPMTtrgDly: setting to trigger delay to " + str(value))
     cmdHeader = mkCmdHdr(1, 0x4F, addrEvnt)
-    ser.write(cmdHeader)	
+    ser.write(cmdHeader)    
     data1 = mkDataByte(value, addrEvnt, 1)
     ser.write(data1)    
 
@@ -1640,7 +1690,7 @@ def tkrSetPMTtrgDly(value):
 def tkrSetASICmask(FPGA, maskUp, maskDn):
     address = addrEvnt
     print("Setting the ASIC mask of Tracker FPGA " + str(FPGA) + " to " 
-	                              + str(maskUp) + str(maskDn))
+                                  + str(maskUp) + str(maskDn))
     cmdHeader = mkCmdHdr(6, 0x10, address)
     ser.write(cmdHeader)
     data1 = mkDataByte(FPGA, address, 1)
@@ -1793,6 +1843,19 @@ def getEvtVersionNumber():
     command,cmdDataBytes,dataBytes = getData(addrEvnt)
     #print("getEvtVersionNumber: command = " + str(binascii.hexlify(command)))
     print("getEvtVersionNumber: Event PSOC code Version Number = " + str(bytes2int(dataBytes[0])) + "." + str(bytes2int(dataBytes[1])))
+
+def getAvgReadoutTime():
+    cmdHeader = mkCmdHdr(0, 0x51, addrEvnt)
+    ser.write(cmdHeader)
+    time.sleep(0.2)
+    command,cmdDataBytes,dataBytes = getData(addrEvnt)
+    totalTime = bytes2int(dataBytes[0])*16777216+bytes2int(dataBytes[1])*65536+bytes2int(dataBytes[2])*256+bytes2int(dataBytes[3])
+    numReadouts = bytes2int(dataBytes[4])*16777216+bytes2int(dataBytes[5])*65536+bytes2int(dataBytes[6])*256+bytes2int(dataBytes[7])
+    if numReadouts == 0: 
+        print("getAvgReadoutTime: no events were read out")
+        return
+    avgTime = 5.0*float(totalTime)/float(numReadouts)
+    print("getAvgReadoutTime: for " + str(numReadouts) + " events, the average readout time is " + str(avgTime) + " ms")
 
 def getRunCounters():
     cmdHeader = mkCmdHdr(0, 0x50, addrEvnt)
