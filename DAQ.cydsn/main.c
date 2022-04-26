@@ -20,7 +20,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 20
-#define MINOR_VERSION 4
+#define MINOR_VERSION 5
 // V20: UART command stream is searched for <CR><LF> in order to identify command strings
 
 /*=========================================================================
@@ -850,7 +850,7 @@ void logicReset() {
 uint8 tkr_getByte(uint32 startTime, uint8 flag) {
     while (tkrReadPtr < 0) {  // No buffered data are available
         uint32 timeElapsed = time() - startTime;
-        if (timeElapsed > TKR_READ_TIMEOUT) {
+        if (timeElapsed > TKR_READ_TIMEOUT || (startTime > time() && time() > TKR_READ_TIMEOUT)) {
             uint8 temp = (uint8)(timeElapsed & 0x000000ff);
             addError(ERR_TKR_READ_TIMEOUT, temp, flag);
             return 0x00;
@@ -1625,7 +1625,7 @@ void makeEvent() {
     if (!(evtStatus & 0x08)) {
         int InterruptState = CyEnterCriticalSection(); 
         while (!(Status_Reg_M_Read() & 0x08)) {   // Wait here for the done signal
-            if (time() - t0 > 20) {
+            if (time() - t0 > 10 || t0 > time()) {
                 addError(ERR_PMT_DAQ_TIMEOUT, (uint8)cntGO, (uint8)(cntGO >> 8));
                 break;
             }
