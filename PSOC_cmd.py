@@ -1967,18 +1967,28 @@ def tkrSetDAC(FPGA, chip, select, value, range):
     print("tkrSetDAC: setting " + select + " DAC in chip " + str(chip) + " of FPGA " + str(FPGA) + " to " + str(value) + " and range " + range)
     if range == "high": value = value + 128
     address = addrEvnt
-    cmdHeader = mkCmdHdr(5, 0x10, address)
-    ser.write(cmdHeader)
-    data1 = mkDataByte(FPGA, address, 1)
-    ser.write(data1)
-    data2 = mkDataByte(cmdCode, address, 2)
-    ser.write(data2)
-    data3 = mkDataByte(0x02, address, 3)
-    ser.write(data3)
-    data4 = mkDataByte(chip, address, 4)
-    ser.write(data4)
-    data5 = mkDataByte(value, address, 5)
-    ser.write(data5)
+    if select == "threshold":
+        cmdHeader = mkCmdHdr(3, 0x55, address)
+        ser.write(cmdHeader)
+        data1 = mkDataByte(FPGA, address, 1)
+        ser.write(data1)
+        data2 = mkDataByte(chip, address, 2)
+        ser.write(data2)
+        data3 = mkDataByte(value, address, 3)
+        ser.write(data3)
+    else:
+        cmdHeader = mkCmdHdr(5, 0x10, address)
+        ser.write(cmdHeader)
+        data1 = mkDataByte(FPGA, address, 1)
+        ser.write(data1)
+        data2 = mkDataByte(cmdCode, address, 2)
+        ser.write(data2)
+        data3 = mkDataByte(0x02, address, 3)
+        ser.write(data3)
+        data4 = mkDataByte(chip, address, 4)
+        ser.write(data4)
+        data5 = mkDataByte(value, address, 5)
+        ser.write(data5)
     time.sleep(0.1)
     echo = getTkrEcho()
     if (bytes2int(echo) != cmdCode):
@@ -2353,6 +2363,14 @@ def tkrGetASICconfig(FPGA, chipAddress, quiet=False):
     else:
         print("tkrGetASICconfig: the polarity setting is negative.")
 
+def configureTkrASICs(numTKRlyrs):
+    print("configureTkrASICs: configure the tracker ASICs for " + str(numTKRlyrs) + " layers, after turning on the ASIC power.")
+    cmdHeader = mkCmdHdr(1, 0x56, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(numTKRlyrs, addrEvnt, 1)
+    ser.write(data1)
+    time.sleep(0.1)
+
 def tkrLoadASICconfig(FPGA, address, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust):
     gain = gain & 0x01
     oneShot = oneShot & 0x01
@@ -2373,37 +2391,22 @@ def tkrLoadASICconfig(FPGA, address, oneShot, gain, shaping, bufSpeed, trigDelay
     print("tkrLoadASICconfig: for FPGA " + str(FPGA) + ", chip " + str(address) + 
              ", the register setting will be " + str(hex(all)))
     PSOCaddress = addrEvnt
-    cmdHeader = mkCmdHdr(7, 0x10, PSOCaddress)
+    cmdHeader = mkCmdHdr(3, 0x54, PSOCaddress)
     #print("tkrLoadASICconfig: cmdHeader = " + str(cmdHeader))
     ser.write(cmdHeader)
-    data1 = mkDataByte(FPGA, PSOCaddress, 1)
-    #print("tkrLoadASICconfig: data1 = " +str(data1))
-    ser.write(data1)
-    data2 = mkDataByte(0x12, PSOCaddress, 2)
-    #print("tkrLoadASICconfig: data2 = " +str(data2))
-    ser.write(data2)
-    data3 = mkDataByte(0x04, PSOCaddress, 3)
-    #print("tkrLoadASICconfig: data3 = " +str(data3))
-    ser.write(data3)
-    data4 = mkDataByte(address, PSOCaddress, 4)
-    #print("tkrLoadASICconfig: data4 = " +str(data4))
-    ser.write(data4)    
     byte5 = (nib6<<4) | nib5
-    data5 = mkDataByte(byte5, PSOCaddress, 5)
-    #print("tkrLoadASICconfig: byte5 = " +str(hex(byte5)))
-    ser.write(data5)
+    data1 = mkDataByte(byte5, PSOCaddress, 1)
+    ser.write(data1)
     byte6 = (nib4<<4) | nib3
-    data6 = mkDataByte(byte6, PSOCaddress, 6)
-    #print("tkrLoadASICconfig: byte6 = " +str(hex(byte6)))
-    ser.write(data6)
+    data2 = mkDataByte(byte6, PSOCaddress, 2)
+    ser.write(data2)
     byte7 = (nib2<<4) | nib1
-    data7 = mkDataByte(byte7, PSOCaddress, 7)
-    #print("tkrLoadASICconfig: byte7 = " +str(hex(byte7)))
-    ser.write(data7)
+    data3 = mkDataByte(byte7, PSOCaddress, 3)
+    ser.write(data3)
     time.sleep(0.1)
     echo = getTkrEcho()
     if (str(binascii.hexlify(echo)) != "b'12'"):
-        print("tkrLoadASICconfig: incorrect echo received (" + str(binascii.hexlify(echo)) + "), should be b'0f'")  
+        print("tkrLoadASICconfig: incorrect echo received (" + str(binascii.hexlify(echo)) + "), should be b'12'")  
         
 # Re-initialize the event PSOC SPI interface        
 def initSPI():

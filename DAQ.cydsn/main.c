@@ -19,8 +19,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define MAJOR_VERSION 20
-#define MINOR_VERSION 5
+#define MAJOR_VERSION 21
+#define MINOR_VERSION 1
 // V20: UART command stream is searched for <CR><LF> in order to identify command strings
 
 /*=========================================================================
@@ -78,6 +78,17 @@
  *    bits {7:6} and {1:0} give the data-byte number, 1 through 15
  *    Subsequent commands must wait until after the correct number of data bytes has arrived
  *
+ *    EEPROM Map:
+ *    Each ASIC has 20 bytes of configuration to be saved
+ *    - 8 bytes of data mask
+ *    - 8 bytes of trigger mask
+ *    - 3 byes of configuration, but this must always be the same for all ASICs
+ *    - 1 byte of threshold DAC
+ *    There are 9*12=108 ASICs, for 1633 bytes total
+ *    The first 108 rows have the data mask followed by the trigger mask, for each ASIC, numbered by chip and then by board
+ *    The next 9 rows have the threshold DAC settings, one row for each board, with only the first 12 bytes used per row
+ *    The last row has the 3 bytes of the configuration register setting
+ *    The board numbering is alphabetical: ABCDEFGHI = 012345678
  */
 
 /* I2C mode */
@@ -109,6 +120,7 @@
 #define TKRHOUSE_LEN 70
 #define TOFMAX_EVT 64
 #define MAX_TKR_BOARDS 8
+#define MAX_TKR_ASIC 12
 #define MAX_TKR_BOARD_BYTES 203     // Two leading bytes, 12 bit header, 12 chips * (12-bit header and up to 10 12-bit cluster words) + CRC byte
 #define USBFS_DEVICE (0u)
 #define BUFFER_LEN  32u
@@ -180,6 +192,14 @@
 #define TKR_ECHO_DATA 0xF1
 
 #define TKR_READ_TIMEOUT 31u    // Length of time to wait on the tracker before giving a time-out error
+
+int boardMAP[MAX_TKR_BOARDS];   // Map from tracker board FPGA address to hardware board number (alphabetical)
+struct TkrConfig {
+    uint8 trgMask[8];
+    uint8 datMask[8];
+    uint8 threshDAC;
+} tkrConfig[MAX_TKR_BOARDS][MAX_TKR_ASIC];
+uint8 tkrConfigReg[3];
 
 uint8 nDataReady;                 // Number of bytes of data ready to send out to the Main PSOC or PC
 uint8 dataOut[MAX_DATA_OUT];      // Buffer for output data
@@ -1264,6 +1284,65 @@ uint8 minTdif(uint8 t1, uint8 t2) {
     else return tD2;
 }
 
+// Configure all of the ASICs according to the settings stored in RAM
+void configureASICs() {
+    uint8 dataBytes[9];
+    
+    // First load all of the configuration registers with one wild-card call
+    tkrCmdCode = 0x12;
+    dataBytes[0] = 0x1F;
+    dataBytes[1] = tkrConfigReg[0];
+    dataBytes[2] = tkrConfigReg[1];
+    dataBytes[3] = tkrConfigReg[2];
+    sendTrackerCmd(0x00, tkrCmdCode, 4, dataBytes, TKR_ECHO_DATA);
+    
+    // Next load all of the threshold DACs individually
+    tkrCmdCode = 0x11;
+    for (uint8 tkrFPGAaddress=0; tkrFPGAaddress<numTkrBrds; ++tkrFPGAaddress) {
+        for (uint8 chipAddress=0; chipAddress<MAX_TKR_ASIC; ++chipAddress) {
+            dataBytes[0] = chipAddress;
+            dataBytes[1] = tkrConfig[tkrFPGAaddress][chipAddress].threshDAC;
+            sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 2, dataBytes, TKR_ECHO_DATA);
+        }
+    }
+    
+    // Next load all of the data masks. Use wild card for the chip if all channels are to be enabled, as is the usual case
+    tkrCmdCode = 0x13;
+    for (uint8 tkrFPGAaddress=0; tkrFPGAaddress<numTkrBrds; ++tkrFPGAaddress) {
+        dataBytes[0] = 0x1F;
+        for (int i=0; i<8; ++i) dataBytes[1+i] = 0xFF;
+        sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
+        for (uint8 chipAddress=0; chipAddress<MAX_TKR_ASIC; ++chipAddress) {
+            dataBytes[0] = chipAddress;
+            bool allOn = true;
+            for (int i=0; i<8; ++i) {
+                dataBytes[1+i] = tkrConfig[tkrFPGAaddress][chipAddress].datMask[i];
+                if (dataBytes[1+i] != 0xFF) allOn = false;
+            }
+            if (!allOn) sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
+        }
+    }    
+    
+    // Next load all of the trigger masks. Use a wild card to cover the typical case of all enabled.
+    tkrCmdCode = 0x14;
+    for (uint8 tkrFPGAaddress=0; tkrFPGAaddress<numTkrBrds; ++tkrFPGAaddress) {
+        dataBytes[0] = 0x1F;
+        for (int i=0; i<8; ++i) dataBytes[1+i] = 0xFF;
+        sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
+        for (uint8 chipAddress=0; chipAddress<MAX_TKR_ASIC; ++chipAddress) {
+            dataBytes[0] = chipAddress;
+            bool allOn = true;
+            for (int i=0; i<8; ++i) {
+                dataBytes[1+i] = tkrConfig[tkrFPGAaddress][chipAddress].trgMask[i];
+                if (dataBytes[1+i] != 0xFF) allOn = false;
+            }
+            if (!allOn) sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
+        }
+    }    
+    
+    nDataReady = 0;   // To prevent the last echo from being sent out from the PSOC
+}
+
 // Reset all of the Tracker board FPGAs (soft reset) and the ASICs (soft reset)
 // Unfortunately, the ASIC reset destroys the configuration, so the ASICs have to be reconfigured.
 void resetAllTrackerLogic() {
@@ -1271,11 +1350,10 @@ void resetAllTrackerLogic() {
         tkrCmdCode = 0x04;
         sendSimpleTrackerCmd(brd, tkrCmdCode);         
     }
-    tkrCmdCode = 0x0C;
-    cmdData[0] = 0x1F;
+    tkrCmdCode = 0x0C;   // ASIC soft reset
+    cmdData[0] = 0x1F;   // All chips selected
     sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);
-    nDataReady = 0;
-    CyDelay(1);  // Give it time to reset the ASIC defaults in all chips.
+    configureASICs();
 }
 
 // Read the ASIC configuration register 
@@ -2134,7 +2212,8 @@ void interpretCommand(uint8 tofConfig[]) {
     uint16 thrSetting;
     uint8 nCalClusters;
     uint8 fpgaAddress;
-    uint8 chipAddress;
+    uint8 chipAddress;   
+    uint8 dataBytes[9];
     int rc;
     // If the trigger is enabled, ignore all commands besides disable trigger, 
     // so that nothing can interrupt the readout.
@@ -2250,9 +2329,40 @@ void interpretCommand(uint8 tofConfig[]) {
                 if (tkrCmdCode == 0x52 || tkrCmdCode == 0x53) break;
                 sendTrackerCmd(cmdData[0], cmdData[1], cmdData[2], &cmdData[3], 0);
                 break;
+            case '\x54':        // Load the ASIC configuration registers
+                tkrCmdCode = 0x12;
+                chipAddress = 0x1F;
+                fpgaAddress = 0x00;
+                tkrConfigReg[0] = cmdData[0];
+                tkrConfigReg[1] = cmdData[1];
+                tkrConfigReg[2] = cmdData[2];
+                dataBytes[0] = chipAddress;
+                dataBytes[1] = tkrConfigReg[0];
+                dataBytes[2] = tkrConfigReg[1];
+                dataBytes[3] = tkrConfigReg[2];
+                sendTrackerCmd(fpgaAddress, tkrCmdCode, 4, dataBytes, TKR_ECHO_DATA);
+                break;
+            case '\x55':        // Load an ASIC threshold DAC
+                tkrCmdCode = 0x11;
+                fpgaAddress = cmdData[0] & 0x07;
+                chipAddress = cmdData[1] & 0x1F;
+                if (chipAddress != 0x1F && chipAddress >= MAX_TKR_ASIC) break;
+                thrSetting = cmdData[2];
+                if (chipAddress == 0x1F) {  // Update the default settings in the PSOC RAM
+                    for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
+                        tkrConfig[fpgaAddress][chip].threshDAC = thrSetting;
+                    }
+                } else {
+                    tkrConfig[fpgaAddress][chipAddress].threshDAC = thrSetting;
+                }
+                dataBytes[0] = chipAddress;
+                dataBytes[1] = thrSetting;
+                sendTrackerCmd(fpgaAddress, tkrCmdCode, 2, dataBytes, TKR_ECHO_DATA);
+                break;
             case '\x41':        // Load a tracker ASIC mask register
                 fpgaAddress = cmdData[0] & 0x07;
                 chipAddress = cmdData[1] & 0x1F;
+                if (chipAddress != 0x1F && chipAddress >= MAX_TKR_ASIC) break;
                 uint8 regType = cmdData[2] & 0x03;
                 uint8 fill = cmdData[3] & 0x01;
                 nCalClusters = cmdData[4];
@@ -2265,7 +2375,7 @@ void interpretCommand(uint8 tofConfig[]) {
                     uint64 mask0 = 0;
                     int nch = cmdData[ptr];
                     int ch0 = 64-nch-cmdData[ptr+1];
-                    mask0 = mask0 +1;
+                    mask0 = mask0 + 1;
                     for (int j=1; j<nch; ++j) {
                         mask0 = mask0<<1;
                         mask0 = mask0 + 1;
@@ -2275,19 +2385,45 @@ void interpretCommand(uint8 tofConfig[]) {
                     ptr = ptr + 2;
                 }
                 if (fill) mask = ~mask;
-                if (regType == CALMASK) tkrCmdCode = '\x15';
-                else if (regType == DATAMASK) tkrCmdCode = '\x13';
-                else tkrCmdCode = '\x14';
-
-                uint8 bytesToSend[8];
-                for (int j=0; j<8; ++j) {
-                    bytesToSend[j] = (uint8)(mask & 0x00000000000000FF);
+                uint8 maskBytes[8];
+                for (int j=0; j<8; ++j) {  // The TKR FPGA expects the most significant byte first
+                    maskBytes[7-j] = (uint8)(mask & 0x00000000000000FF);
                     mask = mask>>8;
                 }
-                uint8 dataBytes[9];
+                // Select the correct tracker command code for the register load and update the defaults in the PSOC RAM
+                if (regType == CALMASK) { 
+                    tkrCmdCode = '\x15';
+                } else if (regType == DATAMASK) {
+                    tkrCmdCode = '\x13';
+                    if (chipAddress == 0x1F) {
+                        for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
+                            for (int i=0; i<8; ++i) {
+                                tkrConfig[fpgaAddress][chip].datMask[i] = maskBytes[i];
+                            }
+                        }
+                    } else {
+                        for (int i=0; i<8; ++i) {
+                            tkrConfig[fpgaAddress][chipAddress].datMask[i] = maskBytes[i];
+                        }
+                    }
+                } else {
+                    tkrCmdCode = '\x14';
+                    if (chipAddress == 0x1F) {
+                        for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
+                            for (int i=0; i<8; ++i) {
+                                tkrConfig[fpgaAddress][chip].trgMask[i] = maskBytes[i];
+                            }
+                        }
+                    } else {
+                        for (int i=0; i<8; ++i) {
+                            tkrConfig[fpgaAddress][chipAddress].trgMask[i] = maskBytes[i];
+                        }
+                    }
+                }
+
                 dataBytes[0] = chipAddress;
-                for (int j=7; j>=0; --j) {
-                    dataBytes[8-j] = bytesToSend[j];
+                for (int j=0; j<8; ++j) {
+                    dataBytes[1+j] = maskBytes[j];
                 }
                 sendTrackerCmd(fpgaAddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
                 break;
@@ -2895,6 +3031,17 @@ void interpretCommand(uint8 tofConfig[]) {
                 dataOut[6] = byte32(nReadAvg, 2);
                 dataOut[7] = byte32(nReadAvg, 3);
                 break;
+            case '\x56': // Set up the Tracker ASIC configuration. Set up the # of layers and power on the ASICs first!
+                if (cmdData[0] > 8 || cmdData[0] == 0) {
+                    addError(ERR_TKR_NUM_BOARDS, cmdData[0], 0x77);
+                    break;
+                }
+                tkrCmdCode = 0x0F;
+                sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);     // Set the number of layers to read out
+                tkrCmdCode = 0x08;
+                sendTrackerCmd(0x00, tkrCmdCode, 0, cmdData, TKR_ECHO_DATA);     // Turn on the ASIC power
+                configureASICs();
+                break;
         } // End of command switch
     } else { // Log an error if the user is sending spurious commands while the trigger is enabled
         addError(ERR_CMD_IGNORE, command, 0);
@@ -2969,6 +3116,31 @@ void tofDMAsetup() {
 // Event PSOC main program
 int main(void)
 {     
+    // Load the default Tracker configuration from EEPROM
+    EEPROM_1_Start();
+    boardMAP[0] = 2;   // C
+    boardMAP[1] = 7;   // H
+    boardMAP[2] = 1;   // B
+    boardMAP[3] = 0;   // A
+    boardMAP[4] = 6;   // G
+    boardMAP[5] = 5;   // F
+    boardMAP[6] = 8;   // I
+    boardMAP[7] = 4;   // E
+    uint16 base = MAX_TKR_BOARDS*MAX_TKR_ASIC*SIZEOF_EEPROM_ROW;
+    for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
+        int brd = boardMAP[lyr];
+        for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
+            for (int i=0; i<8; ++i) {
+                tkrConfig[lyr][chip].datMask[i] = EEPROM_1_ReadByte((brd*MAX_TKR_ASIC + chip)*SIZEOF_EEPROM_ROW + i);
+                tkrConfig[lyr][chip].trgMask[i] = EEPROM_1_ReadByte((brd*MAX_TKR_ASIC + chip)*SIZEOF_EEPROM_ROW + 8 + i);              
+            }
+            tkrConfig[lyr][chip].threshDAC = EEPROM_1_ReadByte(base + brd*SIZEOF_EEPROM_ROW + chip);
+        }
+    }
+    for (int i=0; i<3; ++i) {
+        tkrConfigReg[i] = EEPROM_1_ReadByte(base + MAX_TKR_BOARDS*SIZEOF_EEPROM_ROW + i);
+    }
+    
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  
     doCRCcheck = false;
     triggered = false;
