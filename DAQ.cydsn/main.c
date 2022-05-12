@@ -11,6 +11,10 @@
  * Code to run in the Event PSOC on the AESOP-Lite DAQ board.
  * This version uses the external SAR ADCs on the V3 board.
  *
+ * V20.0: UART command stream is searched for <CR><LF> in order to identify command strings.
+ * V21.1: Event PSOC does the tracker initialization, instead of the tracker FPGA Verilog code doing it.
+ * V22.1: Added BUSY signal from the Main PSOC to prevent sending of events when it isn't ready. That also keeps the trigger suspended.
+ * V22.2: Corrected error in the tracker initialization code.
  * ========================================
  */
 #include "project.h"
@@ -19,9 +23,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define MAJOR_VERSION 21
-#define MINOR_VERSION 1
-// V20: UART command stream is searched for <CR><LF> in order to identify command strings
+#define MAJOR_VERSION 22
+#define MINOR_VERSION 2
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -120,6 +123,7 @@
 #define TKRHOUSE_LEN 70
 #define TOFMAX_EVT 64
 #define MAX_TKR_BOARDS 8
+#define MAX_TKR_PCB 9     // Including the spare board
 #define MAX_TKR_ASIC 12
 #define MAX_TKR_BOARD_BYTES 203     // Two leading bytes, 12 bit header, 12 chips * (12-bit header and up to 10 12-bit cluster words) + CRC byte
 #define USBFS_DEVICE (0u)
@@ -626,167 +630,7 @@ void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
     if (clearBuffer) SPIM_ClearTxBuffer();
 }
 
-// Control of the SPI slave address. The slave select is active low.
-// **** Note that the TOF chip needs to go high, for reset, before each SPI transaction. ****
-/*void set_SPI_SSN(uint8 SSN, bool clearBuffer) {
-    int InterruptState;
-    //Managing multiple SPI Busses with different handling -B
-    if( SSN_None == SSN)// Deactivate all. SSN = 0 (or 5) to deselect all slaves
-    {
-        while (!(SPIM_ReadTxStatus() & SPIM_STS_SPI_IDLE)); //waits for finish of transaction TODO move ouside of function to the few if (s where it is important -B
-        int InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-        Pin_SSN_A0_Write(0); //Zero this address bit, consider using CyPins_ClearPin -B
-        Pin_SSN_A1_Write(0); //Zero this address bit
-        Pin_SSN_A2_Write(0); //Zero this address bit
-        Pin_SSN_Main_Write(1); //High to deselect Main PSOC , consider using CyPins_SetPin -B
-        CyExitCriticalSection(InterruptState);
-    }
-    else if ( SSN_Main == SSN)// Select Main
-    {
-        if (1 == Pin_SSN_A1_Read()) //check if TOF is active since it is currently shared SPI with Main -B
-        {
-            if ((0 == Pin_SSN_A0_Read()) && (0 == Pin_SSN_A2_Read())) //check if TOF is active -B
-            {
-                while (!(SPIM_ReadTxStatus() & SPIM_STS_SPI_IDLE)); //waits for finish of transaction TODO move ouside of function to the few cases where it is important -B
-                InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-                Pin_SSN_A1_Write(0); //Zero this address bit
-                CyExitCriticalSection(InterruptState);
-            }
-        }
-        InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-        Pin_SSN_Main_Write(0); //Low to select Main PSOC -B
-        CyExitCriticalSection(InterruptState);
-    }
-    else if ( SSN_TOF == SSN)// Select TOF
-    {
-        if (0 == Pin_SSN_Main_Read()) //check if Main is active since it is currently shared SPI with TOF -B
-        {
-            while (!(SPIM_ReadTxStatus() & SPIM_STS_SPI_IDLE)); //waits for finish of transaction TODO move ouside of function to the few cases where it is important -B
-            InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-            Pin_SSN_Main_Write(1); //High to deselect Main PSOC -B
-            CyExitCriticalSection(InterruptState);
-        }
-        if (1 == Pin_SSN_A1_Read()) //check if TOF is active since it needs to be deselected for each transaction -B
-        {
-            if ((0 == Pin_SSN_A0_Read()) && (0 == Pin_SSN_A2_Read())) //check if TOF is active -B
-            {
-                while (!(SPIM_ReadTxStatus() & SPIM_STS_SPI_IDLE)); //waits for finish of transaction TODO move ouside of function to the few cases where it is important -B
-                InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-                Pin_SSN_A1_Write(0); //Zero this address bit
-                CyExitCriticalSection(InterruptState);
-            }
-        }
-        InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-        Pin_SSN_A0_Write(0); //Write this address bit
-        Pin_SSN_A1_Write(1); //Write this address bit
-        Pin_SSN_A2_Write(0); //Write this address bit
-        Pin_SSN_Main_Write(1); //Low to select Main PSOC -B
-        CyExitCriticalSection(InterruptState);
-    }
-    else if ( (SSN_CH1 == SSN) || (SSN_CH2 == SSN) || (SSN_CH3 == SSN) || (SSN_CH4 == SSN) || (SSN_CH5 == SSN) )// Select ADCs
-    {
-        if (1 == Pin_SSN_A1_Read()) //check if TOF is active since it is currently shared Selects with ADC -B
-        {
-            if ((0 == Pin_SSN_A0_Read()) && (0 == Pin_SSN_A2_Read())) //check if TOF is active -B
-            {
-                while (!(SPIM_ReadTxStatus() & SPIM_STS_SPI_IDLE)); //waits for finish of transaction TODO move ouside of function to the few cases where it is important -B
-                InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-                Pin_SSN_A1_Write(0); //Zero this address bit
-                CyExitCriticalSection(InterruptState);
-            }
-        }
-        uint8 bA0 = SSN & 1; //bitmask and shift address bit -B
-        uint8 bA1 = (SSN & 2) >> 1; //bitmask and shift address bit -B
-        uint8 bA2 = (SSN & 4) >> 2; //bitmask and shift address bit -B
-        InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-        Pin_SSN_A0_Write(bA0); //Write this address bit -B
-        Pin_SSN_A1_Write(bA1); //Write this address bit
-        Pin_SSN_A2_Write(bA2); //Write this address bit
-        CyExitCriticalSection(InterruptState);
-    }
-    else
-    {
-        //TODO handle this as a coding error if desired
-    }
-                
-    if (clearBuffer) SPIM_ClearTxBuffer();
-}
-*/
-
-/*******************************************************************************
-* Function Name: grayCodeSSADC
-****************************************************************************//**
-*
-* \brief Cycles to next ADC select state in Gray code order  
-*
-* The 5 ADCs are addressed in a particular Gray code order on the decoder   
-* They are cycled through by changing 3 address, 1 change pin per state.  
-* States 1-5 select the corresponding ADC. 0 is an intial all clear pin state. 
-* 6 is a single pin transitioan at the end 
-* Table (State int allowed by address bits)
-* S 210
-* 0 000
-* 1 001
-* 2 011
-* 3 111
-* 4 110
-* 5 100
-* 6 000
-*
-* \param stateSSADC
-*  Desired address selsct state. Needs to be run sequentially. 
-*
-* \return 
-*  None 
-*
-*******************************************************************************/
-/*
-void grayCodeSSADC( uint8 stateSSADC )
-{
-    int InterruptState; //If avoid calling this in ISR can comment this out -B
-    switch (stateSSADC) //desired state
-    {
-        case 1://1st ADC -B
-            InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-            Pin_SSN_A0_Write(1); //Write this address bit
-            CyExitCriticalSection(InterruptState);
-            break;
-        case 2: //2nd ADC -B
-            InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-            Pin_SSN_A1_Write(1); //Write this address bit
-            CyExitCriticalSection(InterruptState);
-            break;
-        case 3: //3rd ADC -B
-            InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-            Pin_SSN_A2_Write(1); //Write this address bit
-            CyExitCriticalSection(InterruptState);
-            break;
-        case 4: //4th ADC -B
-            InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-            Pin_SSN_A0_Write(0); //Write this address bit
-            CyExitCriticalSection(InterruptState);
-            break;
-        case 5: //5th ADC -B
-            InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-            Pin_SSN_A1_Write(0); //Write this address bit
-            CyExitCriticalSection(InterruptState);
-            break;
-        case 6: //Finish cycle with deselect all -B
-            InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-            Pin_SSN_A2_Write(0); //Write this address bit
-            CyExitCriticalSection(InterruptState);
-            break;
-        default: //0 and other states clear all address pins as an inital state from unkown state -B
-            InterruptState = CyEnterCriticalSection(); //If avoid calling this in ISR can comment this out
-            Pin_SSN_A0_Write(0); //Write this address bit
-            Pin_SSN_A1_Write(0); //Write this address bit
-            Pin_SSN_A2_Write(0); //Write this address bit
-            CyExitCriticalSection(InterruptState);
-            break;
-    }   
-}
-*/
-
+// Enable or disable the TOF acquisition
 void TOFenable(bool enable) {
     if (TOF_DMA) {
         if (enable) {
@@ -865,7 +709,7 @@ void logicReset() {
     LED2_OnOff(false);
 }
 
-// Get a byte of data from the Tracker UART, with a time-out in case nothing is coming.
+// Get a byte of data from the Tracker UART software buffer, with a time-out in case nothing is coming.
 // The second argument (flag) helps to identify where a timeout error originated.
 uint8 tkr_getByte(uint32 startTime, uint8 flag) {
     while (tkrReadPtr < 0) {  // No buffered data are available
@@ -929,6 +773,7 @@ int getTrackerBoardTriggerData(uint8 FPGA) {
     return rc;
 }
 
+// Build a dummy tracker empty hit list for use when the hardware fails to send a good hit list
 void makeDummyHitList(int brd, uint8 code) {
     tkrData.boardHits[brd].nBytes = 5;                      // Minimum length of a board hit list
     tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
@@ -943,6 +788,7 @@ void makeDummyHitList(int brd, uint8 code) {
     }
 }
 
+// Build an entire dummy tracker emtpy event
 void makeDummyTkrEvent(uint8 trgCnt, uint8 cmdCnt, uint8 trgPtr, uint8 code) {
     tkrData.triggerCount = trgCnt;  // Send back a packet that won't cause a crash down the road
     tkrData.cmdCount = cmdCnt;
@@ -1173,7 +1019,7 @@ int getTrackerData(uint8 idExpected) {
     return rc;
 }
 
-// Turn on the LED on the double RJ45 connector to indicate Tracker communication. It will turn off automatically
+// Turn on the LED on the double RJ45 connector to indicate Tracker communication. It will turn off only
 // after a delay long enough to make it visible.
 void tkrLED(bool on) {
     isr_timer_Disable();
@@ -2101,6 +1947,9 @@ uint8 sendEvtData(uint8 nDataBytes, uint8 dataPacket[], uint8 command, uint8 cmd
     uint8 Padding[2];
     Padding[0] = '\x01';
     Padding[1] = '\x02';
+    if (outputMode != USBUART_OUTPUT) {
+        if (Pin_Busy_Read()) return 0;   // Don't send anything if the Main PSOC isn't ready to receive
+    }
     if (nDataReady > 0) {    // Send out a command echo only if there are also data to send
         dataLED(true);
         if (!cmdDone) { // Output is event data, not a command response
@@ -2511,7 +2360,6 @@ void interpretCommand(uint8 tofConfig[]) {
             case '\x0E':        // Read the TOF IC configuration 
                 set_SPI_SSN(SSN_TOF, true);
                 SPIM_ClearRxBuffer();
-                Control_Reg_ScopeTrg_Write(0x01);
                 writeTOFdata(readConfig);
                 readTOFdata();
                 for (int bt=0; bt<TOFSIZE; ++bt) {
@@ -3118,7 +2966,7 @@ int main(void)
 {     
     // Load the default Tracker configuration from EEPROM
     EEPROM_1_Start();
-    boardMAP[0] = 2;   // C
+    boardMAP[0] = 6; //2;   // C
     boardMAP[1] = 7;   // H
     boardMAP[2] = 1;   // B
     boardMAP[3] = 0;   // A
@@ -3126,7 +2974,11 @@ int main(void)
     boardMAP[5] = 5;   // F
     boardMAP[6] = 8;   // I
     boardMAP[7] = 4;   // E
-    uint16 base = MAX_TKR_BOARDS*MAX_TKR_ASIC*SIZEOF_EEPROM_ROW;
+    uint16 base = MAX_TKR_PCB*MAX_TKR_ASIC*SIZEOF_EEPROM_ROW;
+    int base2 = 8*12*16;
+    if (base != base2) {
+        base2 = base2 + 999;
+    }
     for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
         int brd = boardMAP[lyr];
         for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
@@ -3138,7 +2990,7 @@ int main(void)
         }
     }
     for (int i=0; i<3; ++i) {
-        tkrConfigReg[i] = EEPROM_1_ReadByte(base + MAX_TKR_BOARDS*SIZEOF_EEPROM_ROW + i);
+        tkrConfigReg[i] = EEPROM_1_ReadByte(base + MAX_TKR_PCB*SIZEOF_EEPROM_ROW + i);
     }
     
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  

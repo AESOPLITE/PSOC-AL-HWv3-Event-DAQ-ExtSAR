@@ -71,11 +71,6 @@ if nBoards > 0:
 
     tkrConfigReset(0x00)
 
-    tkrSetNumLyrs(nBoards)
-    for brd in boards:
-        print("The number of tracker readout layers is " + str(bytes2int(tkrGetNumLyrs(brd))) + " for board " + str(brd))
-        print("The tracker FPGA firmware code version is " + str(tkrGetCodeVersion(0)) + " for board " + str(brd))
-
     tkrAsicPowerOn()
     #time.sleep(1)
 
@@ -83,8 +78,14 @@ if nBoards > 0:
 
     if asicReset: tkrAsicSoftReset(0x1F)
 
-    #calibrateAllFPGAinputTiming()
-        
+    #tkrSetNumLyrs(1)
+    configureTkrASICs(nBoards)
+    for brd in boards:
+        print("The number of tracker readout layers is " + str(bytes2int(tkrGetNumLyrs(brd))) + " for board " + str(brd))
+        print("The tracker FPGA firmware code version is " + str(tkrGetCodeVersion(0)) + " for board " + str(brd))
+ 
+    calibrateAllFPGAinputTiming()
+ 
     tkrTrigEndStat(0, 1)
     tkrSetDualTrig(0, 0)
 
@@ -100,13 +101,9 @@ if nBoards > 0:
     trigWindow = 1
     ioCurrent = 2
     maxClust = 10
-    chips = [0,1,2,3,6,7,8,9,10,11]
-    #tkrSetASICmask(0,0x0F,0xFF)
+    chips = [0,1,2,3,4,5,6,7,8,9,10,11]
     for brd in boards:
-        #for chip in chips: tkrGetASICconfig(brd,chip)
-        tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
-        #tkrAsicSoftReset(0x1F)
-        tkrGetASICconfig(brd, 0)
+        #tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
         for chip in chips: tkrGetASICconfig(brd, chip)
 
     for brd in boards:
@@ -140,30 +137,24 @@ if nBoards > 0:
     for brd in boards:
         tkrSetCalMask(brd, 31, hitList)
         time.sleep(0.1)
-        tkrGetCalMask(brd, 0)
         for chip in chips: tkrGetCalMask(brd, chip)
 
-        tkrSetDataMask(brd, 31, "mask", hitList)
-        time.sleep(0.1)
-        tkrGetDataMask(brd, 0)
+        #tkrSetDataMask(brd, 31, "mask", hitList)
+        #time.sleep(0.1)
         for chip in chips: tkrGetDataMask(brd, chip)
 
-        tkrSetTriggerMask(brd, 31, "mask", hitList)
-        time.sleep(0.1)
-        tkrGetTriggerMask(brd, 0)
+        #tkrSetTriggerMask(brd, 31, "mask", hitList)
+        #time.sleep(0.1)
         for chip in chips: tkrGetTriggerMask(brd, chip)
 
         tkrSetDAC(brd, 31, "calibration", 20 , "high")
-        tkrGetDAC(brd, 0, "calibration")
         for chip in chips: tkrGetDAC(brd, chip, "calibration")
 
-        tkrSetDAC(brd, 31, "threshold", 30 , "low")
-        tkrGetDAC(brd, 0, "threshold")
+        #tkrSetDAC(brd, 31, "threshold", 30 , "low")
         for chip in chips: tkrGetDAC(brd, chip, "threshold")
 
-        tkrSetDataMask(brd, 31, "unmask", [])
-        time.sleep(0.1)
-        tkrGetDataMask(brd, 0)
+        #tkrSetDataMask(brd, 31, "unmask", [])
+        #time.sleep(0.1)
         for chip in chips: tkrGetDataMask(brd, chip)
 
     if len(boards) == 1:
@@ -188,7 +179,7 @@ if nBoards > 0:
 #    logicReset(addrEvnt)
 #    time.sleep(0.3)
 
-#sys.exit("abort")
+sys.exit("abort")
 
 TOFselectDAQ(address,"DMA")
 
