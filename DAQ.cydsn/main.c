@@ -15,6 +15,7 @@
  * V21.1: Event PSOC does the tracker initialization, instead of the tracker FPGA Verilog code doing it.
  * V22.1: Added BUSY signal from the Main PSOC to prevent sending of events when it isn't ready. That also keeps the trigger suspended.
  * V22.2: Corrected error in the tracker initialization code.
+ * V22.3: Added SR FF to widen the positive pulse to tracker trigger pin.
  * ========================================
  */
 #include "project.h"
@@ -24,7 +25,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 22
-#define MINOR_VERSION 2
+#define MINOR_VERSION 3
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
