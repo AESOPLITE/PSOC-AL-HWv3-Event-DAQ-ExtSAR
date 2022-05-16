@@ -15,7 +15,8 @@
  * V21.1: Event PSOC does the tracker initialization, instead of the tracker FPGA Verilog code doing it.
  * V22.1: Added BUSY signal from the Main PSOC to prevent sending of events when it isn't ready. That also keeps the trigger suspended.
  * V22.2: Corrected error in the tracker initialization code.
- * V22.3: Added SR FF to widen the positive pulse to tracker trigger pin.
+ * V22.3: Added SR FF to widen the positive pulse to tracker trigger pin. -Brian
+ * V22.4: Modified the reset DUe to ERR_GET_TKR_EVENT. Cleared the Buffer and didn't reset the ASICS -Brian
  * ========================================
  */
 #include "project.h"
@@ -25,7 +26,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 22
-#define MINOR_VERSION 3
+#define MINOR_VERSION 4
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -1624,7 +1625,10 @@ void makeEvent() {
             addErrorOnce(ERR_GET_TKR_EVENT, rc, byte32(cntGO, 0));
             UART_TKR_ClearTxBuffer();
             UART_TKR_ClearRxBuffer(); 
-            resetAllTrackerLogic();
+            isr_TKR_Disable();
+            tkrReadPtr = -1; //Clear the tracker buffer -Brian
+            isr_TKR_Enable();
+            //resetAllTrackerLogic(); // DEBUG commented out -Brian
             makeDummyTkrEvent(0, 0, 0, 6);
             numTkrResets++;
         }
