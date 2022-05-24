@@ -1390,6 +1390,7 @@
       <Data key="1b4f90b9-959a-4bf3-bcde-75882f6f5c16" value="Pin_RstPk" />
       <Data key="1e347577-a1c7-4ea5-bc5e-2454b3934e9f" value="Pin_1Hz" />
       <Data key="02a72007-f93c-483d-9ddf-b9b8e85adaf4" value="Pin_29" />
+      <Data key="2b4a11f1-a4a3-4f16-b5fa-002ebcfd8012" value="Pin_db2" />
       <Data key="2b269b96-47a4-4e9a-937e-76d4080bb211/8b77a6c4-10a0-4390-971c-672353e2a49c" value="USBUART_Dm" />
       <Data key="2b269b96-47a4-4e9a-937e-76d4080bb211/618a72fc-5ddd-4df5-958f-a3d55102db42" value="USBUART_Dp" />
       <Data key="2ca125fb-ce52-4ec1-819e-6944e01e217b" value="Pin_T4pre" />
@@ -1494,6 +1495,7 @@
       <Data key="ed9a7150-bd9d-4052-9317-e551f1e82e4f" value="Pin_FrameB" />
       <Data key="ed092b9b-d398-4703-be89-cebf998501f6" value="Tx_1" />
       <Data key="ed1241ac-5d45-4299-8ad2-3735a856276f" value="Pin_34" />
+      <Data key="ef8440cf-1b32-4f1f-b8af-5e6006b948d0" value="Pin_db1" />
     </Group>
   </Group>
   <Group key="EEPROM">
@@ -4618,6 +4620,11 @@
         <Data key="Port Format" value="2,5" />
       </Group>
     </Group>
+    <Group key="2b4a11f1-a4a3-4f16-b5fa-002ebcfd8012">
+      <Group key="0">
+        <Data key="Port Format" value="4,1" />
+      </Group>
+    </Group>
     <Group key="2b269b96-47a4-4e9a-937e-76d4080bb211/8b77a6c4-10a0-4390-971c-672353e2a49c">
       <Group key="0">
         <Data key="Port Format" value="15,7" />
@@ -5056,6 +5063,11 @@
     <Group key="ed1241ac-5d45-4299-8ad2-3735a856276f">
       <Group key="0">
         <Data key="Port Format" value="0,1" />
+      </Group>
+    </Group>
+    <Group key="ef8440cf-1b32-4f1f-b8af-5e6006b948d0">
+      <Group key="0">
+        <Data key="Port Format" value="4,0" />
       </Group>
     </Group>
     <Group key="UnAssigned Pins">

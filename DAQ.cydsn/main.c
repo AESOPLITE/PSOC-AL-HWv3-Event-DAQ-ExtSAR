@@ -15,6 +15,9 @@
  * V21.1: Event PSOC does the tracker initialization, instead of the tracker FPGA Verilog code doing it.
  * V22.1: Added BUSY signal from the Main PSOC to prevent sending of events when it isn't ready. That also keeps the trigger suspended.
  * V22.2: Corrected error in the tracker initialization code.
+ * V22.3: Simplified the trigger logic in the schematic
+ * V23.1: Fixed trigger logic; implemented housekeeping packets; only reset ASICs if there are errors. Added command to modify the
+*         tracker layer configuration. Added command to increase all tracker thresholds by an additive amount.
  * ========================================
  */
 #include "project.h"
@@ -23,8 +26,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define MAJOR_VERSION 22
-#define MINOR_VERSION 2
+#define MAJOR_VERSION 23
+#define MINOR_VERSION 1
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -144,7 +147,7 @@
 #define ERR_TOF_DAC_LOAD 3u
 #define ERR_TOF_DAC_READ 4u
 #define ERR_CMD_IGNORE 5u
-#define ERR_TKR_READ_TIMEOUT 12u
+#define ERR_TKR_READ_TIMEOUT 6u
 #define ERR_TKR_BAD_ID 7u
 #define ERR_TKR_BAD_LENGTH 8u
 #define ERR_TKR_BAD_ECHO 9u
@@ -181,6 +184,8 @@
 #define ERR_BAD_CRC 40u
 #define ERR_FIFO_OVERFLOW 41u
 #define ERR_GET_TKR_EVENT 42u
+#define BAD_DIE_TEMP 43u
+#define ASIC_CONFIG_WRONG_LEN 44u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -196,6 +201,26 @@
 #define TKR_ECHO_DATA 0xF1
 
 #define TKR_READ_TIMEOUT 31u    // Length of time to wait on the tracker before giving a time-out error
+
+// Some variables defined only for housekeeping information
+#define HOUSESIZE 72u
+#define TKRHOUSESIZE 110u
+bool doHouseKeeping;           // Set true to send housekeeping packets out
+bool doTkrHouseKeeping;
+uint8 houseKeepPeriod;         // Number of seconds between housekeeping packets 
+uint8 tkrHouseKeepPeriod;      // Number of minutes between tracker housekeeping packets   
+uint16 lastCommand;
+uint16 commandCount;
+uint8 nBadCmd;
+uint16 lastTkrCmdCount;
+uint8 nTkrDatErr;
+uint8 nTkrTimeOut;
+uint32 nChipsHit[MAX_TKR_BOARDS];
+uint32 nTkrTrg1, nTkrTrg2;
+uint16 nIgnoredCmd;
+uint32 cntSeconds;
+uint8 houseKeepPeriod;
+bool houseKeepingDue, tkrHouseKeepingDue;
 
 int boardMAP[MAX_TKR_BOARDS];   // Map from tracker board FPGA address to hardware board number (alphabetical)
 struct TkrConfig {
@@ -238,6 +263,13 @@ const uint8 I2C_Address_RTC = '\x6F';
 const uint8 I2C_Address_DAC_Ch5 = '\x0E';
 const uint8 I2C_Address_TOF_DAC1 = '\x0C';
 const uint8 I2C_Address_TOF_DAC2 = '\x0F';
+const uint8 I2C_Address_TKR_Temp = '\x48';
+const uint8 I2C_Address_TKR_D12 = '\x40';
+const uint8 I2C_Address_TKR_D25 = '\x41';
+const uint8 I2C_Address_TKR_D33 = '\x42';
+const uint8 I2C_Address_TKR_A21 = '\x44';
+const uint8 I2C_Address_TKR_A33 = '\x43';
+const uint8 I2C_Address_TKR_bias = '\x46';
 
 uint8 thrDACsettings[] = {THRDEF, THRDEF, THRDEF, THRDEF};
 
@@ -293,7 +325,7 @@ bool waitingTkrRateCnt;
 
 #define MAX_PMT_CHANNELS 5
 // Data structures for PMT singles rate monitoring
-uint8  pmtDeltaT = 10;       // rough time in seconds for each rate measurement
+uint8  pmtDeltaT;            // rough time in seconds for each rate measurement
 uint32 pmtMonitorInterval;   // time interval in seconds between successive rate accumulations
 uint32 pmtCntInit[MAX_PMT_CHANNELS];
 uint16 pmtMonitorSums[MAX_PMT_CHANNELS];
@@ -403,13 +435,26 @@ uint8 cmdData[MAX_CMD_DATA];       // Data sent with commands
 uint8 nDataBytes = 0;              // Number of data bytes in the current command
 bool cmdDone;
 
-// Function to turn the LED on/off furthest from the SMA inputs, for debugging
-void LED2_OnOff(bool on) {
-    if (on) {
-        Pin_LED2_Write(1);
-    } else {
-        Pin_LED2_Write(0);
-    }
+// Extract 1 of 4 bytes from a 32-bit word and return it as uint8
+uint8 byte32(uint32 word, int byte) {
+    const uint32 mask[4] = {0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF};
+    return (uint8)((word & mask[byte]) >> (3-byte)*8);
+}
+// Extract 1 of 2 bytes from a 16-bit word and return it as uint8
+uint8 byte16(uint16 word, int byte) {
+    const uint16 mask[2] = {0xFF00, 0x00FF};
+    return (uint8)((word & mask[byte]) >> (1-byte)*8);
+}
+
+// Function to pack the time and date information into 4 bytes
+uint32 packTime() {
+    uint32 timeWord = ((uint32)timeDate->Year - 2000) << 26;
+    timeWord = timeWord | ((uint32)timeDate->Month << 22);
+    timeWord = timeWord | ((uint32)timeDate->DayOfMonth << 17);
+    timeWord = timeWord | ((uint32)timeDate->Hour << 12);
+    timeWord = timeWord | ((uint32)timeDate->Min << 6);
+    timeWord = timeWord | ((uint32)timeDate->Sec); 
+    return timeWord;
 }
 
 // Errors are logged into this structure pending reading them out by command
@@ -429,7 +474,6 @@ void addError(uint8 code, uint8 val0, uint8 val1) {
         nErrors++;
     }
 }
-
 // Function used to log an internal error only if that error is not already logged
 void addErrorOnce(uint8 code, uint8 val0, uint8 val1) {
     for (int i=0; i<nErrors; ++i) {
@@ -440,6 +484,575 @@ void addErrorOnce(uint8 code, uint8 val0, uint8 val1) {
         errors[nErrors].value0 = val0;
         errors[nErrors].value1 = val1;
         nErrors++;
+    }
+}
+
+// Get a byte of data from the Tracker UART software buffer, with a time-out in case nothing is coming.
+// The second argument (flag) helps to identify where a timeout error originated.
+uint8 tkr_getByte(uint32 startTime, uint8 flag) {
+    while (tkrReadPtr < 0) {  // No buffered data are available
+        uint32 timeElapsed = time() - startTime;
+        if (timeElapsed > TKR_READ_TIMEOUT || (startTime > time() && time() > TKR_READ_TIMEOUT)) {
+            uint8 temp = (uint8)(timeElapsed & 0x000000ff);
+            addError(ERR_TKR_READ_TIMEOUT, temp, flag);
+            if (nTkrTimeOut < 0xFF) nTkrTimeOut++;
+            return 0x00;
+        }
+    }
+    isr_TKR_Disable();
+    uint8 theByte = tkrBuf[tkrReadPtr];
+    if (tkrReadPtr < MAX_TKR-1) tkrReadPtr++;
+    else tkrReadPtr = 0;
+    if (tkrReadPtr == tkrWritePtr) tkrReadPtr = -1;  // All buffered data have been read
+    isr_TKR_Enable();
+    return theByte;
+}
+
+// Function to receive i2c register data from the Tracker
+void getTKRi2cData() {
+    uint32 startTime = time();
+    nDataReady = 4;
+    dataOut[0] = tkr_getByte(startTime, 0x89);
+    dataOut[1] = tkr_getByte(startTime, 0x90);
+    dataOut[2] = tkr_getByte(startTime, 0x91);
+    dataOut[3] = tkr_getByte(startTime, 0x92);
+}
+
+// Build a dummy tracker empty hit list for use when the hardware fails to send a good hit list
+void makeDummyHitList(int brd, uint8 code) {
+    if (tkrData.boardHits[brd].hitList != NULL) free(tkrData.boardHits[brd].hitList);
+    tkrData.boardHits[brd].nBytes = 5;                      // Minimum length of a board hit list
+    tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
+    if (tkrData.boardHits[brd].hitList != NULL) {
+        tkrData.boardHits[brd].hitList[0] = 0xE7;           // Identifier
+        tkrData.boardHits[brd].hitList[1] = brd;            // Layer number
+        tkrData.boardHits[brd].hitList[2] = 1;              // Trigger count set to 0, error bit set to 1
+        tkrData.boardHits[brd].hitList[3] = (0x0F & code);  // 4 bits for 0 ASICs plus 4 bits of the CRC
+        tkrData.boardHits[brd].hitList[4] = 0x30;           // 2 bits of the CRC set to 0, then 11, then 0 filler nibble
+                                                            // The CRC is wrong and will get flagged. The code that
+                                                            // replaced the CRC indicates why this dummy was inserted.
+    }
+}
+
+// Build an entire dummy tracker emtpy event
+void makeDummyTkrEvent(uint8 trgCnt, uint8 cmdCnt, uint8 trgPtr, uint8 code) {
+    tkrData.triggerCount = trgCnt;  // Send back a packet that won't cause a crash down the road
+    tkrData.cmdCount = cmdCnt;
+    tkrData.trgPattern = trgPtr;
+    tkrData.nTkrBoards = numTkrBrds;
+    for (int brd=0; brd<numTkrBrds; ++brd) {  // Make a default empty ASIC hit list
+        makeDummyHitList(brd, code);
+    }
+}
+
+// Function to receive ASIC register data from the Tracker
+void getASICdata() {
+    uint32 startTime = time();
+    nDataReady = tkr_getByte(startTime, 69);
+    dataOut[0] = nDataReady;
+    nDataReady++;
+    for (int i=1; i<nDataReady; ++i) {
+        startTime = time();
+        dataOut[i] = tkr_getByte(startTime, 70+i);
+    }
+}
+
+// Function to get a full data packet from the Tracker.
+int getTrackerData(uint8 idExpected) {
+    int rc = 0;
+    uint32 startTime = time();
+    uint8 len = tkr_getByte(startTime, 1);
+    uint8 IDcode = tkr_getByte(startTime, 2);
+    if (IDcode != idExpected) {
+        if (idExpected != 0) {
+            addError(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
+            if (idExpected == TKR_EVT_DATA) {
+                makeDummyTkrEvent(0, 0, 0, 0);
+                if (nTkrDatErr < 0xFF) nTkrDatErr++;
+                return 54;
+            }
+        } else {
+            if (IDcode == TKR_EVT_DATA) {
+                addError(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
+                if (nTkrDatErr < 0xFF) nTkrDatErr++;
+                return 53;
+            }
+        }
+    }
+    if (IDcode == TKR_EVT_DATA) {         // Event data
+        if (len != 5) {           // Formal check
+            addError(ERR_TKR_BAD_LENGTH, IDcode, len);
+            makeDummyTkrEvent(0, 0, 0, 1);  // Send back a packet that won't cause a crash down the road
+            if (nTkrDatErr < 0xFF) nTkrDatErr++;
+            return 55;
+        }
+        uint8 trgCnt = ((uint16)tkr_getByte(startTime, 3) & 0x00FF) << 8;
+        trgCnt = trgCnt | ((uint16)tkr_getByte(startTime, 4) & 0x00FF);
+        uint8 cmdCnt = tkr_getByte(startTime, 5);
+        uint8 nBoards = tkr_getByte(startTime, 6);
+        uint8 trgPtr = nBoards & 0xC0;
+        nBoards = nBoards & 0x3F;
+        if (nBoards != numTkrBrds) {
+            addError(ERR_TKR_NUM_BOARDS, nBoards, tkrData.trgPattern);
+            makeDummyTkrEvent(trgCnt, cmdCnt, trgPtr, 2);
+            if (nTkrDatErr < 0xFF) nTkrDatErr++;
+            return 56;
+        }
+        tkrData.triggerCount = trgCnt;
+        tkrData.cmdCount = cmdCnt;
+        tkrData.trgPattern = trgPtr;
+        tkrData.nTkrBoards = nBoards;
+        for (int brd=0; brd < nBoards; ++brd) {
+            uint8 nBrdBytes = tkr_getByte(startTime, 7);  // Length of the hit list, in bytes
+            if (nBrdBytes < 4) {
+                addError(ERR_TKR_BOARD_SHORT, nBrdBytes, brd);
+                if (nTkrDatErr < 0xFF) nTkrDatErr++;
+                makeDummyHitList(brd, 4);
+                rc = 57;
+                continue;
+            }
+            uint8 IDbyte = tkr_getByte(startTime, 8);     // Hit list identifier, should always be 11100111
+            if (IDbyte != 0xE7) {
+                addError(ERR_TKR_BAD_BOARD_ID, IDbyte, brd);
+                makeDummyHitList(brd, 5);
+                if (nTkrDatErr < 0xFF) nTkrDatErr++;
+                rc = 58;
+                continue;
+            }
+            uint8 byte2 = tkr_getByte(startTime, 9);        // Byte containing the board address
+            if (byte2 > 8) {   // Formal check. Note that 8 denotes the master board, which really is layer 0
+                addError(ERR_TKR_BAD_FPGA, byte2, brd);
+                if (nTkrDatErr < 0xFF) nTkrDatErr++;
+                rc = 59;
+            }
+            uint8 lyr = 0x7 & byte2;  // Get rid of the master bit, leaving just the layer number
+            // Require the boards to be set up to read out in order:
+            if (lyr != brd) {
+                addError(ERR_TKR_LYR_ORDER, lyr, brd);
+                if (nTkrDatErr < 0xFF) nTkrDatErr++;
+                lyr = brd;
+            }
+            if (nBrdBytes > MAX_TKR_BOARD_BYTES) {    // This really should never happen, due to ASIC 10-hit limit
+                tkrData.boardHits[lyr].nBytes = MAX_TKR_BOARD_BYTES;
+                addError(ERR_TKR_TOO_BIG, nBrdBytes, lyr);
+                if (nTkrDatErr < 0xFF) nTkrDatErr++;
+            } else {
+                tkrData.boardHits[lyr].nBytes = nBrdBytes;
+            }
+            if (tkrData.boardHits[lyr].hitList != NULL) free(tkrData.boardHits[lyr].hitList);
+            tkrData.boardHits[lyr].hitList = (uint8*) malloc(nBrdBytes);
+            if (tkrData.boardHits[lyr].hitList == NULL) {   // Ran out of heap memory. Not good!
+                addError(ERR_HEAP_NO_MEMORY, nBrdBytes-2, brd);
+                if (nTkrDatErr < 0xFF) nTkrDatErr++;
+                rc = 60;
+                continue;
+            }
+            tkrData.boardHits[lyr].hitList[0] = IDbyte;
+            tkrData.boardHits[lyr].hitList[1] = byte2;
+            for (int i=2; i<nBrdBytes; ++i) {
+                uint8 theByte = tkr_getByte(startTime, 10);
+                if (i<MAX_TKR_BOARD_BYTES) {       
+                    tkrData.boardHits[lyr].hitList[i] = theByte;
+                }
+            }
+        }
+    } else if (IDcode == TKR_HOUSE_DATA) {  // Housekeeping data
+        uint8 nData = tkr_getByte(startTime, 11);
+        if (len != nData+6) {   // Formal check
+            addError(ERR_TKR_BAD_NDATA, len, nData);
+            if (nTkrDatErr < 0xFF) nTkrDatErr++;
+            nData = len - 6;
+        }
+        tkrCmdCount = (uint16)(tkr_getByte(startTime, 12)) << 8;
+        tkrCmdCount = (tkrCmdCount & 0xFF00) | (uint16)tkr_getByte(startTime, 13);
+        tkrHouseKeepingFPGA = tkr_getByte(startTime, 14);
+        if (tkrHouseKeepingFPGA > 8) {   // Formal check
+            addError(ERR_TKR_BAD_FPGA, tkrCmdCode, tkrHouseKeepingFPGA);
+            if (nTkrDatErr < 0xFF) nTkrDatErr++;
+        }
+        uint8 tkrHouseKeepingCMD = tkr_getByte(startTime, 15);
+        if (tkrHouseKeepingCMD != tkrCmdCode) {   // Formal check
+            addError(ERR_TKR_BAD_ECHO, tkrHouseKeepingCMD, tkrCmdCode);
+            if (nTkrDatErr < 0xFF) nTkrDatErr++;
+        }
+        nTkrHouseKeeping = 0;      // Overwrite any old data, even if it was never sent out.
+        for (int i=0; i<nData; ++i) {
+            uint8 tmpData = tkr_getByte(startTime, 16);
+            if (i < TKRHOUSE_LEN) {
+                tkrHouseKeeping[i] = tmpData;
+                nTkrHouseKeeping++;
+            }
+        }
+        if (tkrHouseKeeping[nTkrHouseKeeping-1] != 0x0F) {    // Formal check
+            addError(ERR_TKR_BAD_TRAILER, tkrCmdCode, tkrHouseKeeping[nTkrHouseKeeping-1]); 
+            if (nTkrDatErr < 0xFF) nTkrDatErr++;
+        }
+    } else if (IDcode == TKR_ECHO_DATA) {  // Command Echo
+        if (len != 4) {           // Formal check
+            addError(ERR_TKR_BAD_LENGTH, IDcode, len);
+            if (nTkrDatErr < 0xFF) nTkrDatErr++;
+        }
+        nDataReady = 3;
+        dataOut[0] = tkr_getByte(startTime, 17);
+        tkrCmdCount = (uint16)dataOut[0] << 8;
+        dataOut[1] = tkr_getByte(startTime, 18);
+        tkrCmdCount = (tkrCmdCount & 0xFF00) | dataOut[1];
+        uint8 tkrCmdCodeEcho = tkr_getByte(startTime, 19);
+        dataOut[2] = tkrCmdCodeEcho;
+        if (tkrCmdCode != tkrCmdCodeEcho) {
+            addError(ERR_TKR_BAD_ECHO, tkrCmdCodeEcho, tkrCmdCode);
+            if (nTkrDatErr < 0xFF) nTkrDatErr++;
+            rc = 1;
+        }
+    } else {  // WTF?!?   Not sure what to do with this situation, besides flag it.
+        if (nTkrDatErr < 0xFF) nTkrDatErr++;
+        if (nErrors < MXERR) {
+            addError(ERR_TKR_BAD_ID, IDcode, len);
+        }
+        // Wait a short time on the UART and then empty the Tracker buffer
+        // and send out whatever crap came in, hoping for the best. . .
+        CyDelay(2);
+        isr_TKR_Disable();
+        nDataReady = 0;
+        while (tkrReadPtr != tkrWritePtr) {
+            dataOut[nDataReady++] = tkrBuf[tkrReadPtr];            
+            if (tkrReadPtr < MAX_TKR-1) tkrReadPtr++;
+            else tkrReadPtr = 0;
+        }  
+        tkrReadPtr = -1;
+        tkrWritePtr = 0;
+        isr_TKR_Enable(); 
+        rc = 5;
+    }
+    return rc;
+}
+
+// Turn on the LED on the double RJ45 connector to indicate Tracker communication. It will turn off only
+// after a delay long enough to make it visible.
+void tkrLED(bool on) {
+    isr_timer_Disable();
+    if (on) {
+        Pin_LED_TKR_Write(1);
+    } else {
+        Timer_1_Start();
+    }
+    isr_timer_Enable();
+}
+
+void clearTkrFIFO() {
+    uint8 intState = isr_TKR_GetState();
+    if (intState) isr_TKR_Disable();
+    tkrReadPtr = -1;
+    tkrWritePtr = 0;
+    CyDelayUs(80);
+    while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
+        UART_TKR_ClearRxBuffer();
+        CyDelayUs(80);   // Delay long enough for another byte to come in at 115200 baud
+    }
+    if (intState) isr_TKR_Enable();
+}
+
+// Send a command to the tracker via the UART
+uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rtnType) {
+    tkrLED(true);
+    tkrCmdCode = code;
+    clearTkrFIFO();
+    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
+        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x2F);
+        UART_TKR_ClearTxBuffer();
+    }
+    if (tkrCmdCode == 0x45 && cmdData[0] == 0x48) {
+        clearTkrFIFO();
+    }
+    UART_TKR_WriteTxData(FPGA);         // FPGA address
+    UART_TKR_WriteTxData(tkrCmdCode);   // Command code
+    UART_TKR_WriteTxData(nData);        // Number of data bytes
+    for (int i=0; i<nData; ++i) {
+        if (i>0) {
+            while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
+        }
+        UART_TKR_WriteTxData(cmdData[i]);
+    }
+ 
+    if (tkrCmdCode == 0x0F) {     // This command sets the number of tracker boards in the readout.
+        numTkrBrds = cmdData[0];  // Make sure the PSOC also knows how many boards are used.
+    }
+    
+    // Wait around for up to a second for all the data to transmit
+    uint32 tStart = time();
+    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {                                           
+        if (time() - tStart > 200) {
+            addError(ERR_TX_FAILED, tkrCmdCode, 0);
+            tkrLED(false);
+            break;
+        }
+    }        
+    uint8 rc = 0;
+    if (tkrCmdCode == 0x67 || tkrCmdCode == 0x6C) {
+        tkrLED(false);
+        rc = 0xCF;
+        return rc;    // These commands have no echo or data to return
+    }
+    // Now look for the bytes coming back from the Tracker.
+    if (tkrCmdCode >= 0x20 && tkrCmdCode <= 0x25) {
+        getASICdata();
+    } else if (tkrCmdCode == 0x46) {
+        getTKRi2cData();
+    } else {
+        rc = getTrackerData(rtnType);
+        if (rc != 0) {
+            addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
+        }
+    }
+    tkrLED(false);
+    return rc;
+}
+
+// Function to send a command to the tracker that has no data bytes sent or returned
+void sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
+    tkrLED(true);
+    tkrCmdCode = code;
+    clearTkrFIFO();
+    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
+        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x1F);
+        UART_TKR_ClearTxBuffer();
+    }
+    UART_TKR_WriteTxData(FPGA);           // FPGA address
+    UART_TKR_WriteTxData(tkrCmdCode);     // Command code
+    UART_TKR_WriteTxData(0x00);           // No data bytes
+
+    // Wait around for the data to transmit
+    uint32 tStart = time();
+    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {                                           
+        if (time() - tStart > 200) {
+            addError(ERR_TX_FAILED, code, 0xFF);
+            tkrLED(false);
+            return;
+        }
+    }                                
+    // Now look for the echo coming back from the Tracker.
+    if (tkrCmdCode != 0x67 && tkrCmdCode != 0x6C) {
+        int rc = getTrackerData(TKR_ECHO_DATA);
+        if (rc != 0) {
+            addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
+        }
+    }
+    nDataReady = 0;  // Suppress the echo from being sent out to the world
+    tkrLED(false);
+}
+
+// Load a Tracker I2C register
+void tkrLoadI2cReg(uint8 FPGA, uint8 i2cAddress, uint8 regID, uint8 byte1, uint8 byte2) {
+    cmdData[0] = i2cAddress;
+    cmdData[1] = regID;
+    cmdData[2] = byte1;
+    cmdData[3] = byte2;
+    sendTrackerCmd(FPGA, 0x45, 0x04, cmdData, TKR_ECHO_DATA);
+    nDataReady = 0;
+}
+
+// Read a Tracker I2C register
+uint16 tkrReadI2cReg(uint8 FPGA, uint8 i2cAddress) {
+    cmdData[0] = i2cAddress;
+    sendTrackerCmd(FPGA, 0x46, 0x01, cmdData, TKR_HOUSE_DATA);
+    nDataReady = 0;
+    uint16 outWord = (uint16)dataOut[1];
+    outWord = (outWord<<8) | dataOut[2];
+    return outWord;
+}
+
+uint16 getTkrTemp(uint8 FPGA) {
+    tkrLoadI2cReg(FPGA, I2C_Address_TKR_Temp, 0x01, 0x60, 0x00);   // Set config reg
+    CyDelayUs(600);
+    tkrLoadI2cReg(FPGA, I2C_Address_TKR_Temp, 0x00, 0x00, 0x00);   // Set pointer reg
+    CyDelayUs(600);
+    uint16 result = tkrReadI2cReg(FPGA, I2C_Address_TKR_Temp);
+    CyDelayUs(600);
+    tkrLoadI2cReg(FPGA, I2C_Address_TKR_Temp, 0x01, 0x61, 0x00);
+    return result;
+}
+
+// Routine to fill in the housekeeping array
+void makeHouseKeeping() {
+    uint16 tkrTemp0 = 0;
+    if (numTkrBrds > 0) {
+        tkrTemp0 = getTkrTemp(0);
+    }
+    uint16 tkrTemp7 = 0;
+    if (numTkrBrds > 7) {
+        tkrTemp7 = getTkrTemp(7);
+    }
+    dataOut[0] = 0x48;  // 4 header bytes spell "HAUS" in ASCII
+    dataOut[1] = 0x41;
+    dataOut[2] = 0x55;
+    dataOut[3] = 0x53;
+    dataOut[4] = byte16(runNumber, 0);
+    dataOut[5] = byte16(runNumber, 1);
+    timeDate = RTC_1_ReadTime();
+    uint32 timeWord = packTime();
+    dataOut[6] = byte32(timeWord, 0); // Time and date
+    dataOut[7] = byte32(timeWord, 1);
+    dataOut[8] = byte32(timeWord, 2);
+    dataOut[9] = byte32(timeWord, 3);
+    dataOut[10] = byte16(lastCommand, 0);
+    dataOut[11] = byte16(lastCommand, 1);
+    dataOut[12] = byte16(commandCount, 0);
+    dataOut[13] = byte16(commandCount, 1);
+    dataOut[14] = nBadCmd;
+    dataOut[15] = nErrors;
+    dataOut[16] = byte32(cntGO, 0);
+    dataOut[17] = byte32(cntGO, 1);
+    dataOut[18] = byte32(cntGO, 2);
+    dataOut[19] = byte32(cntGO, 3);
+    dataOut[20] = byte32(cntGO1, 0);
+    dataOut[21] = byte32(cntGO1, 1);
+    dataOut[22] = byte32(cntGO1, 2);
+    dataOut[23] = byte32(cntGO1, 3);
+    uint16 readoutTime = 0;
+    if (nReadAvg > 0) {
+        readoutTime = (uint8)((readTimeAvg*5000)/nReadAvg);
+    } 
+    dataOut[24] = byte16(readoutTime, 0);   // Average readout time, in microseconds
+    dataOut[25] = byte16(readoutTime, 1);
+    uint16 Grate = 0;
+    uint16 T3rate = 0;
+    uint16 T1rate = 0;
+    uint16 T4rate = 0;
+    uint16 T2rate = 0;
+    if (pmtMonitorTime > 0) {
+        Grate = (uint16)((pmtMonitorSums[0]*200)/pmtMonitorTime);
+        T3rate = (uint16)((pmtMonitorSums[1]*200)/pmtMonitorTime);
+        T1rate = (uint16)((pmtMonitorSums[2]*200)/pmtMonitorTime);
+        T4rate = (uint16)((pmtMonitorSums[3]*200)/pmtMonitorTime);
+        T2rate = (uint16)((pmtMonitorSums[4]*200)/pmtMonitorTime);
+    }
+    dataOut[26] = byte16(T1rate, 0);    // PMT singles rates
+    dataOut[27] = byte16(T1rate, 1);
+    dataOut[28] = byte16(T2rate, 0);
+    dataOut[29] = byte16(T2rate, 1);
+    dataOut[30] = byte16(T3rate, 0);
+    dataOut[31] = byte16(T3rate, 1);
+    dataOut[32] = byte16(T4rate, 0);
+    dataOut[33] = byte16(T4rate, 1);
+    dataOut[34] = byte16(Grate, 0);
+    dataOut[35] = byte16(Grate, 1);
+    dataOut[36] = byte16(lastTkrCmdCount, 0);
+    dataOut[37] = byte16(lastTkrCmdCount, 1);
+    if (cntGO > 0) {
+        dataOut[38] = (uint8)((100*nTkrTrg1)/cntGO);
+        dataOut[39] = (uint8)((100*nTkrTrg2)/cntGO);
+    } else {
+        dataOut[38] = 0;
+        dataOut[39] = 0;
+    }
+    dataOut[40] = nTkrDatErr;
+    dataOut[41] = nTkrTimeOut;
+    for (int i=0; i<MAX_TKR_BOARDS; ++i) {
+        if (cntGO > 0) {
+            dataOut[42+i] = (uint8)(10*nChipsHit[i]/cntGO);
+        } else {
+            dataOut[42+i] = 0;
+        }
+    }
+    for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
+        dataOut[50 + brd*2] = byte16(tkrMonitorRates[brd],0);
+        dataOut[50 + brd*2 + 1] = byte16(tkrMonitorRates[brd],1);
+    }
+    int16 dieTemp;
+    cystatus ret = DieTemp_1_GetTemp(&dieTemp);
+    if (ret != CYRET_SUCCESS) {
+        addErrorOnce(BAD_DIE_TEMP, ret, 0);
+    }
+    dataOut[66] = byte16(dieTemp, 0);
+    dataOut[67] = byte16(dieTemp, 1);
+
+    dataOut[68] = byte16(tkrTemp0, 0);
+    dataOut[69] = byte16(tkrTemp0, 1);
+    dataOut[70] = byte16(tkrTemp7, 0);
+    dataOut[71] = byte16(tkrTemp7, 1);
+    nDataReady = HOUSESIZE;
+}
+
+uint16 tkrGetBusVoltage(uint8 FPGA, uint8 i2cAddress) {
+    tkrLoadI2cReg(FPGA, i2cAddress, 0x02, 0x00, 0x00);   // Set config reg
+    CyDelayUs(700);
+    uint16 result = tkrReadI2cReg(FPGA, i2cAddress);
+    return result;
+}
+
+uint16 tkrGetShuntVoltage(uint8 FPGA, uint8 i2cAddress) {
+    tkrLoadI2cReg(FPGA, i2cAddress, 0x01, 0x00, 0x00);   // Set config reg
+    CyDelayUs(700);
+    uint16 result = tkrReadI2cReg(FPGA, i2cAddress);
+    return result;
+}
+
+void makeTkrHouseKeeping() {
+    uint8 data[TKRHOUSESIZE];
+    data[0] = 0x54;  // 4 header bytes spell "TRAK" in ASCII
+    data[1] = 0x52;
+    data[2] = 0x41;
+    data[3] = 0x4B;
+    timeDate = RTC_1_ReadTime();
+    uint32 timeWord = packTime();
+    data[4] = byte32(timeWord, 0); // Time and date
+    data[5] = byte32(timeWord, 1);
+    data[6] = byte32(timeWord, 2);
+    data[7] = byte32(timeWord, 3);
+    int offset = 7;
+    for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
+        if (brd < numTkrBrds) {
+            uint16 result = getTkrTemp(brd);
+            data[offset + 1] = byte16(result, 0);
+            data[offset + 2] = byte16(result, 1);
+            result = tkrGetShuntVoltage(brd, I2C_Address_TKR_bias);
+            data[offset + 3] = byte16(result, 0);
+            data[offset + 4] = byte16(result, 1);
+            result = tkrGetBusVoltage(brd, I2C_Address_TKR_D12);
+            data[offset + 5] = byte16(result, 0);
+            data[offset + 6] = byte16(result, 1);
+            result = tkrGetShuntVoltage(brd, I2C_Address_TKR_D12);
+            data[offset + 7] = byte16(result, 0);
+            data[offset + 8] = byte16(result, 1);
+            result = tkrGetBusVoltage(brd, I2C_Address_TKR_D25);
+            data[offset + 9] = byte16(result, 0);
+            data[offset + 10] = byte16(result, 1);
+            result = tkrGetShuntVoltage(brd, I2C_Address_TKR_D25);
+            data[offset + 11] = byte16(result, 0);
+            data[offset + 12] = byte16(result, 1);
+            result = tkrGetBusVoltage(brd, I2C_Address_TKR_D33);
+            data[offset + 13] = byte16(result, 0);
+            data[offset + 14] = byte16(result, 1);
+            result = tkrGetShuntVoltage(brd, I2C_Address_TKR_D33);
+            data[offset + 15] = byte16(result, 0);
+            data[offset + 16] = byte16(result, 1);
+            result = tkrGetBusVoltage(brd, I2C_Address_TKR_A21);
+            data[offset + 17] = byte16(result, 0);
+            data[offset + 18] = byte16(result, 1);
+            result = tkrGetShuntVoltage(brd, I2C_Address_TKR_A21);
+            data[offset + 19] = byte16(result, 0);
+            data[offset + 20] = byte16(result, 1);
+            result = tkrGetBusVoltage(brd, I2C_Address_TKR_A33);
+            data[offset + 21] = byte16(result, 0);
+            data[offset + 22] = byte16(result, 1);
+            result = tkrGetShuntVoltage(brd, I2C_Address_TKR_A33);
+            data[offset + 23] = byte16(result, 0);
+            data[offset + 24] = byte16(result, 1);
+        } else {
+            for (int i=0; i<24; ++i) data[offset+i] = 0;
+        }
+        offset +=  24;
+    }
+    nDataReady = TKRHOUSESIZE;
+    for (uint i=0; i<TKRHOUSESIZE; ++i) dataOut[i] = data[i];
+}
+
+// Function to turn the LED on/off furthest from the SMA inputs, for debugging
+void LED2_OnOff(bool on) {
+    if (on) {
+        Pin_LED2_Write(1);
+    } else {
+        Pin_LED2_Write(0);
     }
 }
 
@@ -668,17 +1281,6 @@ void triggerEnable(bool enable) {
     }
 }
 
-// Extract 1 of 4 bytes from a 32-bit word and return it as uint8
-uint8 byte32(uint32 word, int byte) {
-    const uint32 mask[4] = {0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF};
-    return (uint8)((word & mask[byte]) >> (3-byte)*8);
-}
-// Extract 1 of 2 bytes from a 16-bit word and return it as uint8
-uint8 byte16(uint16 word, int byte) {
-    const uint16 mask[2] = {0xFF00, 0x00FF};
-    return (uint8)((word & mask[byte]) >> (1-byte)*8);
-}
-
 // Reset all the logic and counters
 void logicReset() {
     LED2_OnOff(true);
@@ -697,6 +1299,11 @@ void logicReset() {
     cntGO1 = 0;
     Control_Reg_Pls_Write(PULSE_LOGIC_RST);
     Control_Reg_Pls_Write(PULSE_CNTR_RST);
+    pmtClkCntStart = time();
+    for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
+        pmtCntInit[cntr] = 0;
+    }
+    waitingPmtRateCnt = true;
     CyDelay(20);
     
     for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
@@ -707,48 +1314,6 @@ void logicReset() {
     }
     CyExitCriticalSection(InterruptState);
     LED2_OnOff(false);
-}
-
-// Get a byte of data from the Tracker UART software buffer, with a time-out in case nothing is coming.
-// The second argument (flag) helps to identify where a timeout error originated.
-uint8 tkr_getByte(uint32 startTime, uint8 flag) {
-    while (tkrReadPtr < 0) {  // No buffered data are available
-        uint32 timeElapsed = time() - startTime;
-        if (timeElapsed > TKR_READ_TIMEOUT || (startTime > time() && time() > TKR_READ_TIMEOUT)) {
-            uint8 temp = (uint8)(timeElapsed & 0x000000ff);
-            addError(ERR_TKR_READ_TIMEOUT, temp, flag);
-            return 0x00;
-        }
-    }
-    isr_TKR_Disable();
-    uint8 theByte = tkrBuf[tkrReadPtr];
-    if (tkrReadPtr < MAX_TKR-1) tkrReadPtr++;
-    else tkrReadPtr = 0;
-    if (tkrReadPtr == tkrWritePtr) tkrReadPtr = -1;  // All buffered data have been read
-    isr_TKR_Enable();
-    return theByte;
-}
-
-// Function to receive ASIC register data from the Tracker
-void getASICdata() {
-    uint32 startTime = time();
-    nDataReady = tkr_getByte(startTime, 69);
-    dataOut[0] = nDataReady;
-    nDataReady++;
-    for (int i=1; i<nDataReady; ++i) {
-        startTime = time();
-        dataOut[i] = tkr_getByte(startTime, 70+i);
-    }
-}
-
-// Function to receive i2c register data from the Tracker
-void getTKRi2cData() {
-    uint32 startTime = time();
-    nDataReady = 4;
-    dataOut[0] = tkr_getByte(startTime, 0x89);
-    dataOut[1] = tkr_getByte(startTime, 0x90);
-    dataOut[2] = tkr_getByte(startTime, 0x91);
-    dataOut[3] = tkr_getByte(startTime, 0x92);
 }
 
 // Receive trigger-primitive and TOT data from the tracker, for calibration-pulse events only
@@ -771,32 +1336,6 @@ int getTrackerBoardTriggerData(uint8 FPGA) {
         dataOut[i] = tkr_getByte(startTime, 0x46);
     }
     return rc;
-}
-
-// Build a dummy tracker empty hit list for use when the hardware fails to send a good hit list
-void makeDummyHitList(int brd, uint8 code) {
-    tkrData.boardHits[brd].nBytes = 5;                      // Minimum length of a board hit list
-    tkrData.boardHits[brd].hitList = (uint8*) malloc(5);
-    if (tkrData.boardHits[brd].hitList != NULL) {
-        tkrData.boardHits[brd].hitList[0] = 0xE7;           // Identifier
-        tkrData.boardHits[brd].hitList[1] = brd;            // Layer number
-        tkrData.boardHits[brd].hitList[2] = 1;              // Trigger count set to 0, error bit set to 1
-        tkrData.boardHits[brd].hitList[3] = (0x0F & code);  // 4 bits for 0 ASICs plus 4 bits of the CRC
-        tkrData.boardHits[brd].hitList[4] = 0x30;           // 2 bits of the CRC set to 0, then 11, then 0 filler nibble
-                                                            // The CRC is wrong and will get flagged. The code that
-                                                            // replaced the CRC indicates why this dummy was inserted.
-    }
-}
-
-// Build an entire dummy tracker emtpy event
-void makeDummyTkrEvent(uint8 trgCnt, uint8 cmdCnt, uint8 trgPtr, uint8 code) {
-    tkrData.triggerCount = trgCnt;  // Send back a packet that won't cause a crash down the road
-    tkrData.cmdCount = cmdCnt;
-    tkrData.trgPattern = trgPtr;
-    tkrData.nTkrBoards = numTkrBrds;
-    for (int brd=0; brd<numTkrBrds; ++brd) {  // Make a default empty ASIC hit list
-        makeDummyHitList(brd, code);
-    }
 }
 
 // Calculate a 6-bit CRC of a set of sequential bytes.
@@ -867,250 +1406,6 @@ bool checkCRC(int nBytes, uint8 hitList[]) {
     crc = (crcL | crcR) & 0x3F;
     uint8 crcNew = CRC6(nBits-6, hitList);  // Recalculate the 6-bit CRC
     return (crcNew == crc);                 // Compare with the FPGA value
-}
-
-// Function to get a full data packet from the Tracker.
-int getTrackerData(uint8 idExpected) {
-    int rc = 0;
-    uint32 startTime = time();
-    uint8 len = tkr_getByte(startTime, 1);
-    uint8 IDcode = tkr_getByte(startTime, 2);
-    if (IDcode != idExpected) {
-        if (idExpected != 0) {
-            addError(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
-            if (idExpected == TKR_EVT_DATA) {
-                makeDummyTkrEvent(0, 0, 0, 0);
-                return 54;
-            }
-        } else {
-            if (IDcode == TKR_EVT_DATA) {
-                addError(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
-                return 53;
-            }
-        }
-    }
-    if (IDcode == TKR_EVT_DATA) {         // Event data
-        if (len != 5) {           // Formal check
-            addError(ERR_TKR_BAD_LENGTH, IDcode, len);
-            makeDummyTkrEvent(0, 0, 0, 1);  // Send back a packet that won't cause a crash down the road
-            return 55;
-        }
-        uint8 trgCnt = ((uint16)tkr_getByte(startTime, 3) & 0x00FF) << 8;
-        trgCnt = trgCnt | ((uint16)tkr_getByte(startTime, 4) & 0x00FF);
-        uint8 cmdCnt = tkr_getByte(startTime, 5);
-        uint8 nBoards = tkr_getByte(startTime, 6);
-        uint8 trgPtr = nBoards & 0xC0;
-        nBoards = nBoards & 0x3F;
-        if (nBoards != numTkrBrds) {
-            addError(ERR_TKR_NUM_BOARDS, nBoards, tkrData.trgPattern);
-            makeDummyTkrEvent(trgCnt, cmdCnt, trgPtr, 2);
-            return 56;
-        }
-        tkrData.triggerCount = trgCnt;
-        tkrData.cmdCount = cmdCnt;
-        tkrData.trgPattern = trgPtr;
-        tkrData.nTkrBoards = nBoards;
-        for (int brd=0; brd < nBoards; ++brd) {
-            uint8 nBrdBytes = tkr_getByte(startTime, 7);  // Length of the hit list, in bytes
-            if (nBrdBytes < 4) {
-                addError(ERR_TKR_BOARD_SHORT, nBrdBytes, brd);
-                makeDummyHitList(brd, 4);
-                rc = 57;
-                continue;
-            }
-            uint8 IDbyte = tkr_getByte(startTime, 8);     // Hit list identifier, should always be 11100111
-            if (IDbyte != 0xE7) {
-                addError(ERR_TKR_BAD_BOARD_ID, IDbyte, brd);
-                makeDummyHitList(brd, 5);
-                rc = 58;
-                continue;
-            }
-            uint8 byte2 = tkr_getByte(startTime, 9);        // Byte containing the board address
-            if (byte2 > 8) {   // Formal check. Note that 8 denotes the master board, which really is layer 0
-                addError(ERR_TKR_BAD_FPGA, byte2, brd);
-                rc = 59;
-            }
-            uint8 lyr = 0x7 & byte2;  // Get rid of the master bit, leaving just the layer number
-            // Require the boards to be set up to read out in order:
-            if (lyr != brd) {
-                addError(ERR_TKR_LYR_ORDER, lyr, brd);
-                lyr = brd;
-            }
-            if (nBrdBytes > MAX_TKR_BOARD_BYTES) {    // This really should never happen, due to ASIC 10-hit limit
-                tkrData.boardHits[lyr].nBytes = MAX_TKR_BOARD_BYTES;
-                addError(ERR_TKR_TOO_BIG, nBrdBytes, lyr);
-            } else {
-                tkrData.boardHits[lyr].nBytes = nBrdBytes;
-            }
-            tkrData.boardHits[lyr].hitList = (uint8*) malloc(nBrdBytes);
-            if (tkrData.boardHits[lyr].hitList == NULL) {   // Ran out of heap memory. Not good!
-                addError(ERR_HEAP_NO_MEMORY, nBrdBytes-2, brd);
-                rc = 60;
-                continue;
-            }
-            tkrData.boardHits[lyr].hitList[0] = IDbyte;
-            tkrData.boardHits[lyr].hitList[1] = byte2;
-            for (int i=2; i<nBrdBytes; ++i) {
-                uint8 theByte = tkr_getByte(startTime, 10);
-                if (i<MAX_TKR_BOARD_BYTES) {       
-                    tkrData.boardHits[lyr].hitList[i] = theByte;
-                }
-            }
-        }
-    } else if (IDcode == TKR_HOUSE_DATA) {  // Housekeeping data
-        uint8 nData = tkr_getByte(startTime, 11);
-        if (len != nData+6) {   // Formal check
-            addError(ERR_TKR_BAD_NDATA, len, nData);
-            nData = len - 6;
-        }
-        tkrCmdCount = (uint16)(tkr_getByte(startTime, 12)) << 8;
-        tkrCmdCount = (tkrCmdCount & 0xFF00) | (uint16)tkr_getByte(startTime, 13);
-        tkrHouseKeepingFPGA = tkr_getByte(startTime, 14);
-        if (tkrHouseKeepingFPGA > 8) {   // Formal check
-            addError(ERR_TKR_BAD_FPGA, tkrCmdCode, tkrHouseKeepingFPGA);
-        }
-        uint8 tkrHouseKeepingCMD = tkr_getByte(startTime, 15);
-        if (tkrHouseKeepingCMD != tkrCmdCode) {   // Formal check
-            addError(ERR_TKR_BAD_ECHO, tkrHouseKeepingCMD, tkrCmdCode);
-        }
-        nTkrHouseKeeping = 0;      // Overwrite any old data, even if it was never sent out.
-        for (int i=0; i<nData; ++i) {
-            uint8 tmpData = tkr_getByte(startTime, 16);
-            if (i < TKRHOUSE_LEN) {
-                tkrHouseKeeping[i] = tmpData;
-                nTkrHouseKeeping++;
-            }
-        }
-        if (tkrHouseKeeping[nTkrHouseKeeping-1] != 0x0F) {    // Formal check
-            addError(ERR_TKR_BAD_TRAILER, tkrCmdCode, tkrHouseKeeping[nTkrHouseKeeping-1]);           
-        }
-    } else if (IDcode == TKR_ECHO_DATA) {  // Command Echo
-        if (len != 4) {           // Formal check
-            addError(ERR_TKR_BAD_LENGTH, IDcode, len);
-        }
-        nDataReady = 3;
-        dataOut[0] = tkr_getByte(startTime, 17);
-        tkrCmdCount = (uint16)dataOut[0] << 8;
-        dataOut[1] = tkr_getByte(startTime, 18);
-        tkrCmdCount = (tkrCmdCount & 0xFF00) | dataOut[1];
-        uint8 tkrCmdCodeEcho = tkr_getByte(startTime, 19);
-        dataOut[2] = tkrCmdCodeEcho;
-        if (tkrCmdCode != tkrCmdCodeEcho) {
-            addError(ERR_TKR_BAD_ECHO, tkrCmdCodeEcho, tkrCmdCode);
-            rc = 1;
-        }
-    } else {  // WTF?!?   Not sure what to do with this situation, besides flag it.
-        if (nErrors < MXERR) {
-            addError(ERR_TKR_BAD_ID, IDcode, len);
-        }
-        // Wait a short time on the UART and then empty the Tracker buffer
-        // and send out whatever crap came in, hoping for the best. . .
-        CyDelay(2);
-        isr_TKR_Disable();
-        nDataReady = 0;
-        while (tkrReadPtr != tkrWritePtr) {
-            dataOut[nDataReady++] = tkrBuf[tkrReadPtr];            
-            if (tkrReadPtr < MAX_TKR-1) tkrReadPtr++;
-            else tkrReadPtr = 0;
-        }  
-        tkrReadPtr = -1;
-        isr_TKR_Enable(); 
-    }
-    return rc;
-}
-
-// Turn on the LED on the double RJ45 connector to indicate Tracker communication. It will turn off only
-// after a delay long enough to make it visible.
-void tkrLED(bool on) {
-    isr_timer_Disable();
-    if (on) {
-        Pin_LED_TKR_Write(1);
-    } else {
-        Timer_1_Start();
-    }
-    isr_timer_Enable();
-}
-
-// Send a command to the tracker via the UART
-uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rtnType) {
-    tkrLED(true);
-    tkrCmdCode = code;
-    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x2F);
-    }
-    UART_TKR_WriteTxData(FPGA);         // FPGA address
-    UART_TKR_WriteTxData(tkrCmdCode);   // Command code
-    UART_TKR_WriteTxData(nData);        // Number of data bytes
-    for (int i=0; i<nData; ++i) {
-        if (i>0) {
-            while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-        }
-        UART_TKR_WriteTxData(cmdData[i]);
-    }
- 
-    if (tkrCmdCode == 0x0F) {     // This command sets the number of tracker boards in the readout.
-        numTkrBrds = cmdData[0];  // Make sure the PSOC also knows how many boards are used.
-    }
-    
-    // Wait around for up to a second for all the data to transmit
-    uint32 tStart = time();
-    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {                                           
-        if (time() - tStart > 200) {
-            addError(ERR_TX_FAILED, tkrCmdCode, 0);
-            tkrLED(false);
-            break;
-        }
-    }        
-    uint8 rc = 0;
-    if (tkrCmdCode == 0x67 || tkrCmdCode == 0x6C) {
-        tkrLED(false);
-        rc = 0xCF;
-        return rc;    // These commands have no echo or data to return
-    }
-    // Now look for the bytes coming back from the Tracker.
-    if (tkrCmdCode >= 0x20 && tkrCmdCode <= 0x25) {
-        getASICdata();
-    } else if (tkrCmdCode == 0x46) {
-        getTKRi2cData();
-    } else {
-        rc = getTrackerData(rtnType);
-        if (rc != 0) {
-            addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
-        }
-    }
-    tkrLED(false);
-    return rc;
-}
-
-// Function to send a command to the tracker that has no data bytes sent or returned
-void sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
-    tkrLED(true);
-    tkrCmdCode = code;
-    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x1F);
-    }
-    UART_TKR_WriteTxData(FPGA);           // FPGA address
-    UART_TKR_WriteTxData(tkrCmdCode);     // Command code
-    UART_TKR_WriteTxData(0x00);           // No data bytes
-
-    // Wait around for the data to transmit
-    uint32 tStart = time();
-    while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {                                           
-        if (time() - tStart > 200) {
-            addError(ERR_TX_FAILED, code, 0xFF);
-            tkrLED(false);
-            return;
-        }
-    }                                
-    // Now look for the echo coming back from the Tracker.
-    if (tkrCmdCode != 0x67 && tkrCmdCode != 0x6C) {
-        int rc = getTrackerData(TKR_ECHO_DATA);
-        if (rc != 0) {
-            addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
-        }
-    }
-    nDataReady = 0;  // Suppress the echo from being sent out to the world
-    tkrLED(false);
 }
 
 // Find the minimum time difference between two 8-bit time stamps
@@ -1189,6 +1484,24 @@ void configureASICs() {
     nDataReady = 0;   // To prevent the last echo from being sent out from the PSOC
 }
 
+// Read the ASIC configuration register 
+void readASICconfig(uint8 FPGA, uint8 chip) {
+    tkrCmdCode = 0x22; // Config read command code 
+    sendTrackerCmd(FPGA, tkrCmdCode, 1, &chip, 0);
+}
+
+uint32 getTkrASICconfig(uint8 FPGA, uint8 chip) {
+    readASICconfig(FPGA, chip);
+    if (dataOut[0] != 0x09) {
+        addErrorOnce(ASIC_CONFIG_WRONG_LEN,FPGA,chip);
+    }
+    uint32 word = dataOut[1];
+    word = (word<<8) | dataOut[2];
+    word = (word<<8) | dataOut[3];
+    word = (word<<8) | dataOut[4];
+    return word;
+}
+
 // Reset all of the Tracker board FPGAs (soft reset) and the ASICs (soft reset)
 // Unfortunately, the ASIC reset destroys the configuration, so the ASICs have to be reconfigured.
 void resetAllTrackerLogic() {
@@ -1196,16 +1509,18 @@ void resetAllTrackerLogic() {
         tkrCmdCode = 0x04;
         sendSimpleTrackerCmd(brd, tkrCmdCode);         
     }
-    tkrCmdCode = 0x0C;   // ASIC soft reset
-    cmdData[0] = 0x1F;   // All chips selected
-    sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);
-    configureASICs();
-}
-
-// Read the ASIC configuration register 
-void readASICconfig(uint8 FPGA, uint8 chip) {
-    tkrCmdCode = 0x22; // Config read command code 
-    sendTrackerCmd(FPGA, tkrCmdCode, 1, &chip, 0);
+    // Reset the ASICs only if there are non-parity errors flagged in the configuration register, or if
+    // the configuration register read failed.
+    // It is only necessary to check one arbitrary chip, as all should have the same DAQ errors, if any.
+    uint32 config = getTkrASICconfig(0, 3);
+    uint8 errCodes = (config & 0x03000000)>>24;
+    uint8 regType =  (config & 0x70000000)>>28;
+    if (errCodes != 0 || regType != 0x03) {   // Getting the correct register type (i.e. config.) indicates successful register read
+        tkrCmdCode = 0x0C;   // ASIC soft reset
+        cmdData[0] = 0x1F;   // All chips selected
+        sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);
+        configureASICs();
+    }
 }
 
 // Should be called after startup to make the specifiedTracker board FPGA go through a calibration sequence to center
@@ -1309,7 +1624,7 @@ uint8 readTOFdata() {
     return dataByte;
 }
 
-// Get the current count from one of the channel singles-rate counters
+// Get the current count from one of the channel singles-rate counters G, T3, T1, T4, T2
 uint32 getChCount(int cntr) {
     uint32 count = 0;
     switch (cntr) {
@@ -1483,6 +1798,16 @@ CY_ISR(isrTkrUART) {
     }
 }
 
+CY_ISR(isr1Hz) {
+    cntSeconds++;
+    if (cntSeconds%houseKeepPeriod == 0 && cntSeconds >= houseKeepPeriod) {
+        houseKeepingDue = true;
+    }
+    if (cntSeconds%(tkrHouseKeepPeriod*1) && cntSeconds >= (tkrHouseKeepPeriod*1)) {
+        tkrHouseKeepingDue = true;
+    }
+}
+
 // GO signal (system trigger). Start the full event readout.
 // This ISR has highest priority
 CY_ISR(isrGO) {
@@ -1614,9 +1939,6 @@ void makeEvent() {
             // Start the read of the Tracker data by sending a read-event command
             tkrCmdCode = 0x01;
             cmdData[0] = 0x00;
-            while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-                addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, tkrDataReady);
-            }
             rc = sendTrackerCmd(0x00, tkrCmdCode, 0x01, cmdData, TKR_EVT_DATA);    
         } 
         if (rc != 0) {
@@ -1694,13 +2016,11 @@ void makeEvent() {
     
     // Build the event by filling the output buffer according to the output format.
     // Pack the time and date information into a 4-byte unsigned integer
-    uint32 timeWord = ((uint32)timeDate->Year - 2000) << 26;
-    timeWord = timeWord | ((uint32)timeDate->Month << 22);
-    timeWord = timeWord | ((uint32)timeDate->DayOfMonth << 17);
-    timeWord = timeWord | ((uint32)timeDate->Hour << 12);
-    timeWord = timeWord | ((uint32)timeDate->Min << 6);
-    timeWord = timeWord | ((uint32)timeDate->Sec); 
-    //
+    uint32 timeWord = packTime();
+    
+    if (trgStatus & 0x04) nTkrTrg1++;
+    if (trgStatus & 0x08) nTkrTrg2++;
+    
     // Start the event with a 4-byte header (spells ZERO) in ASCII
     dataOut[0] = 0x5A;
     dataOut[1] = 0x45;
@@ -1708,7 +2028,7 @@ void makeEvent() {
     dataOut[3] = 0x4F;
     dataOut[4] = byte16(runNumber, 0);
     dataOut[5] = byte16(runNumber, 1);
-    dataOut[6] = byte32(cntGO, 0);     // Event number
+    dataOut[6] = byte32(cntGO, 0);     // Event number (accepted trigger count)
     dataOut[7] = byte32(cntGO, 1);
     dataOut[8] = byte32(cntGO, 2);
     dataOut[9] = byte32(cntGO, 3);
@@ -1716,7 +2036,7 @@ void makeEvent() {
     dataOut[11] = byte32(timeStamp, 1);
     dataOut[12] = byte32(timeStamp, 2);
     dataOut[13] = byte32(timeStamp, 3);
-    dataOut[14] = byte32(cntGO1save, 0);   // Trigger count
+    dataOut[14] = byte32(cntGO1save, 0);   // Missed-trigger count
     dataOut[15] = byte32(cntGO1save, 1);
     dataOut[16] = byte32(cntGO1save, 2);
     dataOut[17] = byte32(cntGO1save, 3);
@@ -1745,6 +2065,7 @@ void makeEvent() {
     dataOut[35] = byte16(tkrData.triggerCount, 0);
     dataOut[36] = byte16(tkrData.triggerCount, 1);
     dataOut[37] = tkrData.cmdCount;
+    lastTkrCmdCount = tkrData.cmdCount;
     dataOut[38] = (tkrData.trgPattern & 0xC0) | (evtStatus & 0x37);
     if (debugTOF) {  // Extra TOF information for debugging
         dataOut[39] = nI;   // Number of TOF readouts since the last trigger
@@ -1775,13 +2096,13 @@ void makeEvent() {
         if (nDataReady >= MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
             // There is no room for this tracker board's data, but see if we can fit in an empty dummy readout
             if (nDataReady < MAX_DATA_OUT - 10) {
-                //dataOut[nDataReady++] = brd;
                 dataOut[nDataReady++] = 5;       // Number of bytes in the (empty) board hit list
                 dataOut[nDataReady++] = 0xE7;    // Identifier byte for the hit list
                 dataOut[nDataReady++] = brd;     // Board FPGA address (normally also the layer number)
                 dataOut[nDataReady++] = 0;       // Event tag plus error flag, all set to zero
                 dataOut[nDataReady++] = 0x09;    // Number of chips reporting (0) plus first 4 bits of CRC   
                 dataOut[nDataReady++] = 0x30;    // 2 more CRC bits, set to 0, followed by 11, followed by 0 to byte boundary
+                if (tkrData.boardHits[brd].hitList != NULL) free(tkrData.boardHits[brd].hitList);
                 continue;
             }
             if (debugTOF) {        // For a truncated event, enter the number of boards that did read out.
@@ -1790,6 +2111,9 @@ void makeEvent() {
                 dataOut[39] = brd;
             }
             addError(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
+            for (int lyr=brd; lyr<tkrData.nTkrBoards; ++lyr) {
+                if (tkrData.boardHits[lyr].hitList != NULL) free(tkrData.boardHits[lyr].hitList);
+            }
             break;  // We're really out of space. The event will be truncated.
         }
         if (tkrData.boardHits[brd].hitList == NULL) {  // In case the heap memory ran out, enter a dummy layer packet. . .
@@ -1800,6 +2124,7 @@ void makeEvent() {
             dataOut[nDataReady++] = 0x07;   // A bad CRC will flag this error
             dataOut[nDataReady++] = 0x30;
         } else {
+            nChipsHit[brd] += (tkrData.boardHits[brd].hitList[3])>>4;  // Adding the number of chips with hits
             dataOut[nDataReady++] = tkrData.boardHits[brd].nBytes;
             for (int b=0; b<tkrData.boardHits[brd].nBytes; ++b) {
                 dataOut[nDataReady++] = tkrData.boardHits[brd].hitList[b];
@@ -1898,17 +2223,17 @@ void tkrRateMonitor(bool *waitingTkrRateCnt) {
 } // end of subroutine trkRateMonitor
 
 // Monitoring of PMT singles rates
-void pmtRateMonitor(bool *waitingPmtRateCnt) {
+void pmtRateMonitor() {
     uint32 diff;
-    if (*waitingPmtRateCnt) {
+    if (waitingPmtRateCnt) {
         uint32 now = time();
         if (now > pmtClkCntStart) {
             diff = now - pmtClkCntStart;
         } else {
             diff = 0xffffffff - (pmtClkCntStart - now - 1);
         }     
-        if (diff >= 200*pmtDeltaT) {  // Allow at least 10 seconds, to get good precision
-            *waitingPmtRateCnt = false;
+        if (diff >= 200*pmtDeltaT) {  // Allow some time to get good precision
+            waitingPmtRateCnt = false;
             int InterruptState = CyEnterCriticalSection();
             now = time();
             if (now > pmtClkCntStart) {
@@ -1932,7 +2257,7 @@ void pmtRateMonitor(bool *waitingPmtRateCnt) {
         if (diff >= 200*pmtMonitorInterval) {
             int InterruptState = CyEnterCriticalSection();
             pmtClkCntStart = time();
-            *waitingPmtRateCnt = true;
+            waitingPmtRateCnt = true;
             for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
                 pmtCntInit[cntr] = getChCount(cntr);
             }
@@ -1943,18 +2268,24 @@ void pmtRateMonitor(bool *waitingPmtRateCnt) {
 
 // Data goes out by USBUART, for bench testing, or by SPI to the main PSOC
 // Format: 3 byte aligned packeckets with a 3 byte header (0xDC00FF) and 3 byte EOR (0xFF00FF)       
-uint8 sendEvtData(uint8 nDataBytes, uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
+void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
     uint8 Padding[2];
     Padding[0] = '\x01';
     Padding[1] = '\x02';
     if (outputMode != USBUART_OUTPUT) {
-        if (Pin_Busy_Read()) return 0;   // Don't send anything if the Main PSOC isn't ready to receive
+        if (Pin_Busy_Read()) return;   // Don't send anything if the Main PSOC isn't ready to receive
     }
     if (nDataReady > 0) {    // Send out a command echo only if there are also data to send
         dataLED(true);
         if (!cmdDone) { // Output is event data, not a command response
-            if (debugTOF) dataPacket[4] = 0xDB;
-            else dataPacket[4] = 0xDD;
+            if (dataOut[0] == 0x5A && dataOut[1] == 0x45 && dataOut[2] == 0x52 && dataOut[3] == 0x4F) {
+                if (debugTOF) dataPacket[4] = 0xDB;
+                else dataPacket[4] = 0xDD;
+            } else {
+                if (dataOut[0] == 0x48 && dataOut[1] == 0x41 && dataOut[2] == 0x55 && dataOut[3] == 0x53) {
+                    dataPacket[4] = 0xDE;
+                } else dataPacket[4] = 0xDF;
+            }
             nDataBytes = 0;   // Set to zero just in case a value is still hanging around in this variable
         } else {              // Output directly responding to a command
             dataPacket[4] = command;               
@@ -1968,7 +2299,7 @@ uint8 sendEvtData(uint8 nDataBytes, uint8 dataPacket[], uint8 command, uint8 cmd
         // 0x00
         // 0xFF
         // data record length
-        // command echo
+        // command echo or 0xDB or 0xDD or 0xDE
         // number command data bytes
         if (outputMode != USBUART_OUTPUT) set_SPI_SSN(SSN_Main, false);
         if (outputMode == USBUART_OUTPUT) {  // Output the header
@@ -2050,8 +2381,28 @@ uint8 sendEvtData(uint8 nDataBytes, uint8 dataPacket[], uint8 command, uint8 cmd
         awaitingCommand = true;
         cmdDone = false;
     }
-    return nDataBytes;
-} // end of the sendEvtData subroutine
+} // end of the sendAllData subroutine
+
+void readEEprom() {
+    uint16 base = MAX_TKR_PCB*MAX_TKR_ASIC*SIZEOF_EEPROM_ROW;
+    int base2 = 8*12*16;
+    if (base != base2) {
+        base2 = base2 + 999;
+    }
+    for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
+        int brd = boardMAP[lyr];
+        for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
+            for (int i=0; i<8; ++i) {
+                tkrConfig[lyr][chip].datMask[i] = EEPROM_1_ReadByte((brd*MAX_TKR_ASIC + chip)*SIZEOF_EEPROM_ROW + i);
+                tkrConfig[lyr][chip].trgMask[i] = EEPROM_1_ReadByte((brd*MAX_TKR_ASIC + chip)*SIZEOF_EEPROM_ROW + 8 + i);              
+            }
+            tkrConfig[lyr][chip].threshDAC = EEPROM_1_ReadByte(base + brd*SIZEOF_EEPROM_ROW + chip);
+        }
+    }
+    for (int i=0; i<3; ++i) {
+        tkrConfigReg[i] = EEPROM_1_ReadByte(base + MAX_TKR_PCB*SIZEOF_EEPROM_ROW + i);
+    }
+} // End of function readEEprom
 
 // Interpret and act on commands received from USB-UART or the Main PSOC
 void interpretCommand(uint8 tofConfig[]) {
@@ -2280,8 +2631,10 @@ void interpretCommand(uint8 tofConfig[]) {
                 // First send a calibration strobe command
                 tkrLED(true);
                 tkrCmdCode = '\x02';
+                clearTkrFIFO();
                 while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
                     addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x3F);
+                    UART_TKR_ClearTxBuffer();
                 }
                 UART_TKR_WriteTxData('\x00');
                 UART_TKR_WriteTxData(tkrCmdCode);
@@ -2550,6 +2903,7 @@ void interpretCommand(uint8 tofConfig[]) {
             case '\x44':  // End a run and send out the run summary
                 triggerEnable(false);
                 endingRun = true;
+                runNumber = 0;
                 endData[0] = byte32(cntGO1, 0);
                 endData[1] = byte32(cntGO1, 1);
                 endData[2] = byte32(cntGO1, 2);
@@ -2577,14 +2931,30 @@ void interpretCommand(uint8 tofConfig[]) {
                 readTimeAvg = 0;
                 nReadAvg = 0;
                 clkCnt = 0;
+                cntSeconds = 0;
+                houseKeepingDue = false;
+                tkrHouseKeepingDue = false;
                 tofA.ptr = 0;
                 tofB.ptr = 0;
-                ch1Count = 0;
+                ch1Count = 0;               
                 ch2Count = 0;
                 ch3Count = 0;
                 ch4Count = 0;
                 ch5Count = 0;
+                Control_Reg_Pls_Write(PULSE_CNTR_RST);
+                pmtClkCntStart = time();
+                for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
+                    pmtCntInit[cntr] = getChCount(cntr);
+                }
+                waitingPmtRateCnt = true;
                 cntGO1 = 0;
+                for (int i=0; i<MAX_TKR_BOARDS; ++i) nChipsHit[i] = 0;
+                nTkrTrg1 = 0;
+                nTkrTrg2 = 0;
+                nTkrTimeOut = 0;
+                nTkrDatErr = 0;
+                nIgnoredCmd = 0;
+                nBadCmd = 0;
                 CyExitCriticalSection(InterruptState);
                 runNumber = cmdData[0];
                 runNumber = (runNumber<<8) | cmdData[1];
@@ -2593,7 +2963,6 @@ void interpretCommand(uint8 tofConfig[]) {
                 cntGO = 0;
                 numTkrResets = 0;
                 triggerEnable(true);
-                Control_Reg_Pls_Write(PULSE_CNTR_RST);
                 // Enable the tracker trigger
                 if (readTracker) {
                     tkrCmdCode = 0x65;
@@ -2788,6 +3157,7 @@ void interpretCommand(uint8 tofConfig[]) {
                     waitingTkrRateCnt = false;
                     break;
                 }
+                if (monitorTkrRates) break;
                 tkrMonitorInterval = cmdData[0];  // Number of seconds between monitoring events
                 if (tkrMonitorInterval < 2) tkrMonitorInterval = 2;
                 tkrMonitorNumAvg = cmdData[1];    // Number of successive measurements to average over
@@ -2805,6 +3175,7 @@ void interpretCommand(uint8 tofConfig[]) {
                     waitingPmtRateCnt = false;
                     break;
                 }
+                if (monitorPmtRates) break;
                 pmtDeltaT = cmdData[0];             // Number of seconds over which to accumulate counts
                 pmtMonitorInterval = cmdData[1];    // Interval in seconds between successive measurements
                 if (pmtMonitorInterval < 2*pmtDeltaT) pmtMonitorInterval = 2*pmtDeltaT;
@@ -2890,9 +3261,81 @@ void interpretCommand(uint8 tofConfig[]) {
                 sendTrackerCmd(0x00, tkrCmdCode, 0, cmdData, TKR_ECHO_DATA);     // Turn on the ASIC power
                 configureASICs();
                 break;
+            case '\x5C': // Start sending tracker monitoring packets
+                tkrHouseKeepPeriod = cmdData[0];
+                doTkrHouseKeeping = true;
+                isr_1Hz_Enable();
+                break;
+            case '\x5D': // Stop sending tracker housekeeping packets
+                doTkrHouseKeeping = false;
+                tkrHouseKeepingDue = false;
+                if (!doHouseKeeping) isr_1Hz_Disable();
+                break;
+            case '\x57': // Start monitoring processes to create the housekeeping data packets
+                houseKeepPeriod = cmdData[0];
+                doHouseKeeping = true;
+                cntSeconds = 0;
+                if (!monitorPmtRates) {
+                    pmtDeltaT = houseKeepPeriod;         // Number of seconds over which to accumulate counts
+                    pmtMonitorInterval = 2*pmtDeltaT;    // Interval in seconds between successive measurements
+                    InterruptState = CyEnterCriticalSection();
+                    pmtClkCntStart = time();
+                    for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
+                        pmtCntInit[cntr] = getChCount(cntr);
+                    }
+                    CyExitCriticalSection(InterruptState);
+                    monitorPmtRates = true;
+                    waitingPmtRateCnt = true;
+                }
+                if (!monitorTkrRates) {
+                    tkrMonitorInterval = houseKeepPeriod - 1;  // Number of seconds between monitoring events
+                    if (tkrMonitorInterval < 2) tkrMonitorInterval = 2;
+                    tkrMonitorNumAvg = 1;                      // Number of successive measurements to average over
+                    nTkrMonSamples = 0;
+                    for (int brd=0; brd<numTkrBrds; ++brd) {
+                        tkrMonitorSums[brd] = 0;
+                    }
+                    tkrClkAtStart = time();        
+                    monitorTkrRates = true;
+                    waitingTkrRateCnt = false;
+                }
+                isr_1Hz_Enable();
+                break;
+            case '\x58': // Stop sending housekeeping packets
+                doHouseKeeping = false;
+                houseKeepingDue = false;
+                if (!doTkrHouseKeeping) isr_1Hz_Disable();
+                break;
+            case '\x59': // Reset the Tracker layer configuration
+                boardMAP[0] = cmdData[0];
+                boardMAP[1] = cmdData[1];
+                boardMAP[2] = cmdData[2];
+                boardMAP[3] = cmdData[3];
+                boardMAP[4] = cmdData[4];
+                boardMAP[5] = cmdData[5];
+                boardMAP[6] = cmdData[6];
+                boardMAP[7] = cmdData[7];
+                readEEprom();    // careful: any changes already made to the ASIC configuration get lost here
+                break;
+            case '\x5A': // Get Tracker layer configuration
+                nDataReady = 8;
+                for (int i=0; i<MAX_TKR_BOARDS; ++i) dataOut[i] = boardMAP[i];
+                break;
+            case '\x5B': // Increase the tracker thesholds by an additive amount
+                nDataReady = 0;
+                uint8 deltaThr = cmdData[0];
+                uint16 base = MAX_TKR_PCB*MAX_TKR_ASIC*SIZEOF_EEPROM_ROW;
+                for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {                        
+                    int brd = boardMAP[lyr];
+                    for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
+                        tkrConfig[lyr][chip].threshDAC = EEPROM_1_ReadByte(base + brd*SIZEOF_EEPROM_ROW + chip) + deltaThr;
+                    }
+                }
+                break;
         } // End of command switch
     } else { // Log an error if the user is sending spurious commands while the trigger is enabled
-        addError(ERR_CMD_IGNORE, command, 0);
+        addErrorOnce(ERR_CMD_IGNORE, command, 0);
+        nIgnoredCmd++;
     }
 } // end of interpretCommand subroutine
 
@@ -2966,7 +3409,7 @@ int main(void)
 {     
     // Load the default Tracker configuration from EEPROM
     EEPROM_1_Start();
-    boardMAP[0] = 6; //2;   // C
+    boardMAP[0] = 2;   // C
     boardMAP[1] = 7;   // H
     boardMAP[2] = 1;   // B
     boardMAP[3] = 0;   // A
@@ -2974,24 +3417,7 @@ int main(void)
     boardMAP[5] = 5;   // F
     boardMAP[6] = 8;   // I
     boardMAP[7] = 4;   // E
-    uint16 base = MAX_TKR_PCB*MAX_TKR_ASIC*SIZEOF_EEPROM_ROW;
-    int base2 = 8*12*16;
-    if (base != base2) {
-        base2 = base2 + 999;
-    }
-    for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
-        int brd = boardMAP[lyr];
-        for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
-            for (int i=0; i<8; ++i) {
-                tkrConfig[lyr][chip].datMask[i] = EEPROM_1_ReadByte((brd*MAX_TKR_ASIC + chip)*SIZEOF_EEPROM_ROW + i);
-                tkrConfig[lyr][chip].trgMask[i] = EEPROM_1_ReadByte((brd*MAX_TKR_ASIC + chip)*SIZEOF_EEPROM_ROW + 8 + i);              
-            }
-            tkrConfig[lyr][chip].threshDAC = EEPROM_1_ReadByte(base + brd*SIZEOF_EEPROM_ROW + chip);
-        }
-    }
-    for (int i=0; i<3; ++i) {
-        tkrConfigReg[i] = EEPROM_1_ReadByte(base + MAX_TKR_PCB*SIZEOF_EEPROM_ROW + i);
-    }
+    readEEprom();
     
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  
     doCRCcheck = false;
@@ -3010,17 +3436,36 @@ int main(void)
     nDataReady = 0;
     clkCnt = 0;
     nTkrHouseKeeping = 0;
+    houseKeepingDue = false;
+    tkrHouseKeepingDue = false;
+    doTkrHouseKeeping = false;
+    doHouseKeeping = false;
     readTracker = false;
     debugTOF = false;
+    lastTkrCmdCount = 0;
+    nIgnoredCmd = 0;
     
     fifoWritePtr = 0;
     fifoReadPtr = 0;
     
     runNumber = 0;
     timeStamp = time();
+    lastCommand = 0;
+    commandCount = 0;
+    for (int i=0; i<MAX_TKR_BOARDS; ++i) nChipsHit[i] = 0;
+    nTkrTrg1 = 0;
+    nTkrTrg2 = 0;
+    nTkrTimeOut = 0;
+    nTkrDatErr = 0;
+    nBadCmd = 0;
     
     uint8 *buffer;        // Buffer for incoming commands
     uint8 USBUART_buf[BUFFER_LEN];
+    
+    pmtMonitorTime = 0;
+    for (int i=0; i<MAX_PMT_CHANNELS; ++i) {
+        pmtMonitorSums[i] = 0;
+    }
     
     uint8 code[256];  // ASCII code translation to hex nibbles
     for (int i=0; i<256; ++i) code[i] = 0;
@@ -3101,6 +3546,8 @@ int main(void)
     isr_rst_Disable();
     isr_TKR_StartEx(isrTkrUART);
     isr_TKR_Disable();
+    isr_1Hz_StartEx(isr1Hz);
+    isr_1Hz_Disable();
     
     tkrWritePtr = 0;    // Initialize the write pointer for the tracker UART RX FIFO
     tkrReadPtr = -1;    // Negative indicates that no data are available to read
@@ -3285,6 +3732,7 @@ int main(void)
     isr_rst_Enable();
     isr_TKR_SetPriority(5);   // This needs high priority to prevent the hardware FIFO from overfilling
     isr_TKR_Enable();
+    isr_1Hz_SetPriority(7);
 
     numTkrBrds = MAX_TKR_BOARDS;  // By default all Tracker boards are present.
     eventDataReady = false;
@@ -3295,6 +3743,7 @@ int main(void)
     set_SPI_SSN(0, true);   // Deselect all SPI slaves
     triggerEnable(false);
     endingRun = false;
+    runNumber = 0;
 
     for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
         tkrMonitorRates[brd] = 0;
@@ -3304,6 +3753,7 @@ int main(void)
     
     monitorPmtRates = false;
     waitingPmtRateCnt = false;
+    pmtDeltaT = 10;
     
     ADCsoftReset=true;
     
@@ -3324,13 +3774,13 @@ int main(void)
         
         // PMT singles rate monitoring
         if (monitorPmtRates) {
-            pmtRateMonitor(&waitingPmtRateCnt);
+            pmtRateMonitor();
         }
         
         if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
             makeEvent();
         }
-        if (!triggered && endingRun) {
+        if (!triggered && endingRun && nDataReady == 0) {
             endingRun = false;
             nDataReady = 8;
             for (int i=0; i<8; ++i) {
@@ -3338,8 +3788,25 @@ int main(void)
             }
         }
         
+        // Send housekeeping packets only during a run
+        if (runNumber > 0 && doHouseKeeping && nDataReady == 0 && !endingRun) {
+            if (houseKeepingDue) {
+                makeHouseKeeping();
+                houseKeepingDue = false;
+            }
+        }
+        
+        // Tracker housekeeping
+        if (runNumber > 0 && doTkrHouseKeeping && nDataReady == 0 && !endingRun) {
+            if (tkrHouseKeepingDue) {
+                makeTkrHouseKeeping();
+                tkrHouseKeepingDue = false;
+            }
+        }
+        
+        // Send out event data, housekeeping data, command-generated data and echo, end-of-run data etc.
         if (nDataReady > 0 || cmdDone) {   
-            nDataBytes = sendEvtData(nDataBytes, dataPacket, command, cmdData);
+            sendAllData(dataPacket, command, cmdData);
         }
         
         // Time-out protection in case the expected data for a command are never sent.
@@ -3443,7 +3910,7 @@ int main(void)
                     }
                 }
             }
-            if (!badCMD) {
+            if (!badCMD) {    // Here "bad" means all 3 copies are different from each other!
                 if (buffer[0] != 'S' || buffer[8] != 'W') {
                     addError(ERR_BAD_CMD_FORMAT,buffer[0],buffer[8]);
                 } else {
@@ -3452,10 +3919,14 @@ int main(void)
                     uint8 nib4 = code[buffer[4]];
                     uint8 addressByte = (nib3<<4) | nib4;
                     uint8 PSOCaddress = (addressByte & '\x3C')>>2;
+                    uint8 nib1 = code[buffer[1]];  // No check on code. Illegal characters get translated to 0.
+                    uint8 nib2 = code[buffer[2]];
+                    uint8 dataByte = (nib1<<4) | nib2;
+                    lastCommand = dataByte;
+                    uint16 byte23 = (uint16)addressByte;
+                    lastCommand = (lastCommand << 8) | byte23;
+                    commandCount++;
                     if (PSOCaddress == eventPSOCaddress) {                    
-                        uint8 nib1 = code[buffer[1]];  // No check on code. Illegal characters get translated to 0.
-                        uint8 nib2 = code[buffer[2]];
-                        uint8 dataByte = (nib1<<4) | nib2;
                         if (awaitingCommand) {         // This is the start of a new command
                             awaitingCommand = false;
                             cmdStartTime = time();
@@ -3485,7 +3956,8 @@ int main(void)
                         interpretCommand(tofConfig);
                     }
                 }
-            } // End of command polling            
+            } // End of command polling  
+            if (badCMD && nBadCmd<0xFF) nBadCmd++;
         }
         
         // Send out Tracker housekeeping data immediately after receiving it from the Tracker

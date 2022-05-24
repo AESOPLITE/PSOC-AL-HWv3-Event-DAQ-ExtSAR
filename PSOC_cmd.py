@@ -171,6 +171,30 @@ def getShortData(address, nBytes):
         print("getShortData: invalid trailer returned: " + str(trailer))
     return ret
 
+def startHouseKeeping(interval):
+    print("startHouseKeeping: interval between housekeeping packets set to " + str(interval) + " seconds.")
+    cmdHeader = mkCmdHdr(1, 0x57, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(interval, addrEvnt, 1)
+    ser.write(data1)
+    
+def startTkrHouseKeeping(interval):
+    print("startTkrHouseKeeping: interval between tracker housekeeping packets set to " + str(interval) + " seconds.")
+    cmdHeader = mkCmdHdr(1, 0x5C, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(interval, addrEvnt, 1)
+    ser.write(data1)
+    
+def stopHouseKeeping():
+    print("stopHouseKeeping: no more housekeeping packets will be sent")
+    cmdHeader = mkCmdHdr(1, 0x58, addrEvnt)
+    ser.write(cmdHeader)
+    
+def stopTkrHouseKeeping():
+    print("stopTkrHouseKeeping: no more tracker housekeeping packets will be sent")
+    cmdHeader = mkCmdHdr(1, 0x5D, addrEvnt)
+    ser.write(cmdHeader)
+    
 def startPmtRateMonitor(deltaT, Interval):
     print("startPmtRateMonitor: integration time = " + str(deltaT) + " seconds. Interval between measurements = " + str(Interval) + " seconds")
     cmdHeader = mkCmdHdr(2, 0x52, addrEvnt)
@@ -752,6 +776,42 @@ def readCalEvent(trgTag, verbose):
     if verbose: rc = ParseASIChitList(getBinaryString(hitList),True)[0]
     return hitList
             
+def setTKRlayers(lyr0, lyr1, lyr2, lyr3, lyr4, lyr5, lyr6, lyr7):
+    print("setTKRlayers: setting the configuration of tracker layers:")
+    cmdHeader = mkCmdHdr(8, 0x59, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(lyr0, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(lyr1, addrEvnt, 2)
+    ser.write(data2)
+    data3 = mkDataByte(lyr2, addrEvnt, 3)
+    ser.write(data3)
+    data4 = mkDataByte(lyr3, addrEvnt, 4)
+    ser.write(data4)
+    data5 = mkDataByte(lyr4, addrEvnt, 5)
+    ser.write(data5)
+    data6 = mkDataByte(lyr5, addrEvnt, 6)
+    ser.write(data6)
+    data7 = mkDataByte(lyr6, addrEvnt, 7)
+    ser.write(data7)
+    data8 = mkDataByte(lyr7, addrEvnt, 8)
+    ser.write(data8)
+
+def bumpTKRthreshold(amount):
+    cmdHeader = mkCmdHdr(1, 0x5B, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(amount, addrEvnt, 1)
+    ser.write(data1)
+
+def getTKRlayers():
+    print("getTKRlayers: current map of tracker layers:")
+    cmdHeader = mkCmdHdr(0, 0x5A, addrEvnt)
+    ser.write(cmdHeader)
+    time.sleep(0.1)
+    command,cmdDataBytes,byteList = getData(addrEvnt)
+    for lyr in range(8):
+        print("   Layer " + str(lyr) + " is board " + str(bytes2int(byteList[lyr])))
+
 # Execute a run for a specified number of events to be acquired
 def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, debugTOF = False):
     cmdHeader = mkCmdHdr(4, 0x3C, addrEvnt)
@@ -809,11 +869,12 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         ret = ser.read(2)
         if ret != b'\x00\xFF':
             print("limitedRun: bad header found: b'\\xdc' " + str(ret))
-        print("limitedRun: reading event " + str(event) + " of run " + str(runNumber))
+        print("limitedRun: reading packet " + str(event) + " of run " + str(runNumber))
         ret = ser.read(1)
         nData = bytes2int(ret)
         ret = ser.read(1)
-        print("   Data type ID is " + str(ret.hex()))
+        dataID = str(ret.hex())
+        print("   Data type ID is " + dataID)
         ret = ser.read(1)
         if bytes2int(ret) != 0: print("   Bad number of command data bytes = " + str(bytes2int(ret)))
         R = nData % 3
@@ -842,123 +903,223 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             byteList.append(byte3)
         ret = ser.read(3)
         if ret != b'\xFF\x00\xFF':
-            print("limitedRun: invalid trailer returned: " + str(ret)) 
-        run = dataList[4]*256 + dataList[5]
-        trigger = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
-        cntGo1 = dataList[14]*16777216 + dataList[15]*65536 + dataList[16]*256 + dataList[17]
-        timeDate = dataList[18]*16777216 + dataList[19]*65536 + dataList[20]*256 + dataList[21]
-        if verbose: print("   Trigger: " + str(trigger) + " accepted, " + str(trigger+cntGo1) + " generated.  Data List length = " + str(len(dataList)))
-        timeStamp = dataList[10]*16777216 + dataList[11]*65536 + dataList[12]*256 + dataList[13]
-        year = ((timeDate & 0x7C000000) >> 26) + 2000
-        month = (timeDate & 0x03C00000) >> 22
-        day = (timeDate & 0x003E0000) >> 17
-        hour = (timeDate & 0x0001F000) >> 12
-        minute = (timeDate & 0x00000FC0) >> 6
-        second = (timeDate & 0x0000003F)
-        deltaTime = timeStamp - lastTime
-        deltaTimeSec = deltaTime * (1./200.)
-        if event > 0:
-            if verbose: print("    Time since the previous event = " + str(deltaTime) + " counts, or " + str(deltaTimeSec) + " seconds")
-            timeSum += deltaTime
-        lastTime = timeStamp
-        T1 = dataList[23]*256 + dataList[24]
-        T2 = dataList[25]*256 + dataList[26]
-        T3 = dataList[27]*256 + dataList[28]
-        T4 = dataList[29]*256 + dataList[30]
-        G =  dataList[31]*256 + dataList[32]
-        if verbose:
-            print("        T1 ADC=" + str(T1))
-            print("        T2 ADC=" + str(T2))
-            print("        T3 ADC=" + str(T3))
-            print("        T4 ADC=" + str(T4))
-            print("         G ADC=" + str(G))
-        dtmin = 10*np.int16(dataList[33]*256 + dataList[34])
-        if debugTOF:
-            nTOFA = dataList[39]
-            nTOFB = dataList[40]
-            tofA = 10*(dataList[41]*256 + dataList[42])
-            tofB = 10*(dataList[43]*256 + dataList[44])
-            clkA = dataList[45]*256 + dataList[46]
-            clkB = dataList[47]*256 + dataList[48]
-            nTkrLyrs = dataList[49]
-            iPtr = 50
-        else: 
-            nTOFA = 0
-            nTOFB = 0
-            tofA = 9999
-            tofB = 9999
-            clkA = 9999
-            clkB = 9999
-            nTkrLyrs = dataList[39]
-            iPtr = 40
-        if verbose:
-            print("        TimeStamp = " + str(timeStamp))
-            print("        TOF=" + str(dtmin) + " Number A=" + str(nTOFA) + " Number B=" + str(nTOFB))
-            print("        run=" + str(run) + "  trigger " + str(trigger))
-        trgStatus = dataList[22]
-        
-        rc = 0
-        numHitEvt = 0
-        if verbose: 
-            if month > 12 or month < 1: month = 1
-            print("        Event time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
-            if debugTOF: print("        REF-A=" + str(tofA) + "  REF-B=" + str(tofB))
-            if debugTOF: print("        TOF clkA=" + str(clkA) + "  TOF clkB=" + str(clkB))
-            print("        Trigger status = " + str(hex(trgStatus)))
-            print("        Number of tracker layers read out = " + str(nTkrLyrs))           
-            FPGAs = []
-            stripHits = []
-            for brd in range(nTkrLyrs):
-                ##brdNum = dataList[iPtr]
-                ##iPtr = iPtr + 1
-                nBytes = dataList[iPtr]
-                iPtr = iPtr + 1
-                hitList = []
-                for hit in range(nBytes):
-                    #print("                      " + str(hit) + "  " + hex(dataList[iPtr]))
-                    hitList.append(byteList[iPtr])
+            print("limitedRun: invalid trailer returned: " + str(ret))
+        if dataID == "DE" or dataID == "de":   # Parse the housekeeping packet
+            run = dataList[4]*256 + dataList[5]
+            print("Housekeeping packet for run " + str(run))
+            timeDate = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
+            year = ((timeDate & 0x7C000000) >> 26) + 2000
+            month = (timeDate & 0x03C00000) >> 22
+            day = (timeDate & 0x003E0000) >> 17
+            hour = (timeDate & 0x0001F000) >> 12
+            minute = (timeDate & 0x00000FC0) >> 6
+            second = (timeDate & 0x0000003F)
+            print("   Housekeeping time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
+            print("   Last command = " + str(byteList[10].hex() + str(byteList[11].hex())))
+            cmdCnt = dataList[12]*255 + dataList[13]
+            print("   Command count = " + str(cmdCnt))
+            print("   Number of bad commands = " + str(dataList[14]))
+            print("   Number of errors = " + str(dataList[15]))
+            cntGO = dataList[16]*16777216 + dataList[17]*65536 + dataList[18]*256 + dataList[19]
+            cntGO1 = dataList[20]*16777216 + dataList[21]*65536 + dataList[22]*256 + dataList[23]
+            print("   GO count = " + str(cntGO) + "     GO1 count = " + str(cntGO1))
+            avgReadTime = dataList[24]*256 + dataList[25]
+            print("   Average readout time = " + str(avgReadTime) + " microseconds")
+            Grate = dataList[34]*256 + dataList[35]
+            print("   Guard rate = " + str(Grate) + " Hz")
+            T1rate = dataList[26]*256 + dataList[27]
+            print("   T1 rate = " + str(T1rate) + " Hz")
+            T2rate = dataList[28]*256 + dataList[29]
+            print("   T2 rate = " + str(T2rate) + " Hz")
+            T3rate = dataList[30]*256 + dataList[31]
+            print("   T3 rate = " + str(T3rate) + " Hz")
+            T4rate = dataList[32]*256 + dataList[33]
+            print("   T4 rate = " + str(T4rate) + " Hz")
+            tkrCmdCnt = dataList[36]*256 + dataList[37]
+            print("   Tracker command count = " + str(tkrCmdCnt))
+            print("   Fraction of triggers with Tracker 1 bit set = " + str(dataList[38]) + " percent")
+            print("   Fraction of triggers with Tracker 2 bit set = " + str(dataList[39]) + " percent")
+            print("   Number of tracker data errors = " + str(dataList[40]))
+            print("   Number of tracker time-outs = " + str(dataList[41]))
+            for brd in range(8):
+                numChipsHit = dataList[42+brd]/10.0
+                print("    Tracker board " + str(brd) + " has " + str(numChipsHit) + " chips hit per event")
+            for brd in range(8):
+                layerRate = dataList[50 + brd*2]*256 + dataList[50 + brd*2 + 1]
+                print("    Tracker board " + str(brd) + " rate = " + str(layerRate) + " Hz")
+            dieTemp = dataList[66]*256 + dataList[67]
+            print("   Event PSOC die temperature = " + str(dieTemp))
+            tkrTemp = dataList[68]*256 + dataList[69]
+            Tcelsius = (0.25/4.0)*(tkrTemp/16.)
+            print("   Tracker layer 0 temperature = " + str(Tcelsius) + " Celsius")
+            tkrTemp = dataList[70]*256 + dataList[71]
+            Tcelsius = (0.25/4.0)*(tkrTemp/16.)
+            print("   Tracker layer 7 temperature = " + str(Tcelsius) + " Celsius")
+        elif dataID == "DF" or dataID == "df":
+            print("Tracker housekeeping packet:")
+            timeDate = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
+            year = ((timeDate & 0x7C000000) >> 26) + 2000
+            month = (timeDate & 0x03C00000) >> 22
+            day = (timeDate & 0x003E0000) >> 17
+            hour = (timeDate & 0x0001F000) >> 12
+            minute = (timeDate & 0x00000FC0) >> 6
+            second = (timeDate & 0x0000003F)
+            print("   Time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
+            offset = 7
+            for brd in range(8):
+                if dataList[offset+1] == 0 and dataList[offset+2] == 0: break
+                print("    Housekeeping data for Tracker board " + str(brd) + ":")
+                tkrTemp = dataList[offset+1]*256 + dataList[offset+2]
+                Tcelsius = (0.25/4.0)*(tkrTemp/16.)
+                print("     Temperature = " + str(Tcelsius) + " Celsius")
+                shuntVoltage = 2.5*(dataList[offset+3]*256 + dataList[offset+4])/1000000.
+                R = 100.0
+                shuntCurrent = shuntVoltage*1000000./R
+                print("      Bias current = " + str(shuntCurrent) + " microamps")
+                busVoltage = 1.25*(dataList[offset+5]*256 + dataList[offset+6])/1000.
+                print("      Digital 1.2V bus voltage reading = " + str(busVoltage) + " V")
+                shuntVoltage = 2.5*(dataList[offset+7]*256 + dataList[offset+8])/1000000.
+                R = 0.03
+                shuntCurrent = shuntVoltage*1000./R
+                print("      Digital 1.2V shunt current reading = " + str(shuntCurrent) + " microamps")
+                busVoltage = 1.25*(dataList[offset+9]*256 + dataList[offset+10])/1000.
+                print("      Digital 2.5V bus voltage reading = " + str(busVoltage) + " V")
+                shuntVoltage = 2.5*(dataList[offset+11]*256 + dataList[offset+12])/1000000.
+                shuntCurrent = shuntVoltage*1000./R
+                print("      Digital 2.5V shunt current reading = " + str(shuntCurrent) + " microamps")
+                busVoltage = 1.25*(dataList[offset+13]*256 + dataList[offset+14])/1000.
+                print("      Digital 3.3V bus voltage reading = " + str(busVoltage) + " V")
+                shuntVoltage = 2.5*(dataList[offset+15]*256 + dataList[offset+16])/1000000.
+                shuntCurrent = shuntVoltage*1000./R
+                print("      Digital 3.3V shunt current reading = " + str(shuntCurrent) + " microamps")
+                busVoltage = 1.25*(dataList[offset+17]*256 + dataList[offset+18])/1000.
+                print("      Analog 2.1V bus voltage reading = " + str(busVoltage) + " V")
+                shuntVoltage = 2.5*(dataList[offset+19]*256 + dataList[offset+20])/1000000.
+                shuntCurrent = shuntVoltage*1000./R
+                print("      Analog 2.1V shunt current reading = " + str(shuntCurrent) + " microamps")
+                busVoltage = 1.25*(dataList[offset+21]*256 + dataList[offset+22])/1000.
+                print("      Analog 3.3V bus voltage reading = " + str(busVoltage) + " V")
+                shuntVoltage = 2.5*(dataList[offset+23]*256 + dataList[offset+24])/1000000.
+                shuntCurrent = shuntVoltage*1000./R
+                print("      Analog 3.3V shunt current reading = " + str(shuntCurrent) + " microamps")
+                offset = offset + 24
+        else:
+            run = dataList[4]*256 + dataList[5]
+            trigger = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
+            cntGo1 = dataList[14]*16777216 + dataList[15]*65536 + dataList[16]*256 + dataList[17]
+            timeDate = dataList[18]*16777216 + dataList[19]*65536 + dataList[20]*256 + dataList[21]
+            if verbose: print("   Trigger: " + str(trigger) + " accepted, " + str(trigger+cntGo1) + " generated.  Data List length = " + str(len(dataList)))
+            timeStamp = dataList[10]*16777216 + dataList[11]*65536 + dataList[12]*256 + dataList[13]
+            year = ((timeDate & 0x7C000000) >> 26) + 2000
+            month = (timeDate & 0x03C00000) >> 22
+            day = (timeDate & 0x003E0000) >> 17
+            hour = (timeDate & 0x0001F000) >> 12
+            minute = (timeDate & 0x00000FC0) >> 6
+            second = (timeDate & 0x0000003F)
+            deltaTime = timeStamp - lastTime
+            deltaTimeSec = deltaTime * (1./200.)
+            if event > 0:
+                if verbose: print("    Time since the previous event = " + str(deltaTime) + " counts, or " + str(deltaTimeSec) + " seconds")
+                timeSum += deltaTime
+            lastTime = timeStamp
+            T1 = dataList[23]*256 + dataList[24]
+            T2 = dataList[25]*256 + dataList[26]
+            T3 = dataList[27]*256 + dataList[28]
+            T4 = dataList[29]*256 + dataList[30]
+            G =  dataList[31]*256 + dataList[32]
+            if verbose:
+                print("        T1 ADC=" + str(T1))
+                print("        T2 ADC=" + str(T2))
+                print("        T3 ADC=" + str(T3))
+                print("        T4 ADC=" + str(T4))
+                print("         G ADC=" + str(G))
+            dtmin = 10*np.int16(dataList[33]*256 + dataList[34])
+            if debugTOF:
+                nTOFA = dataList[39]
+                nTOFB = dataList[40]
+                tofA = 10*(dataList[41]*256 + dataList[42])
+                tofB = 10*(dataList[43]*256 + dataList[44])
+                clkA = dataList[45]*256 + dataList[46]
+                clkB = dataList[47]*256 + dataList[48]
+                nTkrLyrs = dataList[49]
+                iPtr = 50
+            else: 
+                nTOFA = 0
+                nTOFB = 0
+                tofA = 9999
+                tofB = 9999
+                clkA = 9999
+                clkB = 9999
+                nTkrLyrs = dataList[39]
+                iPtr = 40
+            if verbose:
+                print("        TimeStamp = " + str(timeStamp))
+                print("        TOF=" + str(dtmin) + " Number A=" + str(nTOFA) + " Number B=" + str(nTOFB))
+                print("        run=" + str(run) + "  trigger " + str(trigger))
+            trgStatus = dataList[22]
+            
+            rc = 0
+            numHitEvt = 0
+            if verbose: 
+                if month > 12 or month < 1: month = 1
+                print("        Event time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
+                if debugTOF: print("        REF-A=" + str(tofA) + "  REF-B=" + str(tofB))
+                if debugTOF: print("        TOF clkA=" + str(clkA) + "  TOF clkB=" + str(clkB))
+                print("        Trigger status = " + str(hex(trgStatus)))
+                print("        Number of tracker layers read out = " + str(nTkrLyrs))           
+                FPGAs = []
+                stripHits = []
+                for brd in range(nTkrLyrs):
+                    ##brdNum = dataList[iPtr]
+                    ##iPtr = iPtr + 1
+                    nBytes = dataList[iPtr]
                     iPtr = iPtr + 1
-                #print("           Hit list= " + getBinaryString(hitList))
-                rc, FPGA, strips = ParseASIChitList(getBinaryString(hitList),True)
-                if rc != 0: nBadTkr = nBadTkr + 1
-                numHitEvt = len(strips)
-                numHits = numHits + numHitEvt
-                FPGAs.append(FPGA)
-                stripHits.append(strips)
-            if nPlotted < nToPlot: 
-                plotTkrEvnt(run, trigger, FPGAs, stripHits)
-                nPlotted = nPlotted + 1
-        if trgStatus & 0x01: pmtTrg1 = pmtTrg1 + 1
-        if trgStatus & 0x02: pmtTrg2 = pmtTrg2 + 1
-        if trgStatus & 0x04: tkrTrg0 = tkrTrg0 + 1
-        if trgStatus & 0x08: tkrTrg1 = tkrTrg1 + 1
-        if trgStatus & 0x10: pmtGrd = pmtGrd + 1
-        strOut = '{} {} {} {} {} {} {} {} {} {} {} {} {} {}\n'.format(trigger, T1, T2, T3, T4, G, numHitEvt, tofA, tofB, dtmin, nTOFA, nTOFB, deltaTime, rc)
-        f.write(strOut)   
-        TOFavg = TOFavg + float(dtmin)
-        TOFavg2 = TOFavg2 + float(dtmin)*float(dtmin)
-        if event != 0:
-            ADCavg[0] = ADCavg[0] + T1
-            ADCavg[1] = ADCavg[1] + T2
-            ADCavg[2] = ADCavg[2] + T3
-            ADCavg[3] = ADCavg[3] + T4
-            ADCavg[4] = ADCavg[4] + G
-            ADCavg2[0] = ADCavg2[0] + T1*T1
-            ADCavg2[1] = ADCavg2[1] + T2*T2
-            ADCavg2[2] = ADCavg2[2] + T3*T3
-            ADCavg2[3] = ADCavg2[3] + T4*T4
-            ADCavg2[4] = ADCavg2[4] + G*G
-        # Output all of the data to an ASCII file
-        if outputEvents:
-            timeStr = str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year)
-            f2.write("Event {:d}: {} {:s}   rc={}\n".format(trigger, timeStamp, timeStr, rc))
-            f2.write("  ADC: {}, {}, {}, {}, {}\n".format(T1, T2, T3, T4, G))
-            f2.write("  TOF: {}  nA={}  nB={}  refA={}  refB={}  clkA={}  clkB={} \n".format(dtmin, nTOFA, nTOFB, tofA, tofB, clkA, clkB))
-            for lyr, hits in zip(FPGAs,stripHits):
-                f2.write("    Lyr {}:".format(lyr))
-                for strip in hits:
-                    f2.write(" {} ".format(strip))
-                f2.write("\n")
+                    hitList = []
+                    for hit in range(nBytes):
+                        #print("                      " + str(hit) + "  " + hex(dataList[iPtr]))
+                        hitList.append(byteList[iPtr])
+                        iPtr = iPtr + 1
+                    #print("           Hit list= " + getBinaryString(hitList))
+                    rc, FPGA, strips = ParseASIChitList(getBinaryString(hitList),True)
+                    if rc != 0: nBadTkr = nBadTkr + 1
+                    numHitEvt = len(strips)
+                    numHits = numHits + numHitEvt
+                    FPGAs.append(FPGA)
+                    stripHits.append(strips)
+                if nPlotted < nToPlot: 
+                    plotTkrEvnt(run, trigger, FPGAs, stripHits)
+                    nPlotted = nPlotted + 1
+            if trgStatus & 0x01: pmtTrg1 = pmtTrg1 + 1
+            if trgStatus & 0x02: pmtTrg2 = pmtTrg2 + 1
+            if trgStatus & 0x04: tkrTrg0 = tkrTrg0 + 1
+            if trgStatus & 0x08: tkrTrg1 = tkrTrg1 + 1
+            if trgStatus & 0x10: pmtGrd = pmtGrd + 1
+            strOut = '{} {} {} {} {} {} {} {} {} {} {} {} {} {}\n'.format(trigger, T1, T2, T3, T4, G, numHitEvt, tofA, tofB, dtmin, nTOFA, nTOFB, deltaTime, rc)
+            f.write(strOut)   
+            TOFavg = TOFavg + float(dtmin)
+            TOFavg2 = TOFavg2 + float(dtmin)*float(dtmin)
+            if event != 0:
+                ADCavg[0] = ADCavg[0] + T1
+                ADCavg[1] = ADCavg[1] + T2
+                ADCavg[2] = ADCavg[2] + T3
+                ADCavg[3] = ADCavg[3] + T4
+                ADCavg[4] = ADCavg[4] + G
+                ADCavg2[0] = ADCavg2[0] + T1*T1
+                ADCavg2[1] = ADCavg2[1] + T2*T2
+                ADCavg2[2] = ADCavg2[2] + T3*T3
+                ADCavg2[3] = ADCavg2[3] + T4*T4
+                ADCavg2[4] = ADCavg2[4] + G*G
+            # Output all of the data to an ASCII file
+            if outputEvents:
+                timeStr = str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year)
+                f2.write("Event {:d}: {} {:s}   rc={}\n".format(trigger, timeStamp, timeStr, rc))
+                f2.write("  ADC: {}, {}, {}, {}, {}\n".format(T1, T2, T3, T4, G))
+                f2.write("  TOF: {}  nA={}  nB={}  refA={}  refB={}  clkA={}  clkB={} \n".format(dtmin, nTOFA, nTOFB, tofA, tofB, clkA, clkB))
+                for lyr, hits in zip(FPGAs,stripHits):
+                    f2.write("    Lyr {}:".format(lyr))
+                    for strip in hits:
+                        f2.write(" {} ".format(strip))
+                    f2.write("\n")
 
     endTime = time.time()
     runTime = endTime - startTime

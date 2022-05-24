@@ -54,12 +54,16 @@ readTofConfig()
 #ret = ser.read()
 #print(ret)
 
-startPmtRateMonitor(4, 10)
-time.sleep(5)
-getPmtRates()
+#startPmtRateMonitor(4, 10)
+#time.sleep(5)
+#getPmtRates()
+#time.sleep(1)
 
 readErrors(address)
 tkrSetCRCcheck("yes")
+
+setTKRlayers(6, 7, 1, 0, 6, 5, 8, 4)
+getTKRlayers()
 
 boards = [0]
 nBoards = len(boards)
@@ -79,6 +83,7 @@ if nBoards > 0:
     if asicReset: tkrAsicSoftReset(0x1F)
 
     #tkrSetNumLyrs(1)
+    bumpTKRthreshold(80)
     configureTkrASICs(nBoards)
     for brd in boards:
         print("The number of tracker readout layers is " + str(bytes2int(tkrGetNumLyrs(brd))) + " for board " + str(brd))
@@ -97,7 +102,7 @@ if nBoards > 0:
     gain = 0
     shaping = 1
     bufSpeed = 3
-    trigDelay = 1
+    trigDelay = 4
     trigWindow = 1
     ioCurrent = 2
     maxClust = 10
@@ -147,10 +152,10 @@ if nBoards > 0:
         #time.sleep(0.1)
         for chip in chips: tkrGetTriggerMask(brd, chip)
 
-        tkrSetDAC(brd, 31, "calibration", 20 , "high")
+        tkrSetDAC(brd, 31, "calibration", 40 , "high")
         for chip in chips: tkrGetDAC(brd, chip, "calibration")
 
-        #tkrSetDAC(brd, 31, "threshold", 30 , "low")
+        #tkrSetDAC(brd, 31, "threshold", 25 , "low")
         for chip in chips: tkrGetDAC(brd, chip, "threshold")
 
         #tkrSetDataMask(brd, 31, "unmask", [])
@@ -158,7 +163,7 @@ if nBoards > 0:
         for chip in chips: tkrGetDataMask(brd, chip)
 
     if len(boards) == 1:
-        triggerDelay = 6    # 6?
+        triggerDelay = 18    # 6 if asic trig delay is 1?
         triggerTag = 0
         sendTkrCalStrobe(0, triggerDelay, triggerTag, True)
 
@@ -179,7 +184,7 @@ if nBoards > 0:
 #    logicReset(addrEvnt)
 #    time.sleep(0.3)
 
-sys.exit("abort")
+#sys.exit("abort")
 
 TOFselectDAQ(address,"DMA")
 
@@ -205,14 +210,14 @@ if N>1:
     print("Mean TOF = " + str(tAvg) + " ns    Std. Dev. = " + str(math.sqrt(Var)) + " ns")
 
 for brd in boards:
-	tkrSetDAC(brd, 31, "threshold", 64 , "low")
-	tkrGetDAC(brd, 0, "threshold")
-	for chip in chips: tkrGetDAC(brd, chip, "threshold")
+    #tkrSetDAC(brd, 31, "threshold", 64 , "low")
+    tkrGetDAC(brd, 0, "threshold")
+    for chip in chips: tkrGetDAC(brd, chip, "threshold")
 
 getLyrTrgCnt(0)
 
-startTkrRateMonitor(2, 2)
-time.sleep(2)
+#startTkrRateMonitor(2, 2)
+#time.sleep(2)
 
 mask = 0x07    # T1
 print("Setting the first trigger mask to " + str(mask))
@@ -237,9 +242,12 @@ tkrSetPMTtrgDly(26)
 print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
+startHouseKeeping(4)
+#startTkrHouseKeeping(6)
+
 readErrors(address)
 #sys.exit("abort")
-ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 30, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 50, True, False, True)
 getRunCounters()
 getAvgReadoutTime()
 print("Average ADC values:")
@@ -256,8 +264,10 @@ for ch in range(5):
 
 stopPmtRateMonitor()
 getPmtRates()
-stopTkrRateMonitor()
+#stopTkrRateMonitor()
 getTkrLyrRates()
+
+getLyrTrgCnt(0)
 
 if asicReset and nBoards>0: tkrAsicPowerOff()
 
