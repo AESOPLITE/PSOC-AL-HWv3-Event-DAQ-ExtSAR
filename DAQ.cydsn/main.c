@@ -17,7 +17,8 @@
  * V22.2: Corrected error in the tracker initialization code.
  * V22.3: Simplified the trigger logic in the schematic
  * V23.1: Fixed trigger logic; implemented housekeeping packets; only reset ASICs if there are errors. Added command to modify the
-*         tracker layer configuration. Added command to increase all tracker thresholds by an additive amount.
+ *        tracker layer configuration. Added command to increase all tracker thresholds by an additive amount.
+ * V23.2: Tested and debugged the tracker housekeeping packet
  * ========================================
  */
 #include "project.h"
@@ -27,7 +28,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 23
-#define MINOR_VERSION 1
+#define MINOR_VERSION 2
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -204,7 +205,7 @@
 
 // Some variables defined only for housekeeping information
 #define HOUSESIZE 72u
-#define TKRHOUSESIZE 110u
+#define TKRHOUSESIZE 201u
 bool doHouseKeeping;           // Set true to send housekeeping packets out
 bool doTkrHouseKeeping;
 uint8 houseKeepPeriod;         // Number of seconds between housekeeping packets 
@@ -862,6 +863,7 @@ uint16 tkrReadI2cReg(uint8 FPGA, uint8 i2cAddress) {
 }
 
 uint16 getTkrTemp(uint8 FPGA) {
+    CyDelayUs(500);
     tkrLoadI2cReg(FPGA, I2C_Address_TKR_Temp, 0x01, 0x60, 0x00);   // Set config reg
     CyDelayUs(600);
     tkrLoadI2cReg(FPGA, I2C_Address_TKR_Temp, 0x00, 0x00, 0x00);   // Set pointer reg
@@ -974,15 +976,17 @@ void makeHouseKeeping() {
 }
 
 uint16 tkrGetBusVoltage(uint8 FPGA, uint8 i2cAddress) {
+    CyDelayUs(500);
     tkrLoadI2cReg(FPGA, i2cAddress, 0x02, 0x00, 0x00);   // Set config reg
-    CyDelayUs(700);
+    CyDelayUs(600);
     uint16 result = tkrReadI2cReg(FPGA, i2cAddress);
     return result;
 }
 
 uint16 tkrGetShuntVoltage(uint8 FPGA, uint8 i2cAddress) {
+    CyDelayUs(500);
     tkrLoadI2cReg(FPGA, i2cAddress, 0x01, 0x00, 0x00);   // Set config reg
-    CyDelayUs(700);
+    CyDelayUs(600);
     uint16 result = tkrReadI2cReg(FPGA, i2cAddress);
     return result;
 }
@@ -995,11 +999,13 @@ void makeTkrHouseKeeping() {
     data[3] = 0x4B;
     timeDate = RTC_1_ReadTime();
     uint32 timeWord = packTime();
-    data[4] = byte32(timeWord, 0); // Time and date
-    data[5] = byte32(timeWord, 1);
-    data[6] = byte32(timeWord, 2);
-    data[7] = byte32(timeWord, 3);
-    int offset = 7;
+    data[4] = byte16(runNumber, 0);
+    data[5] = byte16(runNumber, 1);
+    data[6] = byte32(timeWord, 0); // Time and date
+    data[7] = byte32(timeWord, 1);
+    data[8] = byte32(timeWord, 2);
+    data[9] = byte32(timeWord, 3);
+    int offset = 9;
     for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {
         if (brd < numTkrBrds) {
             uint16 result = getTkrTemp(brd);
@@ -1803,7 +1809,7 @@ CY_ISR(isr1Hz) {
     if (cntSeconds%houseKeepPeriod == 0 && cntSeconds >= houseKeepPeriod) {
         houseKeepingDue = true;
     }
-    if (cntSeconds%(tkrHouseKeepPeriod*1) && cntSeconds >= (tkrHouseKeepPeriod*1)) {
+    if (cntSeconds%(tkrHouseKeepPeriod*60) && cntSeconds >= (tkrHouseKeepPeriod*60)) {
         tkrHouseKeepingDue = true;
     }
 }

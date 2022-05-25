@@ -956,7 +956,8 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             Tcelsius = (0.25/4.0)*(tkrTemp/16.)
             print("   Tracker layer 7 temperature = " + str(Tcelsius) + " Celsius")
         elif dataID == "DF" or dataID == "df":
-            print("Tracker housekeeping packet:")
+            run = dataList[4]*256 + dataList[5]
+            print("Tracker housekeeping packet for run " + str(run) + ":")
             timeDate = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
             year = ((timeDate & 0x7C000000) >> 26) + 2000
             month = (timeDate & 0x03C00000) >> 22
@@ -965,13 +966,13 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             minute = (timeDate & 0x00000FC0) >> 6
             second = (timeDate & 0x0000003F)
             print("   Time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
-            offset = 7
+            offset = 9
             for brd in range(8):
                 if dataList[offset+1] == 0 and dataList[offset+2] == 0: break
-                print("    Housekeeping data for Tracker board " + str(brd) + ":")
+                print("   Housekeeping data for Tracker board " + str(brd) + ":")
                 tkrTemp = dataList[offset+1]*256 + dataList[offset+2]
                 Tcelsius = (0.25/4.0)*(tkrTemp/16.)
-                print("     Temperature = " + str(Tcelsius) + " Celsius")
+                print("      Temperature = " + str(Tcelsius) + " Celsius")
                 shuntVoltage = 2.5*(dataList[offset+3]*256 + dataList[offset+4])/1000000.
                 R = 100.0
                 shuntCurrent = shuntVoltage*1000000./R

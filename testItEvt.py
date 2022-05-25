@@ -83,7 +83,7 @@ if nBoards > 0:
     if asicReset: tkrAsicSoftReset(0x1F)
 
     #tkrSetNumLyrs(1)
-    bumpTKRthreshold(80)
+    bumpTKRthreshold(4)
     configureTkrASICs(nBoards)
     for brd in boards:
         print("The number of tracker readout layers is " + str(bytes2int(tkrGetNumLyrs(brd))) + " for board " + str(brd))
@@ -243,7 +243,7 @@ print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
 startHouseKeeping(4)
-#startTkrHouseKeeping(6)
+startTkrHouseKeeping(6)
 
 readErrors(address)
 #sys.exit("abort")
