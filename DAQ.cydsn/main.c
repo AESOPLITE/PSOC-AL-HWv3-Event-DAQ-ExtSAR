@@ -721,7 +721,7 @@ int getTrackerData(uint8 idExpected) {
             else tkrReadPtr = 0;
         }  
         tkrReadPtr = -1;
-        tkrWritePtr = 0;
+//        tkrWritePtr = 0;//commented out to use full tkrbuf -Brian
         isr_TKR_Enable(); 
         rc = 5;
     }
@@ -744,7 +744,7 @@ void clearTkrFIFO() {
     uint8 intState = isr_TKR_GetState();
     if (intState) isr_TKR_Disable();
     tkrReadPtr = -1;
-    tkrWritePtr = 0;
+//        tkrWritePtr = 0;//commented out to use full tkrbuf -Brian
     CyDelayUs(80);
     while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
         UART_TKR_ClearRxBuffer();
