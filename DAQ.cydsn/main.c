@@ -29,7 +29,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 23
-#define MINOR_VERSION 3
+#define MINOR_VERSION 4
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -499,7 +499,8 @@ uint8 tkr_getByte(uint32 startTime, uint8 flag) {
             //addError(ERR_TKR_READ_TIMEOUT, temp, flag);
             addError(ERR_TKR_READ_TIMEOUT, tkrCmdCode, flag);
             if (nTkrTimeOut < 0xFF) nTkrTimeOut++;
-            return 0x00;
+            return tkrBuf[((tkrWritePtr - 1) % MAX_TKR)]; // Return the last byte -Brian
+//            return 0x00;
         }
     }
     isr_TKR_Disable();
@@ -711,7 +712,7 @@ int getTrackerData(uint8 idExpected) {
             else tkrReadPtr = 0;
         }  
         tkrReadPtr = -1;
-        tkrWritePtr = 0;
+//        tkrWritePtr = 0;//commented out to use full tkrbuf -Brian
         isr_TKR_Enable(); 
         rc = 5;
     }
@@ -734,7 +735,7 @@ void clearTkrFIFO() {
     uint8 intState = isr_TKR_GetState();
     if (intState) isr_TKR_Disable();
     tkrReadPtr = -1;
-    tkrWritePtr = 0;
+//        tkrWritePtr = 0;//commented out to use full tkrbuf -Brian
     CyDelayUs(80);
     while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
         UART_TKR_ClearRxBuffer();
@@ -1780,10 +1781,12 @@ CY_ISR(isrTkrUART) {
                 uint8 code = (uint8)((theByte & 0xDF00)>>8);
                 addError(ERR_UART_TKR, code, (uint8)theByte);
             }
+            isr_TKR_Disable();
             tkrBuf[tkrWritePtr] = (uint8)theByte;
             if (tkrReadPtr < 0) tkrReadPtr = tkrWritePtr;
             if (tkrWritePtr == MAX_TKR - 1) tkrWritePtr = 0;
             else tkrWritePtr++;
+            isr_TKR_Enable();
             if (tkrWritePtr == tkrReadPtr) {   // FIFO overflow condition, very bad!
                 addError(ERR_TKR_BUFFER_OVERFLOW, byte32(cntGO, 0), byte32(cntGO, 1));
             }
