@@ -2,6 +2,8 @@
  *
  * Robert P. Johnson
  * Copyright U.C. Santa Cruz, 2020
+ * Brian Lucas
+ * Copyright Bartol Research Institute, 2020
  * All Rights Reserved
  * UNPUBLISHED, LICENSED SOFTWARE.
  *
@@ -20,6 +22,7 @@
  *        tracker layer configuration. Added command to increase all tracker thresholds by an additive amount.
  * V23.2: Tested and debugged the tracker housekeeping packet
  * V23.3: Changed the tracker hit list to fixed memory (not heap). Save tracker command code for tracker read timeout error.
+ * V23.4: Various changes to improve thet atomicity and debuggablity of tkrbuf -Brian
  * ========================================
  */
 #include "project.h"
