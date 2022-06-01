@@ -23,6 +23,7 @@
  * V23.2: Tested and debugged the tracker housekeeping packet
  * V23.3: Changed the tracker hit list to fixed memory (not heap). Save tracker command code for tracker read timeout error.
  * V23.4: Various changes to improve the atomicity and debuggablity of tkrbuf -Brian
+ * V23.5: Expanded the interrupt disable in the tkr ISR -Brian
  * ========================================
  */
 #include "project.h"
@@ -32,7 +33,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 23
-#define MINOR_VERSION 4
+#define MINOR_VERSION 5
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -1779,12 +1780,12 @@ CY_ISR(isrUART) {
 CY_ISR(isrTkrUART) {
     if (tkrWritePtr != tkrReadPtr) { // Ignore the interrupt if the software buffer is full
         while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
+            isr_TKR_Disable();
             uint16 theByte = UART_TKR_GetByte();
             if ((theByte & 0xDF00) != 0) {
                 uint8 code = (uint8)((theByte & 0xDF00)>>8);
                 addError(ERR_UART_TKR, code, (uint8)theByte);
             }
-            isr_TKR_Disable();
             tkrBuf[tkrWritePtr] = (uint8)theByte;
             if (tkrReadPtr < 0) tkrReadPtr = tkrWritePtr;
             if (tkrWritePtr == MAX_TKR - 1) tkrWritePtr = 0;
