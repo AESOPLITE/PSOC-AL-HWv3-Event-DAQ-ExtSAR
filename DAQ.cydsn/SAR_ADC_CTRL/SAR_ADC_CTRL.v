@@ -12,13 +12,12 @@
 // ========================================
 `include "cypress.v"
 //`#end` -- edit above this line, do not edit this line
-// Generated on 04/04/2022 at 16:48
+// Generated on 06/03/2022 at 09:53
 // Component: SAR_ADC_CTRL
 module SAR_ADC_CTRL (
 	output  CONVSTB,
 	output  DONE,
 	output  GO1en,
-	output  GOen,
 	output  RstCnt,
 	output  RstPk,
 	input   ChOR,
@@ -59,8 +58,7 @@ reg [2:0] State, NextState;
 reg Golatch;
 
 assign RstPk = (State == Fini);
-assign GOen = (State == Wait || State == Dlay);
-assign GO1en = (GOen || State == Fini);
+assign GO1en = (State == Wait || State == Fini);
 
 // Note: the external Count7 time must be longer than the conversion time.
 //       It also determines the time waiting for the peak detector to settle 

@@ -1389,6 +1389,7 @@
       <Data key="0e4e2c09-99ed-413c-8086-b6d8418d6aff" value="Pin_13" />
       <Data key="1b4f90b9-959a-4bf3-bcde-75882f6f5c16" value="Pin_RstPk" />
       <Data key="1e347577-a1c7-4ea5-bc5e-2454b3934e9f" value="Pin_1Hz" />
+      <Data key="2a89ca3c-7fc2-49b0-affd-60e3ded08769" value="Pin_db2" />
       <Data key="02a72007-f93c-483d-9ddf-b9b8e85adaf4" value="Pin_29" />
       <Data key="2b4a11f1-a4a3-4f16-b5fa-002ebcfd8012" value="Pin_db2" />
       <Data key="2b269b96-47a4-4e9a-937e-76d4080bb211/8b77a6c4-10a0-4390-971c-672353e2a49c" value="USBUART_Dm" />
@@ -1408,6 +1409,7 @@
       <Data key="4c78477f-b164-41a8-9f9b-5705c5684575" value="Pin_TkrTg1" />
       <Data key="05a9c8de-3ba2-4909-8250-95fdc61c0bf4" value="Pin_T3pre" />
       <Data key="6a87472e-9501-4653-88ae-2459c43fab50" value="Pin_28" />
+      <Data key="6be4cb48-1c38-4019-a3d5-5d74ffcdcf57" value="Pin_db3" />
       <Data key="6ccbfb70-cc7b-4014-9337-79610da5e03c" value="Pin_LED_TKR" />
       <Data key="6d29ac94-f854-4fde-9b54-6197898ec7c3" value="Pin_Mosi3" />
       <Data key="7a46836c-eb4e-4e50-97e2-25b75469317e" value="Pin_LED2" />
@@ -4615,6 +4617,11 @@
         <Data key="Port Format" value="6,4" />
       </Group>
     </Group>
+    <Group key="2a89ca3c-7fc2-49b0-affd-60e3ded08769">
+      <Group key="0">
+        <Data key="Port Format" value="0,0" />
+      </Group>
+    </Group>
     <Group key="02a72007-f93c-483d-9ddf-b9b8e85adaf4">
       <Group key="0">
         <Data key="Port Format" value="2,5" />
@@ -4698,6 +4705,11 @@
     <Group key="05a9c8de-3ba2-4909-8250-95fdc61c0bf4">
       <Group key="0">
         <Data key="Port Format" value="4,6" />
+      </Group>
+    </Group>
+    <Group key="6be4cb48-1c38-4019-a3d5-5d74ffcdcf57">
+      <Group key="0">
+        <Data key="Port Format" value="4,1" />
       </Group>
     </Group>
     <Group key="6ccbfb70-cc7b-4014-9337-79610da5e03c">

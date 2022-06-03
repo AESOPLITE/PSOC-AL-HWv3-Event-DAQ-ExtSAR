@@ -24,6 +24,8 @@
  * V23.6: Fixed bug in location of the data in a tracker FPGA housekeeping packet. Also, set the length of such packets correctly
  *        in case that it comes from the Tracker with the wrong length. Added count of CRC errors to the endrun summary. Increased
  *        list of commands acted on during a run, encoded in a new funct cmdAllowedInRun(). Turn off rate monitors at EOR.
+ * V24.0: Change in ADC control logic. Trigger is disabled by hardware immediately after the trigger occurs, instead of being disabled
+ *        in the ISR.
  * ========================================
  */
 #include "project.h"
@@ -32,8 +34,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define MAJOR_VERSION 23
-#define MINOR_VERSION 6
+#define MAJOR_VERSION 24
+#define MINOR_VERSION 0
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -290,6 +292,7 @@ uint8 thrDACsettings[] = {THRDEF, THRDEF, THRDEF, THRDEF};
 /* Bit definitions for the pulse control register Control_Reg_Pls */
 #define PULSE_LOGIC_RST 0x01    // Resets the hardware logic in the PSOC
 #define PULSE_CNTR_RST 0x02     // Resets the counter on each of the PMT channels
+#define PULSE_TRIG_SET 0x04     // Enables the trigger logic
 
 // 4-bit slave addresses for the SPI interface
 // Bits 0,1,2 drive the 3-to-8 decoder and are active high
@@ -1195,7 +1198,8 @@ uint8 readDAC(uint8 I2C_Address, uint16* rvalue) {
 // Check whether the trigger is enabled
 bool isTriggerEnabled() {
     uint8 regValue = Control_Reg_Trg_Read();
-    return regValue==0x01;
+    bool enabled = regValue==0x01;
+    return enabled;
 }
 
 // Set the time delays used for coordinating the peak detector readout:
@@ -1286,6 +1290,7 @@ void TOFenable(bool enable) {
 void triggerEnable(bool enable) {
     if (enable) {
         Control_Reg_Trg_Write(1); 
+        Control_Reg_Pls_Write(PULSE_TRIG_SET);
     } else {
         // Disable the master trigger 
         Control_Reg_Trg_Write(0);
@@ -1821,16 +1826,11 @@ CY_ISR(isr1Hz) {
 // GO signal (system trigger). Start the full event readout.
 // This ISR has highest priority
 CY_ISR(isrGO) {
-    // The trigger should always be enabled for this to be called, but we could check just in case. . .
-    //if (!isTriggerEnabled()) addError(ERR_TRG_NOT_ENABLED,byte32(cntGO,2),byte32(cntGO,1));
-
     trgStatus = Status_Reg_Trg_Read();     // Save this status for the eventual event readout
     triggered = true;                      // Signal that an event is ready to read out
     timeStamp = time();                    // Save for the event readout 
     timeStamp8 = Cntr8_Timer_ReadCount();  // Save for the TOF event analysis and readout
     cntGO1save = cntGO1;                   // Save for the event readout
-    // Disable the trigger until the event readout has been completed
-    Control_Reg_Trg_Write(0);  //triggerEnable(false);  avoid function call
 
     // At this point execution returns to its normal flow, allowing other interrupts. The remainder of the
     // event readout process is done in main(), in the infinite for loop.
@@ -1902,7 +1902,7 @@ void makeEvent() {
     for (int ch=0; ch<5; ++ch) {
         set_ADC_SSN(SSN_SAR[ch]);
         int InterruptState = CyEnterCriticalSection();
-        Control_Reg_1_Write(0x01);
+        Control_Reg_ADC_Write(0x01);
         if (ADCsoftReset) {            // This reset operation will occur only on the first ADC read operation after power-on
             if (ch == 7) dummy = dummy + 3; // Delay to stop the read operation between 2nd and 8th SCLK cycles, for soft reset
             else dummy = dummy + 4;         // This delay results in the CS going down at the start of the 5th SCLK cycle.
@@ -2170,7 +2170,10 @@ void tkrRateMonitor(bool *waitingTkrRateCnt) {
         if (diff >= 220) {  // Allow 1 second for the Tracker to finish its count
             *waitingTkrRateCnt = false;
             bool trgStat = isTriggerEnabled();
-            if (trgStat) triggerEnable(false);
+            if (trgStat) {
+                triggerEnable(false);
+                sendSimpleTrackerCmd(0x00, 0x66);
+            }
             bool tkrErr = false;
             uint16 theRate[MAX_TKR_BOARDS];
             for (int brd=0; brd<numTkrBrds; ++brd) {
@@ -2200,7 +2203,10 @@ void tkrRateMonitor(bool *waitingTkrRateCnt) {
                 }
                 tkrClkAtStart = time();
             }
-            if (trgStat) triggerEnable(true);
+            if (trgStat) {
+                sendSimpleTrackerCmd(0x00, 0x65);
+                triggerEnable(true);
+            }
         }
     } else {
         if (time() > tkrClkAtStart) {
@@ -2211,11 +2217,17 @@ void tkrRateMonitor(bool *waitingTkrRateCnt) {
         if (diff >= tkrMonitorInterval*200) {
             // Send a command to the tracker to accumulate trigger counts for 1 second
             bool trgStat = isTriggerEnabled();
-            if (trgStat) triggerEnable(false);
-            sendSimpleTrackerCmd(0, 0x6C);
+            if (trgStat) {
+                triggerEnable(false);
+                sendSimpleTrackerCmd(0x00, 0x66);
+            }
+            sendSimpleTrackerCmd(0x00, 0x6C);
             tkrClkCntStart = time();
             *waitingTkrRateCnt = true;
-            if (trgStat) triggerEnable(true);
+            if (trgStat) {
+                sendSimpleTrackerCmd(0x00, 0x65);
+                triggerEnable(true);
+            }
         }
     }
 } // end of subroutine trkRateMonitor
@@ -2892,13 +2904,18 @@ void interpretCommand(uint8 tofConfig[]) {
                 break;
             case '\x3B':   // Enable or disable the trigger
                 if (cmdData[0] == 1) {
+                    if (readTracker) sendSimpleTrackerCmd(0x00, 0x65);
                     triggerEnable(true);
                 } else if (cmdData[0] == 0) {
                     triggerEnable(false);
+                    if (readTracker) sendSimpleTrackerCmd(0x00, 0x66);
                 }
                 break;
             case '\x44':  // End a run and send out the run summary
                 triggerEnable(false);
+                if (readTracker) {
+                    sendSimpleTrackerCmd(0x00, 0x66);  // Disable the Tracker trigger
+                }
                 endingRun = true;
                 runNumber = 0;
                 monitorPmtRates = false;
@@ -2964,22 +2981,11 @@ void interpretCommand(uint8 tofConfig[]) {
                 debugTOF = (cmdData[3] == 1);
                 cntGO = 0;
                 numTkrResets = 0;
-                triggerEnable(true);
                 // Enable the tracker trigger
                 if (readTracker) {
-                    tkrCmdCode = 0x65;
-                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                    UART_TKR_WriteTxData(0x00);    // Address byte
-                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                    UART_TKR_WriteTxData(tkrCmdCode);    // Trigger enable
-                    while (UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_FULL);
-                    UART_TKR_WriteTxData(0x00);    // Number of data bytes
-                    uint8 rc = getTrackerData(TKR_ECHO_DATA);   // Get the echo. Note that any delay put before this results in
-                                                                // the first few bytes of the echo getting missed. Don't know why.
-                    if (rc != 0) {
-                        addError(ERR_TKR_TRG_ENABLE, dataOut[2], rc);;
-                    }
+                    sendSimpleTrackerCmd(0x00, 0x65);
                 }
+                triggerEnable(true);
                 TOFenable(true);
                 nDataReady = 0;  // Don't send the tracker echo back to the UART
                 nDataBytes = 0;  // Also, avoid sending an echo from this command
