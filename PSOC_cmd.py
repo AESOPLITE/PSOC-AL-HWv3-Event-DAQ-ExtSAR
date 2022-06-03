@@ -29,6 +29,7 @@ def bytes2int(str):
 def getBinaryString(byteList):
   strReturn = ""
   for byte in byteList:
+    if byte == b'': continue
     strByte = bin(int(binascii.hexlify(byte),16))[2:]
     L2 = len(strByte)
     for i in range(8-L2):
@@ -303,7 +304,7 @@ def getLyrTrgCnt(FPGA):
     ser.write(data3)
     time.sleep(0.1)
     dataReturned = getTkrHousekeeping()
-    rate = bytes2int(dataReturned[6])*256 + bytes2int(dataReturned[7])
+    rate = bytes2int(dataReturned[7])*256 + bytes2int(dataReturned[8])
     print("getLyrTrgCnt: the trigger rate for layer " + str(FPGA) + " is " + str(rate) + " Hz")
 
 def loadEventPSOCrtc():
@@ -1147,7 +1148,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
                 print("limitedRun: bad header found: b'\\xdc' " + str(ret)) 
             nBytes = bytes2int(ser.read(1))
             print("limitedRun: number of header bytes = " + str(nBytes))
-            if nBytes != 8:
+            if nBytes != 9:
                 print("limitedRun: dumping the bytes for an extra event trigger that came in while ending the run:")
                 for i in range(nBytes+2):
                     ret = ser.read(1);      
@@ -1168,8 +1169,6 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         ret = ser.read(1)
         if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
         byteList.append(ret)
-    ret = ser.read(1)
-    if ret != b'\x01': print("limitedRun: invalid padding byte " + str(ret) + " received for EOR header")
     ret = ser.read(3)
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))         
@@ -1184,6 +1183,8 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     go2 = bytes2int(byteList[6])
     go3 = bytes2int(byteList[7])
     cntGo = go0*16777216 + go1*65536 + go2*256 + go3
+    
+    nBadCRC = bytes2int(byteList[8])
     
     Sigma = [0.,0.,0.,0.,0.,0.]
     TOFavg = TOFavg/float(numEvnts)
@@ -1202,6 +1203,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     if outputEvents: f2.close()
     print("Number of triggers generated = " + str(cntGo1+cntGo))
     print("Number of triggers accepted = " + str(cntGo))
+    print("Number of bad Tracker CRC = " + str(nBadCRC))
     if (cntGo+cntGo1 == 0):
         live = 0.
     else:
@@ -2040,7 +2042,7 @@ def tkrGetCodeVersion(FPGA):
     data3 = mkDataByte(0x00, address, 3)
     ser.write(data3)
     time.sleep(0.1)
-    return bytes2int(getTkrHousekeeping()[6])
+    return bytes2int(getTkrHousekeeping()[7])
 
 def tkrSetCalMask(FPGA, chip, list):
     nItems = len(list)
@@ -2338,7 +2340,7 @@ def tkrGetTriggerSource(FPGA):
     data3 = mkDataByte(0x00, address, 3)
     ser.write(data3)
     time.sleep(0.1)
-    return getTkrHousekeeping()[6]    
+    return getTkrHousekeeping()[7]    
     
 def tkrSetNumLyrs(N):
     address = addrEvnt
@@ -2435,7 +2437,7 @@ def tkrGetFPGAconfig(FPGA):
     data3 = mkDataByte(0x00, address, 3)
     ser.write(data3)
     time.sleep(0.1)
-    houseStuff = getTkrHousekeeping()[6]
+    houseStuff = getTkrHousekeeping()[7]
     return houseStuff.hex()
     
 def tkrGetNumLyrs(FPGA):
@@ -2449,7 +2451,7 @@ def tkrGetNumLyrs(FPGA):
     data3 = mkDataByte(0x00, address, 3)
     ser.write(data3)
     time.sleep(0.1)
-    return getTkrHousekeeping()[6]
+    return getTkrHousekeeping()[7]
     
 def tkrGetASICconfig(FPGA, chipAddress, quiet=False):
     if not quiet: print("tkrGetASICconfig: the configuration for ASIC " + str(chipAddress) + 

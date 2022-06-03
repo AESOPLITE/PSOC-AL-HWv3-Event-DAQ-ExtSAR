@@ -20,6 +20,10 @@
  *        tracker layer configuration. Added command to increase all tracker thresholds by an additive amount.
  * V23.2: Tested and debugged the tracker housekeeping packet
  * V23.3: Changed the tracker hit list to fixed memory (not heap). Save tracker command code for tracker read timeout error.
+ * V23.4: Brian's changes to tkrWritePtr initialization and value returned when the tracker times out
+ * V23.6: Fixed bug in location of the data in a tracker FPGA housekeeping packet. Also, set the length of such packets correctly
+ *        in case that it comes from the Tracker with the wrong length. Added count of CRC errors to the endrun summary. Increased
+ *        list of commands acted on during a run, encoded in a new funct cmdAllowedInRun(). Turn off rate monitors at EOR.
  * ========================================
  */
 #include "project.h"
@@ -29,7 +33,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 23
-#define MINOR_VERSION 3
+#define MINOR_VERSION 6
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -142,6 +146,7 @@
 #define TRIGMASK 3u
 #define TKR_DATA_READY 0x59
 #define TKR_DATA_NOT_READY 0x4E
+#define NUM_CMDS_IN_RUN 11
 
 // Error codes
 #define ERR_DAC_LOAD 1u
@@ -214,6 +219,7 @@ uint8 tkrHouseKeepPeriod;      // Number of minutes between tracker housekeeping
 uint16 lastCommand;
 uint16 commandCount;
 uint8 nBadCmd;
+uint8 nBadCRC;
 uint16 lastTkrCmdCount;
 uint8 nTkrDatErr;
 uint8 nTkrTimeOut;
@@ -300,7 +306,7 @@ const uint8 SSN_CH5  = 0x0C;
 uint8 outputMode;              // Data output mode (SPI or USB-UART)
 bool debugTOF;
 
-#define END_DATA_SIZE 8u
+#define END_DATA_SIZE 9u
 bool endingRun;                // Set true when the run is ending
 uint8 endData[END_DATA_SIZE];
 
@@ -448,6 +454,16 @@ uint8 byte16(uint16 word, int byte) {
     return (uint8)((word & mask[byte]) >> (1-byte)*8);
 }
 
+bool cmdAllowedInRun(uint8 cmd) {
+    uint8 cmdsAllowed[NUM_CMDS_IN_RUN] = {0x44, 0x03, 0x39, 0x3B, 0x3D, 0x4A, 0x53, 0x5C, 0x5D, 0x57, 0x58};
+    for (int i=0; i<NUM_CMDS_IN_RUN; ++i) {
+        if (cmd == cmdsAllowed[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Function to pack the time and date information into 4 bytes
 uint32 packTime() {
     uint32 timeWord = ((uint32)timeDate->Year - 2000) << 26;
@@ -499,7 +515,7 @@ uint8 tkr_getByte(uint32 startTime, uint8 flag) {
             //addError(ERR_TKR_READ_TIMEOUT, temp, flag);
             addError(ERR_TKR_READ_TIMEOUT, tkrCmdCode, flag);
             if (nTkrTimeOut < 0xFF) nTkrTimeOut++;
-            return 0x00;
+            return tkrBuf[((tkrWritePtr - 1) % MAX_TKR)]; // On timeout, return the last valid byte
         }
     }
     isr_TKR_Disable();
@@ -652,7 +668,7 @@ int getTrackerData(uint8 idExpected) {
         if (len != nData+6) {   // Formal check
             addError(ERR_TKR_BAD_NDATA, len, nData);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
-            nData = len - 6;
+            len = nData + 6;
         }
         tkrCmdCount = (uint16)(tkr_getByte(startTime, 12)) << 8;
         tkrCmdCount = (tkrCmdCount & 0xFF00) | (uint16)tkr_getByte(startTime, 13);
@@ -677,6 +693,7 @@ int getTrackerData(uint8 idExpected) {
         if (tkrHouseKeeping[nTkrHouseKeeping-1] != 0x0F) {    // Formal check
             addError(ERR_TKR_BAD_TRAILER, tkrCmdCode, tkrHouseKeeping[nTkrHouseKeeping-1]); 
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
+            tkrHouseKeeping[nTkrHouseKeeping-1] = 0x0F;
         }
     } else if (IDcode == TKR_ECHO_DATA) {  // Command Echo
         if (len != 4) {           // Formal check
@@ -711,7 +728,6 @@ int getTrackerData(uint8 idExpected) {
             else tkrReadPtr = 0;
         }  
         tkrReadPtr = -1;
-        tkrWritePtr = 0;
         isr_TKR_Enable(); 
         rc = 5;
     }
@@ -734,7 +750,6 @@ void clearTkrFIFO() {
     uint8 intState = isr_TKR_GetState();
     if (intState) isr_TKR_Disable();
     tkrReadPtr = -1;
-    tkrWritePtr = 0;
     CyDelayUs(80);
     while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
         UART_TKR_ClearRxBuffer();
@@ -2083,6 +2098,7 @@ void makeEvent() {
         for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
             if (!checkCRC(tkrData.boardHits[brd].nBytes, tkrData.boardHits[brd].hitList)) {
                     addError(ERR_BAD_CRC, brd, (uint8)cntGO);
+                    nBadCRC++;
                 }
         }
     }
@@ -2399,7 +2415,7 @@ void interpretCommand(uint8 tofConfig[]) {
     int rc;
     // If the trigger is enabled, ignore all commands besides disable trigger, 
     // so that nothing can interrupt the readout.
-    if (command == '\x44' || !isTriggerEnabled()) {
+    if (cmdAllowedInRun(command) || !isTriggerEnabled()) {
         switch (command) { // Interpret all of the commands via this switch
             case '\x01':         // Load a threshold DAC setting
                 switch (cmdData[0]) {
@@ -2885,6 +2901,9 @@ void interpretCommand(uint8 tofConfig[]) {
                 triggerEnable(false);
                 endingRun = true;
                 runNumber = 0;
+                monitorPmtRates = false;
+                monitorTkrRates = false;
+                doHouseKeeping = false;
                 endData[0] = byte32(cntGO1, 0);
                 endData[1] = byte32(cntGO1, 1);
                 endData[2] = byte32(cntGO1, 2);
@@ -2893,6 +2912,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 endData[5] = byte32(cntGO, 1);
                 endData[6] = byte32(cntGO, 2);
                 endData[7] = byte32(cntGO, 3);
+                endData[8] = nBadCRC;
                 break;
             case '\x50':  // Send counter information
                 nDataReady = 6;
@@ -2936,6 +2956,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 nTkrDatErr = 0;
                 nIgnoredCmd = 0;
                 nBadCmd = 0;
+                nBadCRC = 0;
                 CyExitCriticalSection(InterruptState);
                 runNumber = cmdData[0];
                 runNumber = (runNumber<<8) | cmdData[1];
@@ -3138,10 +3159,10 @@ void interpretCommand(uint8 tofConfig[]) {
                     waitingTkrRateCnt = false;
                     break;
                 }
-                if (monitorTkrRates) break;
                 tkrMonitorInterval = cmdData[0];  // Number of seconds between monitoring events
                 if (tkrMonitorInterval < 2) tkrMonitorInterval = 2;
                 tkrMonitorNumAvg = cmdData[1];    // Number of successive measurements to average over
+                if (monitorTkrRates) break;
                 nTkrMonSamples = 0;
                 for (int brd=0; brd<numTkrBrds; ++brd) {
                     tkrMonitorSums[brd] = 0;
@@ -3439,6 +3460,7 @@ int main(void)
     nTkrTimeOut = 0;
     nTkrDatErr = 0;
     nBadCmd = 0;
+    nBadCRC = 0;
     
     uint8 *buffer;        // Buffer for incoming commands
     uint8 USBUART_buf[BUFFER_LEN];
@@ -3763,8 +3785,8 @@ int main(void)
         }
         if (!triggered && endingRun && nDataReady == 0) {
             endingRun = false;
-            nDataReady = 8;
-            for (int i=0; i<8; ++i) {
+            nDataReady = END_DATA_SIZE;
+            for (uint i=0; i<END_DATA_SIZE; ++i) {
                 dataOut[i] = endData[i];
             }
         }
@@ -3949,10 +3971,11 @@ int main(void)
             dataOut[2] = nTkrHouseKeeping;
             dataOut[3] = byte16(tkrCmdCount,0);
             dataOut[4] = byte16(tkrCmdCount,1);
+            lastTkrCmdCount = tkrCmdCount;
             dataOut[5] = tkrHouseKeepingFPGA;
             dataOut[6] = tkrCmdCode;
             for (int i=0; i<nTkrHouseKeeping; ++i) {
-                dataOut[6+i] = tkrHouseKeeping[i];
+                dataOut[7+i] = tkrHouseKeeping[i];
             }
             nTkrHouseKeeping = 0;
         } 
