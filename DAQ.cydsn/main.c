@@ -3812,14 +3812,6 @@ int main(void)
             }
         }
         
-        // Tracker housekeeping
-        if (runNumber > 0 && doTkrHouseKeeping && nDataReady == 0 && !endingRun) {
-            if (tkrHouseKeepingDue) {
-                makeTkrHouseKeeping();
-                tkrHouseKeepingDue = false;
-            }
-        }
-        
         // Send out event data, housekeeping data, command-generated data and echo, end-of-run data etc.
         if (nDataReady > 0 || cmdDone) {   
             sendAllData(dataPacket, command, cmdData);
