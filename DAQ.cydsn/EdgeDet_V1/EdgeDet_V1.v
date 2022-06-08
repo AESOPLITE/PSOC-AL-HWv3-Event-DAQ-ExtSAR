@@ -2,12 +2,15 @@
 //`#start header` -- edit after this line, do not edit this line
 // ========================================
 //
-// Copyright YOUR COMPANY, THE YEAR
+// Robert Johnson
+// Copyright UCSC, 2022
 // All Rights Reserved
 // UNPUBLISHED, LICENSED SOFTWARE.
 //
 // CONFIDENTIAL AND PROPRIETARY INFORMATION
-// WHICH IS THE PROPERTY OF your company.
+// WHICH IS THE PROPERTY OF UCSC.
+//
+// Simple edge detector for synchronous logic
 //
 // ========================================
 `include "cypress.v"
@@ -23,9 +26,9 @@ module EdgeDet_V1 (
 //`#start body` -- edit after this line, do not edit this line
 
 //        Your code goes here
-    parameter [1:0] Wait = 2'b00;
-    parameter [1:0] Outp = 2'b01;
-    parameter [1:0] Look = 2'b10;
+    parameter [1:0] Wait = 2'b00;   // Wait for a rising edge
+    parameter [1:0] Outp = 2'b01;   // Output a 1-clock long high state
+    parameter [1:0] Look = 2'b10;   // Hold the output low while waiting for the falling edge
     parameter [1:0] Noop = 2'b11;
     
     reg [1:0] State, NextState;

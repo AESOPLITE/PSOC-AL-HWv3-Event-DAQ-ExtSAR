@@ -31,6 +31,7 @@
  *        in the ISR.
  * V24.1: Using the whole of command circular buffers. Fixed some Housekeeping logic -Brian
  * V24.2: Modified SAR_ADC_CTRL to Read for every Go by changing states with Golatch -Brian
+ * V24.3: Merged Board Map changes
  * ========================================
  */
 #include "project.h"
@@ -2400,10 +2401,6 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
 
 void readEEprom() {
     uint16 base = MAX_TKR_PCB*MAX_TKR_ASIC*SIZEOF_EEPROM_ROW;
-    int base2 = 8*12*16;
-    if (base != base2) {
-        base2 = base2 + 999;
-    }
     for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
         int brd = boardMAP[lyr];
         for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
@@ -3426,10 +3423,10 @@ int main(void)
     boardMAP[1] = 7;   // H
     boardMAP[2] = 1;   // B
     boardMAP[3] = 0;   // A
-    boardMAP[4] = 6;   // G
+    boardMAP[4] = 4;   // E
     boardMAP[5] = 5;   // F
     boardMAP[6] = 8;   // I
-    boardMAP[7] = 4;   // E
+    boardMAP[7] = 3;   // D
     readEEprom();
     
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  

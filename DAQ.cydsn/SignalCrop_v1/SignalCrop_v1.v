@@ -2,12 +2,13 @@
 //`#start header` -- edit after this line, do not edit this line
 // ========================================
 //
-// Copyright YOUR COMPANY, THE YEAR
+// Robert Johnson
+// Copyright UCSC, 2022
 // All Rights Reserved
 // UNPUBLISHED, LICENSED SOFTWARE.
 //
 // CONFIDENTIAL AND PROPRIETARY INFORMATION
-// WHICH IS THE PROPERTY OF your company.
+// WHICH IS THE PROPERTY OF UCSC.
 //
 // ========================================
 `include "cypress.v"

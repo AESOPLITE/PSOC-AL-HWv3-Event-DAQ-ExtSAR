@@ -2,12 +2,15 @@
 //`#start header` -- edit after this line, do not edit this line
 // ========================================
 //
-// Copyright YOUR COMPANY, THE YEAR
+// Robert Johnson
+// Copyright UCSC, 2022
 // All Rights Reserved
 // UNPUBLISHED, LICENSED SOFTWARE.
 //
 // CONFIDENTIAL AND PROPRIETARY INFORMATION
-// WHICH IS THE PROPERTY OF your company.
+// WHICH IS THE PROPERTY OF UCSC.
+//
+// Logic state machine to control the readout of the external SAR ADCs
 //
 // ========================================
 `include "cypress.v"
