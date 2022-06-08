@@ -30,7 +30,7 @@
  * V24.0: Change in ADC control logic. Trigger is disabled by hardware immediately after the trigger occurs, instead of being disabled
  *        in the ISR.
  * V24.1: Using the whole of command circular buffers. Fixed some Housekeeping logic -Brian
- * V24.2: Modified SAR_ADC_CTRL to Read for every Go by changing states with Golatch- -Brian
+ * V24.2: Modified SAR_ADC_CTRL to Read for every Go by changing states with Golatch -Brian
  * ========================================
  */
 #include "project.h"
