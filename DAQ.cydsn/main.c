@@ -7,6 +7,7 @@
  *
  * CONFIDENTIAL AND PROPRIETARY INFORMATION
  * WHICH IS THE PROPERTY OF U.C. Santa Cruz.
+ * Brian Lucas
  *
  * Code to run in the Event PSOC on the AESOP-Lite DAQ board.
  * This version uses the external SAR ADCs on the V3 board.
@@ -26,6 +27,7 @@
  *        list of commands acted on during a run, encoded in a new funct cmdAllowedInRun(). Turn off rate monitors at EOR.
  * V24.0: Change in ADC control logic. Trigger is disabled by hardware immediately after the trigger occurs, instead of being disabled
  *        in the ISR.
+ * V24.1: Using the whole of command circular buffers. Fixed some Housekeeping logic -Brian
  * ========================================
  */
 #include "project.h"
@@ -35,7 +37,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 0
+#define MINOR_VERSION 1
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -1815,11 +1817,11 @@ CY_ISR(isrTkrUART) {
 
 CY_ISR(isr1Hz) {
     cntSeconds++;
-    if (cntSeconds%houseKeepPeriod == 0 && cntSeconds >= houseKeepPeriod) {
-        houseKeepingDue = true;
+    if (0 == (cntSeconds%houseKeepPeriod)) {//cntSeconds could be reduced to 16 and properly zeroed before rollover -Brian
+        houseKeepingDue = doHouseKeeping; //only due if doHK is true -Brian 
     }
-    if (cntSeconds%(tkrHouseKeepPeriod*60) && cntSeconds >= (tkrHouseKeepPeriod*60)) {
-        tkrHouseKeepingDue = true;
+    if (0 == (cntSeconds%(tkrHouseKeepPeriod*60))) {//cntSeconds could be reduced to 16 and properly zeroed before rollover -Brian
+        tkrHouseKeepingDue = doTkrHouseKeeping; //only due if doHK is true -Brian 
     }
 }
 
@@ -2920,7 +2922,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 runNumber = 0;
                 monitorPmtRates = false;
                 monitorTkrRates = false;
-                doHouseKeeping = false;
+//                doHouseKeeping = false; //comment out since runNumber 0 should temp halt HK while not running
                 endData[0] = byte32(cntGO1, 0);
                 endData[1] = byte32(cntGO1, 1);
                 endData[2] = byte32(cntGO1, 2);
@@ -3798,10 +3800,15 @@ int main(void)
         }
         
         // Send housekeeping packets only during a run
-        if (runNumber > 0 && doHouseKeeping && nDataReady == 0 && !endingRun) {
+        if (runNumber > 0 && nDataReady == 0 && !endingRun) {
             if (houseKeepingDue) {
                 makeHouseKeeping();
                 houseKeepingDue = false;
+            }
+            // Tracker housekeeping packet under the same run conditions -Brian
+            if (tkrHouseKeepingDue) {
+                makeTkrHouseKeeping();
+                tkrHouseKeepingDue = false;
             }
         }
         
@@ -3826,10 +3833,10 @@ int main(void)
                 awaitingCommand = true;
                 cmdDone = false;
                 nDataBytes = 0;     
-                cmdWritePtr = 0;
-                cmdReadPtr = 0;
-                fifoWritePtr = 0;
-                fifoReadPtr = 0;
+//                cmdWritePtr = 0; //commented out to use full buffer -Brian
+                cmdReadPtr = cmdWritePtr; //flush the rest of the buffer -Brian
+//                fifoWritePtr = 0; //commented out to use full buffer -Brian
+                fifoReadPtr = fifoWritePtr; //flush the rest of the buffer -Brian
                 CyExitCriticalSection(InterruptState);
                 nCmdTimeOut++;
                 addError(ERR_CMD_TIMEOUT,command,dCnt);
