@@ -40,7 +40,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 2
+#define MINOR_VERSION 255 //This is a Sandbox and shouldn't Build -Brian
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
