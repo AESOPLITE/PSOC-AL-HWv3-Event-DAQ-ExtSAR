@@ -7,7 +7,9 @@
  *
  * CONFIDENTIAL AND PROPRIETARY INFORMATION
  * WHICH IS THE PROPERTY OF U.C. Santa Cruz.
+ *
  * Brian Lucas
+ * Bartol Research Institute
  *
  * Code to run in the Event PSOC on the AESOP-Lite DAQ board.
  * This version uses the external SAR ADCs on the V3 board.
@@ -28,6 +30,7 @@
  * V24.0: Change in ADC control logic. Trigger is disabled by hardware immediately after the trigger occurs, instead of being disabled
  *        in the ISR.
  * V24.1: Using the whole of command circular buffers. Fixed some Housekeeping logic -Brian
+ * V24.2: Modified SAR_ADC_CTRL to Read for every Go by changing states with Golatch- -Brian
  * ========================================
  */
 #include "project.h"
@@ -37,7 +40,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 1
+#define MINOR_VERSION 2
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:

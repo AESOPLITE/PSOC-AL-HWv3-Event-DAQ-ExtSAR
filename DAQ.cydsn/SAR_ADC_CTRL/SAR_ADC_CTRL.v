@@ -67,7 +67,7 @@ reg GOlatch;
 always @ (State or GOlatch or ChOR or TC) begin
     case (State) 
       Wait: begin
-                if (ChOR) NextState = Dlay;
+                if (ChOR || GOlatch) NextState = Dlay; //GOlatch needs to move to Read state as fast as OpAmps will allow -Brian
                 else NextState = Wait;
                 ConvStb2 = 1'b1;
                 RstCt2 = 1'b1;
@@ -102,7 +102,7 @@ always @ (State or GOlatch or ChOR or TC) begin
                 Done2 = 1'b1;
             end
       Down: begin
-                if (!ChOR) NextState = Fini;
+                if (!ChOR || GOlatch) NextState = Fini; //GOlatch needs to move to Read state as fast as OpAmps will allow -Brian
                 else NextState = Down;
                 ConvStb2 = 1'b1;
                 RstCt2 = 1'b1;
@@ -130,7 +130,7 @@ always @ (posedge CLK) begin
         GOlatch <= 1'b0;
     end else begin
         State <= NextState;
-        if (State == Fini) begin  // Capture the GO signal if and when it arrives.
+        if (State == Read) begin  // Capture the GO signal if and when it arrives. Read is the only state that can reset Golatch -Brian
             GOlatch <= 1'b0;          
         end else begin
             if (GO) GOlatch <= 1'b1;
