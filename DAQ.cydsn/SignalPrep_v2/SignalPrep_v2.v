@@ -2,12 +2,16 @@
 //`#start header` -- edit after this line, do not edit this line
 // ========================================
 //
+// Robert Johnson
 // Copyright UCSC, 2022
 // All Rights Reserved
 // UNPUBLISHED, LICENSED SOFTWARE.
 //
 // CONFIDENTIAL AND PROPRIETARY INFORMATION
 // WHICH IS THE PROPERTY OF UCSC.
+//
+// Detect rising edges of the PMT pulses while avoiding
+// retriggering on after-pulses.
 //
 // ========================================
 `include "cypress.v"

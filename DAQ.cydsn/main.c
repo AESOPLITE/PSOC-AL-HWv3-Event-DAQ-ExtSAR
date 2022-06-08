@@ -26,6 +26,7 @@
  *        list of commands acted on during a run, encoded in a new funct cmdAllowedInRun(). Turn off rate monitors at EOR.
  * V24.0: Change in ADC control logic. Trigger is disabled by hardware immediately after the trigger occurs, instead of being disabled
  *        in the ISR.
+ * V24.1: Changes in comment fields, updated tracker board map, removed some debug code and pins
  * ========================================
  */
 #include "project.h"
@@ -35,7 +36,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 0
+#define MINOR_VERSION 1
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -2395,10 +2396,6 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
 
 void readEEprom() {
     uint16 base = MAX_TKR_PCB*MAX_TKR_ASIC*SIZEOF_EEPROM_ROW;
-    int base2 = 8*12*16;
-    if (base != base2) {
-        base2 = base2 + 999;
-    }
     for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
         int brd = boardMAP[lyr];
         for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
@@ -3421,10 +3418,10 @@ int main(void)
     boardMAP[1] = 7;   // H
     boardMAP[2] = 1;   // B
     boardMAP[3] = 0;   // A
-    boardMAP[4] = 6;   // G
+    boardMAP[4] = 4;   // E
     boardMAP[5] = 5;   // F
     boardMAP[6] = 8;   // I
-    boardMAP[7] = 4;   // E
+    boardMAP[7] = 3;   // D
     readEEprom();
     
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  
