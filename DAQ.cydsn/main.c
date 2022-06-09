@@ -9,7 +9,7 @@
  * WHICH IS THE PROPERTY OF U.C. Santa Cruz.
  *
  * Brian Lucas
- * Bartol Research Institute
+ * Bartol Research Intitute
  *
  * Code to run in the Event PSOC on the AESOP-Lite DAQ board.
  * This version uses the external SAR ADCs on the V3 board.
@@ -30,8 +30,8 @@
  * V24.0: Change in ADC control logic. Trigger is disabled by hardware immediately after the trigger occurs, instead of being disabled
  *        in the ISR.
  * V24.1: Using the whole of command circular buffers. Fixed some Housekeeping logic -Brian
- * V24.2: Modified SAR_ADC_CTRL to Read for every Go by changing states with Golatch -Brian
- * V24.3: Merged Board Map changes
+ * V24.2: Changes in comment fields, updated tracker board map, removed some debug code and pins
+ * V24.4: Fixes to problems in the V24.0 ADC control logic
  * ========================================
  */
 #include "project.h"
@@ -41,7 +41,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 2
+#define MINOR_VERSION 4
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -1295,10 +1295,14 @@ void TOFenable(bool enable) {
 // Control of the trigger enable bit. 
 void triggerEnable(bool enable) {
     if (enable) {
-        Control_Reg_Trg_Write(1); 
         Control_Reg_Pls_Write(PULSE_TRIG_SET);
+        Control_Reg_Trg_Write(1);
+        isr_GO_Enable();
+        isr_GO1_Enable();
     } else {
         // Disable the master trigger 
+        isr_GO_Disable();
+        isr_GO1_Disable();
         Control_Reg_Trg_Write(0);
     }
 }
@@ -1746,9 +1750,10 @@ CY_ISR(intTimer) {
 
 // Increment the internal clock count every second, and also make the LED blink
 CY_ISR(clk200) {       // Interrupt every second (200 ticks of the 5ms period clock)
-    isr_GO_Disable();  // Don't allow a GO to interrupt while incrementing this counter
+    uint8 intState = isr_GO_GetState();
+    if (intState) isr_GO_Disable();  // Don't allow a GO to interrupt while incrementing this counter
     clkCnt += 200;     // Increment the clock counter used for time stamps
-    isr_GO_Enable();
+    if (intState) isr_GO_Enable();
     uint8 status = Pin_LED1_Read();
     status = ~status;
     Pin_LED1_Write(status);
@@ -1821,11 +1826,11 @@ CY_ISR(isrTkrUART) {
 
 CY_ISR(isr1Hz) {
     cntSeconds++;
-    if (0 == (cntSeconds%houseKeepPeriod)) {//cntSeconds could be reduced to 16 and properly zeroed before rollover -Brian
-        houseKeepingDue = doHouseKeeping; //only due if doHK is true -Brian 
+    if (cntSeconds%houseKeepPeriod == 0) {
+        houseKeepingDue = doHouseKeeping;
     }
-    if (0 == (cntSeconds%(tkrHouseKeepPeriod*60))) {//cntSeconds could be reduced to 16 and properly zeroed before rollover -Brian
-        tkrHouseKeepingDue = doTkrHouseKeeping; //only due if doHK is true -Brian 
+    if (cntSeconds%(tkrHouseKeepPeriod*60) == 0) {
+        tkrHouseKeepingDue = doTkrHouseKeeping;
     }
 }
 
@@ -2427,8 +2432,7 @@ void interpretCommand(uint8 tofConfig[]) {
     uint8 chipAddress;   
     uint8 dataBytes[9];
     int rc;
-    // If the trigger is enabled, ignore all commands besides disable trigger, 
-    // so that nothing can interrupt the readout.
+    // If the trigger is enabled, ignore commands that are not allowed, 
     if (cmdAllowedInRun(command) || !isTriggerEnabled()) {
         switch (command) { // Interpret all of the commands via this switch
             case '\x01':         // Load a threshold DAC setting
@@ -2922,7 +2926,6 @@ void interpretCommand(uint8 tofConfig[]) {
                 runNumber = 0;
                 monitorPmtRates = false;
                 monitorTkrRates = false;
-//                doHouseKeeping = false; //comment out since runNumber 0 should temp halt HK while not running
                 endData[0] = byte32(cntGO1, 0);
                 endData[1] = byte32(cntGO1, 1);
                 endData[2] = byte32(cntGO1, 2);
@@ -3247,7 +3250,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 break;
             case '\x4F': // Set the tracker trigger delay for PMT triggers
-                Count7_TrgDly_WritePeriod(cmdData[0]);
+                Timer_2_WritePeriod(cmdData[0]);
                 break;
             case '\x51': // Get the average event readout time
                 nDataReady = 8;
@@ -3570,8 +3573,8 @@ int main(void)
     
     /* Start up the various hardware components */
     I2C_2_Start();
-    Count7_TrgDly_Start();
-    Count7_TrgDly_WritePeriod(16);    // Default delay of the PMT trigger, in units of 83.3ns
+    Timer_2_Start();
+    Timer_2_WritePeriod(12);    // Default delay of the PMT trigger, in units of 83.3ns
     
     // Set up the counter used for timing. It counts a 200 Hz clock derived from the watch crystal, and every 200 counts
     // i.e. once each second, it interrupts the CPU, which then increments a 1 Hz count. The time() function adds the two
@@ -3736,9 +3739,7 @@ int main(void)
     isr_Ch5_SetPriority(7);
     isr_Ch5_Enable();
     isr_GO1_SetPriority(7);
-    isr_GO1_Enable();
     isr_GO_SetPriority(4);    // Processing a trigger request gets the highest priority
-    isr_GO_Enable();
     isr_rst_SetPriority(3);   // Give this system reset highest priority, so it can interrupt any ISR
     isr_rst_Enable();
     isr_TKR_SetPriority(5);   // This needs high priority to prevent the hardware FIFO from overfilling
@@ -3791,6 +3792,9 @@ int main(void)
         if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
             makeEvent();
         }
+        
+        // Send out the end-of-run info if the run is ending. However, check nDataReady,
+        // to be sure to send out the last event packet first.
         if (!triggered && endingRun && nDataReady == 0) {
             endingRun = false;
             nDataReady = END_DATA_SIZE;
@@ -3799,13 +3803,17 @@ int main(void)
             }
         }
         
-        // Send housekeeping packets only during a run
+        // Send housekeeping packets only during a run. Check nDataReady to avoid overwriting an event.
         if (runNumber > 0 && nDataReady == 0 && !endingRun) {
             if (houseKeepingDue) {
                 makeHouseKeeping();
                 houseKeepingDue = false;
             }
-            // Tracker housekeeping packet under the same run conditions -Brian
+        }
+        
+        // Tracker housekeeping. Note that nDataReady is checked here, because if a regular housekeeping packet
+        // is going out now, then we need to wait for the next loop iteration to avoid overwriting it.
+        if (runNumber > 0 && nDataReady == 0 && !endingRun) {
             if (tkrHouseKeepingDue) {
                 makeTkrHouseKeeping();
                 tkrHouseKeepingDue = false;
@@ -3825,10 +3833,8 @@ int main(void)
                 awaitingCommand = true;
                 cmdDone = false;
                 nDataBytes = 0;     
-//                cmdWritePtr = 0; //commented out to use full buffer -Brian
-                cmdReadPtr = cmdWritePtr; //flush the rest of the buffer -Brian
-//                fifoWritePtr = 0; //commented out to use full buffer -Brian
-                fifoReadPtr = fifoWritePtr; //flush the rest of the buffer -Brian
+                cmdReadPtr = cmdWritePtr;
+                fifoReadPtr = fifoWritePtr;
                 CyExitCriticalSection(InterruptState);
                 nCmdTimeOut++;
                 addError(ERR_CMD_TIMEOUT,command,dCnt);

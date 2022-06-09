@@ -16,12 +16,13 @@
 // ========================================
 `include "cypress.v"
 //`#end` -- edit above this line, do not edit this line
-// Generated on 06/03/2022 at 09:53
+// Generated on 06/08/2022 at 14:22
 // Component: SAR_ADC_CTRL
 module SAR_ADC_CTRL (
 	output  CONVSTB,
 	output  DONE,
 	output  GO1en,
+	output  GOen,
 	output  RstCnt,
 	output  RstPk,
 	input   ChOR,
@@ -62,6 +63,7 @@ reg [2:0] State, NextState;
 reg Golatch;
 
 assign RstPk = (State == Fini);
+assign GOen = (State == Wait || State == Dlay);
 assign GO1en = (State == Wait || State == Fini);
 
 // Note: the external Count7 time must be longer than the conversion time.
@@ -71,52 +73,52 @@ reg GOlatch;
 always @ (State or GOlatch or ChOR or TC) begin
     case (State) 
       Wait: begin
-                if (ChOR || GOlatch) NextState = Dlay; //GOlatch needs to move to Read state as fast as OpAmps will allow -Brian
-                else NextState = Wait;
+                if (ChOR) NextState = Dlay;  // Wait for a PMT signal to cross threshold
+                else NextState = Wait;       // or for a tracker trigger
                 ConvStb2 = 1'b1;
                 RstCt2 = 1'b1;
                 Done2 = 1'b0;
             end
       Dlay: begin
-                if (TC) begin
-                    if (GOlatch) NextState = Soc0;
+                if (TC) begin        // Hold here while the peak detector stabilizes
+                    if (GOlatch) NextState = Soc0;  // and while waiting for the GO
                     else NextState = Down;
                 end else NextState = Dlay;
                 ConvStb2 = 1'b1;
-                RstCt2 = 1'b0;
+                RstCt2 = 1'b0;       // Release of the reset allows the timer to count down
                 Done2 = 1'b0;
             end
       Soc0: begin
                 NextState = Eoc0;
-                ConvStb2 = 1'b0;
+                ConvStb2 = 1'b0;     // This starts the ADC conversion
                 RstCt2 = 1'b1;
                 Done2 = 1'b0;
             end
       Eoc0: begin
-                if (TC) NextState = Read;
+                if (TC) NextState = Read;  // Hold here long enough for the ADC conversion to finish
                 else NextState = Eoc0;
                 ConvStb2 = 1'b1;
-                RstCt2 = 1'b0;
+                RstCt2 = 1'b0;       // Release of the reset allows the timer to count down
                 Done2 = 1'b0;
             end
       Read: begin
                 NextState = Down;
                 ConvStb2 = 1'b1;
                 RstCt2 = 1'b1;
-                Done2 = 1'b1;
+                Done2 = 1'b1;        // The DONE signal is checked by the CPU during readout
             end
       Down: begin
-                if (!ChOR || GOlatch) NextState = Fini; //GOlatch needs to move to Read state as fast as OpAmps will allow -Brian
+                if (!ChOR) NextState = Fini;   // Wait here if the Channel-OR is still high
                 else NextState = Down;
                 ConvStb2 = 1'b1;
                 RstCt2 = 1'b1;
                 Done2 = 1'b0;
             end
       Fini: begin
-                if (TC) NextState = Wait;
+                if (TC) NextState = Wait;  // Hold here while the peak detectors are resetting
                 else NextState = Fini;
                 ConvStb2 = 1'b1;
-                RstCt2 = 1'b0;
+                RstCt2 = 1'b0;       // Release of the reset allows the timer to count down
                 Done2 = 1'b0;
             end
       default: begin
@@ -134,7 +136,7 @@ always @ (posedge CLK) begin
         GOlatch <= 1'b0;
     end else begin
         State <= NextState;
-        if (State == Read) begin  // Capture the GO signal if and when it arrives. Read is the only state that can reset Golatch -Brian
+        if (State == Fini) begin  // Capture the GO signal if and when it arrives.
             GOlatch <= 1'b0;          
         end else begin
             if (GO) GOlatch <= 1'b1;
