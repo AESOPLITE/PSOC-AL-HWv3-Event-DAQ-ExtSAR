@@ -217,7 +217,7 @@ def startHouseKeeping(interval, tkrRates):
     ser.write(data2)
     
 def startTkrHouseKeeping(interval):
-    print("startTkrHouseKeeping: interval between tracker housekeeping packets set to " + str(interval) + " seconds.")
+    print("startTkrHouseKeeping: interval between tracker housekeeping packets set to " + str(interval) + " minutes.")
     cmdHeader = mkCmdHdr(1, 0x5C, addrEvnt)
     ser.write(cmdHeader)
     data1 = mkDataByte(interval, addrEvnt, 1)

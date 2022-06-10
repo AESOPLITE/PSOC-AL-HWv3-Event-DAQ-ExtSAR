@@ -35,6 +35,7 @@
  * V24.5: Simplifications to the housekeeping and monitoring. Housekeeping operates within or without a run.
  * V24.6: Fixed #14 error on first event by switching the trigger delay back to Count7 from Timer. 
  * V24.7: Changed several addError calls to addErrorOnce
+ * V24.8: Fixed up the trigger enable and disable ordering and cleared pending before enabling isr_GO1, to avoid a spurious GO1.
  * ========================================
  */
 #include "project.h"
@@ -44,7 +45,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 6
+#define MINOR_VERSION 8
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -1012,16 +1013,19 @@ bool isTriggerEnabled() {
     return enabled;
 }
 
-// Control of the trigger enable bit. 
+// Control of the trigger enable bit. Always make sure that the tracker trigger is disabled after disabling the trigger here.
+// And enable the tracker trigger before enabling this. That ensures that the tracker trigger is always active when the isr_GO is
+// active. The control register should ensure that when isr_GO is enabled there will not be any pending triggers. It is crucial that
+// any trigger that goes to the ISR must also be seen by the tracker.
 void triggerEnable(bool enable) {
     if (enable) {
         Control_Reg_Pls_Write(PULSE_TRIG_SET);
-        Control_Reg_Trg_Write(1);
         isr_GO_Enable();
+        Control_Reg_Trg_Write(1);
     } else {
         // Disable the master trigger 
-        isr_GO_Disable();
         Control_Reg_Trg_Write(0);
+        isr_GO_Disable();
     }
 }
 
@@ -2908,11 +2912,11 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 break;
             case '\x44':  // End a run and send out the run summary
+                isr_GO1_Disable();
                 triggerEnable(false);
                 if (readTracker) {
                     sendSimpleTrackerCmd(0x00, 0x66);  // Disable the Tracker trigger
                 }
-                isr_GO1_Disable();
                 endingRun = true;
                 runNumber = 0;
                 endData[0] = byte32(cntGO1, 0);
@@ -2967,7 +2971,6 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 waitingPmtRateCnt = true;
                 CyExitCriticalSection(InterruptState);
-                isr_GO1_Enable();
                 runNumber = cmdData[0];
                 runNumber = (runNumber<<8) | cmdData[1];
                 readTracker = (cmdData[2] == 1);
@@ -2979,6 +2982,8 @@ void interpretCommand(uint8 tofConfig[]) {
                     sendSimpleTrackerCmd(0x00, 0x65);
                 }
                 triggerEnable(true);
+                isr_GO1_ClearPending();
+                isr_GO1_Enable();
                 TOFenable(true);
                 nDataReady = 0;  // Don't send the tracker echo back to the UART
                 nDataBytes = 0;  // Also, avoid sending an echo from this command
