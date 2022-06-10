@@ -66,13 +66,13 @@ getInternalRTC(addrEvnt)
 
 print(" ")
 print("Set up the thresholds for the PMT channels:")
-setTofDAC(1, 30, addrEvnt)
-setTofDAC(2, 30, addrEvnt)
+setTofDAC(1, 48, addrEvnt)
+setTofDAC(2, 48, addrEvnt)
 for channel in range(1,3):
     print("TOF DAC channel " + str(channel) + " was set to " + str(readTofDAC(channel, addrEvnt)) + " counts.")
 
-pmtThr = 17
-ch5Thresh = 90
+pmtThr = 8
+ch5Thresh = 40
 pmtThresh = [pmtThr,pmtThr,pmtThr,pmtThr,ch5Thresh]
 for chan in range(1,6):
     setPmtDAC(chan, pmtThresh[chan-1], addrEvnt)
@@ -88,22 +88,20 @@ readTofConfig()
 print(" ")
 print("Start the Tracker setup:")
 tkrFPGAreset(0x00)
+tkrSetCRCcheck("yes")
 
 #calibrateAllFPGAinputTiming()
 
-tkrConfigReset(0x00)
+#tkrConfigReset(0x00)
 
-readErrors(addrEvnt)
+#readErrors(addrEvnt)
 
 print("The tracker FPGA firmware code version is " + str(tkrGetCodeVersion(0)))
 
-tkrSetNumLyrs(1)
+bumpTKRthreshold(4)
+configureTkrASICs(1)
 
 print("The number of tracker readout layers is " + str(bytes2int(tkrGetNumLyrs(0))))
-
-tkrAsicHardReset(0x1F)
-
-tkrAsicSoftReset(0x1F)
 
 tkrTrigEndStat(0, 1)
 tkrSetDualTrig(0, 0)
@@ -118,14 +116,14 @@ oneShot = 0
 gain = 0
 shaping = 1
 bufSpeed = 3
-trigDelay = 1
+trigDelay = 4
 trigWindow = 1
 ioCurrent = 2
 maxClust = 10
-tkrLoadASICconfig(0, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
+#tkrLoadASICconfig(0, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
 tkrGetASICconfig(0, 3)
 hitList = []
-tkrSetDataMask(0, 31, "unmask", hitList)
+#tkrSetDataMask(0, 31, "unmask", hitList)
 tkrGetDataMask(0, 3)
 
 print(" ")
@@ -150,10 +148,12 @@ print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 
-for i in range(2):
-    print("send reset pulse")
-    logicReset(addrEvnt)
-    time.sleep(0.3)
+#for i in range(2):
+#    print("send reset pulse")
+#    logicReset(addrEvnt)
+#    time.sleep(0.3)
+
+startHouseKeeping(4, 1)
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 getInternalRTC(address)
@@ -161,7 +161,7 @@ getInternalRTC(addrEvnt)
 print("Before the run, the trigger enable status is " + str(triggerEnableStatus()))
 
 print(" ")
-numEvents = 10
+numEvents = 100
 runNumber = 69
 ADC, Sigma, TOF, sigmaTOF = limitedRun(runNumber, numEvents, True, False, True)
 time.sleep(1)

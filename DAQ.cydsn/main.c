@@ -33,6 +33,7 @@
  * V24.2: Changes in comment fields, updated tracker board map, removed some debug code and pins
  * V24.4: Fixes to problems in the V24.0 ADC control logic
  * V24.5: Simplifications to the housekeeping and monitoring. Housekeeping operates within or without a run.
+ * V24.6: Fixed #14 error on first event by switching the trigger delay back to Count7 from Timer. 
  * ========================================
  */
 #include "project.h"
@@ -3199,7 +3200,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 break;
             case '\x4F': // Set the tracker trigger delay for PMT triggers
-                Timer_2_WritePeriod(cmdData[0]);
+                Count7_Trg_WritePeriod(cmdData[0]);
                 break;
             case '\x51': // Get the average event readout time
                 nDataReady = 8;
@@ -3532,8 +3533,8 @@ int main(void)
     
     /* Start up the various hardware components */
     I2C_2_Start();
-    Timer_2_Start();
-    Timer_2_WritePeriod(12);    // Default delay of the PMT trigger, in units of 83.3ns
+    Count7_Trg_Start();
+    Count7_Trg_WritePeriod(12);    // Default delay of the PMT trigger, in units of 83.3ns
     
     // Set up the counter used for timing. It counts a 200 Hz clock derived from the watch crystal, and every 200 counts
     // i.e. once each second, it interrupts the CPU, which then increments a 1 Hz count. The time() function adds the two
