@@ -34,6 +34,7 @@
  * V24.4: Fixes to problems in the V24.0 ADC control logic
  * V24.5: Simplifications to the housekeeping and monitoring. Housekeeping operates within or without a run.
  * V24.6: Fixed #14 error on first event by switching the trigger delay back to Count7 from Timer. 
+ * V24.7: Changed several addError calls to addErrorOnce
  * ========================================
  */
 #include "project.h"
@@ -43,7 +44,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 5
+#define MINOR_VERSION 6
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -588,7 +589,7 @@ int getTrackerData(uint8 idExpected) {
     uint8 IDcode = tkr_getByte(startTime, 2);
     if (IDcode != idExpected) {
         if (idExpected != 0) {
-            addError(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
+            addErrorOnce(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
             if (idExpected == TKR_EVT_DATA) {
                 makeDummyTkrEvent(0, 0, 0, 0);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
@@ -596,7 +597,7 @@ int getTrackerData(uint8 idExpected) {
             }
         } else {
             if (IDcode == TKR_EVT_DATA) {
-                addError(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
+                addErrorOnce(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 return 53;
             }
@@ -604,7 +605,7 @@ int getTrackerData(uint8 idExpected) {
     }
     if (IDcode == TKR_EVT_DATA) {         // Event data
         if (len != 5) {           // Formal check
-            addError(ERR_TKR_BAD_LENGTH, IDcode, len);
+            addErrorOnce(ERR_TKR_BAD_LENGTH, IDcode, len);
             makeDummyTkrEvent(0, 0, 0, 1);  // Send back a packet that won't cause a crash down the road
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             return 55;
@@ -616,7 +617,7 @@ int getTrackerData(uint8 idExpected) {
         uint8 trgPtr = nBoards & 0xC0;
         nBoards = nBoards & 0x3F;
         if (nBoards != numTkrBrds) {
-            addError(ERR_TKR_NUM_BOARDS, nBoards, tkrData.trgPattern);
+            addErrorOnce(ERR_TKR_NUM_BOARDS, nBoards, tkrData.trgPattern);
             makeDummyTkrEvent(trgCnt, cmdCnt, trgPtr, 2);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             return 56;
@@ -628,7 +629,7 @@ int getTrackerData(uint8 idExpected) {
         for (int brd=0; brd < nBoards; ++brd) {
             uint8 nBrdBytes = tkr_getByte(startTime, 7);  // Length of the hit list, in bytes
             if (nBrdBytes < 4) {
-                addError(ERR_TKR_BOARD_SHORT, nBrdBytes, brd);
+                addErrorOnce(ERR_TKR_BOARD_SHORT, nBrdBytes, brd);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 makeDummyHitList(brd, 4);
                 rc = 57;
@@ -636,7 +637,7 @@ int getTrackerData(uint8 idExpected) {
             }
             uint8 IDbyte = tkr_getByte(startTime, 8);     // Hit list identifier, should always be 11100111
             if (IDbyte != 0xE7) {
-                addError(ERR_TKR_BAD_BOARD_ID, IDbyte, brd);
+                addErrorOnce(ERR_TKR_BAD_BOARD_ID, IDbyte, brd);
                 makeDummyHitList(brd, 5);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 rc = 58;
@@ -644,20 +645,20 @@ int getTrackerData(uint8 idExpected) {
             }
             uint8 byte2 = tkr_getByte(startTime, 9);        // Byte containing the board address
             if (byte2 > 8) {   // Formal check. Note that 8 denotes the master board, which really is layer 0
-                addError(ERR_TKR_BAD_FPGA, byte2, brd);
+                addErrorOnce(ERR_TKR_BAD_FPGA, byte2, brd);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 rc = 59;
             }
             uint8 lyr = 0x7 & byte2;  // Get rid of the master bit, leaving just the layer number
             // Require the boards to be set up to read out in order:
             if (lyr != brd) {
-                addError(ERR_TKR_LYR_ORDER, lyr, brd);
+                addErrorOnce(ERR_TKR_LYR_ORDER, lyr, brd);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 lyr = brd;
             }
             if (nBrdBytes > MAX_TKR_BOARD_BYTES) {    // This really should never happen, due to ASIC 10-hit limit
                 tkrData.boardHits[lyr].nBytes = MAX_TKR_BOARD_BYTES;
-                addError(ERR_TKR_TOO_BIG, nBrdBytes, lyr);
+                addErrorOnce(ERR_TKR_TOO_BIG, nBrdBytes, lyr);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
             } else {
                 tkrData.boardHits[lyr].nBytes = nBrdBytes;
@@ -674,7 +675,7 @@ int getTrackerData(uint8 idExpected) {
     } else if (IDcode == TKR_HOUSE_DATA) {  // Housekeeping data
         uint8 nData = tkr_getByte(startTime, 11);
         if (len != nData+6) {   // Formal check
-            addError(ERR_TKR_BAD_NDATA, len, nData);
+            addErrorOnce(ERR_TKR_BAD_NDATA, len, nData);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             len = nData + 6;
         }
@@ -682,12 +683,12 @@ int getTrackerData(uint8 idExpected) {
         tkrCmdCount = (tkrCmdCount & 0xFF00) | (uint16)tkr_getByte(startTime, 13);
         tkrHouseKeepingFPGA = tkr_getByte(startTime, 14);
         if (tkrHouseKeepingFPGA > 8) {   // Formal check
-            addError(ERR_TKR_BAD_FPGA, tkrCmdCode, tkrHouseKeepingFPGA);
+            addErrorOnce(ERR_TKR_BAD_FPGA, tkrCmdCode, tkrHouseKeepingFPGA);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
         }
         uint8 tkrHouseKeepingCMD = tkr_getByte(startTime, 15);
         if (tkrHouseKeepingCMD != tkrCmdCode) {   // Formal check
-            addError(ERR_TKR_BAD_ECHO, tkrHouseKeepingCMD, tkrCmdCode);
+            addErrorOnce(ERR_TKR_BAD_ECHO, tkrHouseKeepingCMD, tkrCmdCode);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
         }
         nTkrHouseKeeping = 0;      // Overwrite any old data, even if it was never sent out.
@@ -699,13 +700,13 @@ int getTrackerData(uint8 idExpected) {
             }
         }
         if (tkrHouseKeeping[nTkrHouseKeeping-1] != 0x0F) {    // Formal check
-            addError(ERR_TKR_BAD_TRAILER, tkrCmdCode, tkrHouseKeeping[nTkrHouseKeeping-1]); 
+            addErrorOnce(ERR_TKR_BAD_TRAILER, tkrCmdCode, tkrHouseKeeping[nTkrHouseKeeping-1]); 
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             tkrHouseKeeping[nTkrHouseKeeping-1] = 0x0F;
         }
     } else if (IDcode == TKR_ECHO_DATA) {  // Command Echo
         if (len != 4) {           // Formal check
-            addError(ERR_TKR_BAD_LENGTH, IDcode, len);
+            addErrorOnce(ERR_TKR_BAD_LENGTH, IDcode, len);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
         }
         nDataReady = 3;
