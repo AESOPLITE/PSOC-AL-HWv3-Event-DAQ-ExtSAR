@@ -94,24 +94,59 @@ def getData(address):
     ret = b''
     debug = False
     if debug: print("Entering getData for PSOC address " + str(address))
-    for i in range(360):  #Sometimes the read starts with blank bytes, so search for the header
-        ret = ser.read(1)
-        if debug: print("getData: i= " + str(i) + " ret = " + str(ret))
-        if ret == b'\xDC': break
-        if ret != b'':
-            print("getData: expected 'DC' but received " + str(ret))
-    if ret != b'\xDC':
-        print("getData: failed to find the header 'DC'")
-        if address > 0: readErrors(address)
-        raise IOError("getData: failed to find the header 'DC'")
+    success = False
+    while not success:
+        for i in range(360):  #Sometimes the read starts with blank bytes, so search for the header
+            ret = ser.read(1)
+            if debug: print("getData: i= " + str(i) + " ret = " + str(ret))
+            if ret == b'\xDC': break
+            if ret != b'':
+                print("getData: expected 'DC' but received " + str(ret))
+        if ret != b'\xDC':
+            print("getData: failed to find the header 'DC'")
+            if address > 0: readErrors(address)
+            raise IOError("getData: failed to find the header 'DC'")
+            return
 
-    ret = ser.read(2)
-    if debug: print("getData: remainder of header = " + str(ret))
-    if ret != b'\x00\xFF':
-        print("getData: invalid header returned: b'\\xDC' " + str(ret))
-    ret = ser.read(1)
-    dataLength = bytes2int(ret)
-    command = ser.read(1)
+        ret = ser.read(2)
+        if debug: print("getData: remainder of header = " + str(ret))
+        if ret != b'\x00\xFF':
+            print("getData: invalid header returned: b'\\xDC' " + str(ret))
+            return
+        ret = ser.read(1)
+        dataLength = bytes2int(ret)
+        command = ser.read(1)
+        if command == b'\xDE' or command == b'\xDF' or command == b'\xDB' or command == b'\xDD' or command == b'\xde' or command == b'\xdf' or command == b'\xdb' or command == b'\xdd':
+            nCmdData = bytes2int(ser.read(1))
+            if nCmdData != 0: print("getData: # command bytes " + str(nCmdData) + " != 0 for packet " + str(command))
+            dataList = []
+            byteList = []
+            for m in range(dataLength):
+                byte = ser.read()
+                dataList.append(bytes2int(byte))
+                byteList.append(byte)
+            numPad = 3 - dataLength%3
+            if numPad == 3: numPad = 0
+            #print("getData: dataLength = " + str(dataLength) + " # padding bytes=" + str(numPad))
+            for m in range(numPad):
+                byte = ser.read()
+                #print("getData: padding byte = " + str(byte))
+            trailer = ser.read(3)
+            if trailer != b'\xff\x00\xff':
+                print("getData: bad trailer = " + str(trailer))
+            if command == b'\xDE' or command == b'\xde':    # housekeeping packet
+                print("getData: housekeeping packet received with " + str(dataLength) + " bytes")
+                printHousekeeping(dataList, byteList)
+            elif command == b'\xDF' or command == b'\xdf':  # tracker housekeeping packet
+                print("getData: tracker housekeeping packet received with " + str(dataLength) + " bytes")
+                printTkrHousekeeping(dataList)
+            elif command == b'\xDB' or command == b'\xdb':
+                print("getData: TOF debug event data packet received with " + str(dataLength) + " bytes")   
+            elif command == b'\xDD' or command == b'\xdd':  # data packet
+                print("getData: event data packet received with " + str(dataLength) + " bytes")
+        else: 
+            success = True
+            #print("getData: received data for command " + str(command))
     if debug: print("getData: command = " + str(command) + " " + str(bytes2int(command)) + " " + str(command.hex()) + " data length = " + str(dataLength))
     nCmdBytes = bytes2int(ser.read(1))
     if debug: print("getData: number of command data bytes = " + str(nCmdBytes)) 
@@ -172,12 +207,14 @@ def getShortData(address, nBytes):
         print("getShortData: invalid trailer returned: " + str(trailer))
     return ret
 
-def startHouseKeeping(interval):
+def startHouseKeeping(interval, tkrRates):
     print("startHouseKeeping: interval between housekeeping packets set to " + str(interval) + " seconds.")
-    cmdHeader = mkCmdHdr(1, 0x57, addrEvnt)
+    cmdHeader = mkCmdHdr(2, 0x57, addrEvnt)
     ser.write(cmdHeader)
     data1 = mkDataByte(interval, addrEvnt, 1)
     ser.write(data1)
+    data2 = mkDataByte(tkrRates, addrEvnt, 2)
+    ser.write(data2)
     
 def startTkrHouseKeeping(interval):
     print("startTkrHouseKeeping: interval between tracker housekeeping packets set to " + str(interval) + " seconds.")
@@ -195,24 +232,6 @@ def stopTkrHouseKeeping():
     print("stopTkrHouseKeeping: no more tracker housekeeping packets will be sent")
     cmdHeader = mkCmdHdr(1, 0x5D, addrEvnt)
     ser.write(cmdHeader)
-    
-def startPmtRateMonitor(deltaT, Interval):
-    print("startPmtRateMonitor: integration time = " + str(deltaT) + " seconds. Interval between measurements = " + str(Interval) + " seconds")
-    cmdHeader = mkCmdHdr(2, 0x52, addrEvnt)
-    ser.write(cmdHeader)    
-    data1 = mkDataByte(deltaT, addrEvnt, 1)
-    ser.write(data1)
-    data2 = mkDataByte(Interval, addrEvnt, 2)
-    ser.write(data2)  
-    
-def stopPmtRateMonitor():
-    print("stopPmtRateMonitor: stopping the monitoring of PMT rates.")
-    cmdHeader = mkCmdHdr(2, 0x52, addrEvnt)
-    ser.write(cmdHeader)    
-    data1 = mkDataByte(0, addrEvnt, 1)
-    ser.write(data1)
-    data2 = mkDataByte(0, addrEvnt, 2)
-    ser.write(data2)
 
 def getPmtRates():
     print("getPmtRates: getting singles rates from all PMTs")
@@ -245,24 +264,6 @@ def getPmtRates():
     print("T1 rate =    " + str(T1) + " Hz")
     print("T4 rate =    " + str(T4) + " Hz")
     print("T2 rate =    " + str(T2) + " Hz")
-
-def startTkrRateMonitor(interval, numAvg):
-    print("startTkrRateMonitor: interval = " + str(interval) + " seconds. Average " + str(numAvg) + " 1-second measurements")
-    cmdHeader = mkCmdHdr(2, 0x4a, addrEvnt)
-    ser.write(cmdHeader)    
-    data1 = mkDataByte(interval, addrEvnt, 1)
-    ser.write(data1)
-    data2 = mkDataByte(numAvg, addrEvnt, 2)
-    ser.write(data2)    
-    
-def stopTkrRateMonitor():
-    print("stopTkrRateMonitor: stopping the monitoring of tracker rates.")
-    cmdHeader = mkCmdHdr(2, 0x4a, addrEvnt)
-    ser.write(cmdHeader)    
-    data1 = mkDataByte(0, addrEvnt, 1)
-    ser.write(data1)
-    data2 = mkDataByte(0, addrEvnt, 2)
-    ser.write(data2)
     
 def getTkrLyrRates():
     print("getTkrLyrRates: getting rates from all tracker layers")
@@ -813,6 +814,108 @@ def getTKRlayers():
     for lyr in range(8):
         print("   Layer " + str(lyr) + " is board " + str(bytes2int(byteList[lyr])))
 
+def printHousekeeping(dataList, byteList):
+    run = dataList[4]*256 + dataList[5]
+    print("Housekeeping packet for run " + str(run))
+    timeDate = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
+    year = ((timeDate & 0x7C000000) >> 26) + 2000
+    month = (timeDate & 0x03C00000) >> 22
+    day = (timeDate & 0x003E0000) >> 17
+    hour = (timeDate & 0x0001F000) >> 12
+    minute = (timeDate & 0x00000FC0) >> 6
+    second = (timeDate & 0x0000003F)
+    print("   Housekeeping time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
+    print("   Last command = " + str(byteList[10].hex() + str(byteList[11].hex())))
+    cmdCnt = dataList[12]*255 + dataList[13]
+    print("   Command count = " + str(cmdCnt))
+    print("   Number of bad commands = " + str(dataList[14]))
+    print("   Number of errors = " + str(dataList[15]))
+    cntGO = dataList[16]*16777216 + dataList[17]*65536 + dataList[18]*256 + dataList[19]
+    cntGO1 = dataList[20]*16777216 + dataList[21]*65536 + dataList[22]*256 + dataList[23]
+    print("   GO count = " + str(cntGO) + "     GO1 count = " + str(cntGO1))
+    avgReadTime = dataList[24]*256 + dataList[25]
+    print("   Average readout time = " + str(avgReadTime) + " microseconds")
+    Grate = dataList[34]*256 + dataList[35]
+    print("   Guard rate = " + str(Grate) + " Hz")
+    T1rate = dataList[26]*256 + dataList[27]
+    print("   T1 rate = " + str(T1rate) + " Hz")
+    T2rate = dataList[28]*256 + dataList[29]
+    print("   T2 rate = " + str(T2rate) + " Hz")
+    T3rate = dataList[30]*256 + dataList[31]
+    print("   T3 rate = " + str(T3rate) + " Hz")
+    T4rate = dataList[32]*256 + dataList[33]
+    print("   T4 rate = " + str(T4rate) + " Hz")
+    tkrCmdCnt = dataList[36]*256 + dataList[37]
+    print("   Tracker command count = " + str(tkrCmdCnt))
+    print("   Fraction of triggers with Tracker 1 bit set = " + str(dataList[38]) + " percent")
+    print("   Fraction of triggers with Tracker 2 bit set = " + str(dataList[39]) + " percent")
+    print("   Number of tracker data errors = " + str(dataList[40]))
+    print("   Number of tracker time-outs = " + str(dataList[41]))
+    for brd in range(8):
+        numChipsHit = dataList[42+brd]/10.0
+        print("    Tracker board " + str(brd) + " has " + str(numChipsHit) + " chips hit per event")
+    for brd in range(8):
+        layerRate = dataList[50 + brd*2]*256 + dataList[50 + brd*2 + 1]
+        print("    Tracker board " + str(brd) + " rate = " + str(layerRate) + " Hz")
+    dieTemp = dataList[66]*256 + dataList[67]
+    print("   Event PSOC die temperature = " + str(dieTemp))
+    tkrTemp = dataList[68]*256 + dataList[69]
+    Tcelsius = (0.25/4.0)*(tkrTemp/16.)
+    print("   Tracker layer 0 temperature = " + str(Tcelsius) + " Celsius")
+    tkrTemp = dataList[70]*256 + dataList[71]
+    Tcelsius = (0.25/4.0)*(tkrTemp/16.)
+    print("   Tracker layer 7 temperature = " + str(Tcelsius) + " Celsius")
+
+def printTkrHousekeeping(dataList):
+    run = dataList[4]*256 + dataList[5]
+    print("Tracker housekeeping packet for run " + str(run) + ":")
+    timeDate = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
+    year = ((timeDate & 0x7C000000) >> 26) + 2000
+    month = (timeDate & 0x03C00000) >> 22
+    day = (timeDate & 0x003E0000) >> 17
+    hour = (timeDate & 0x0001F000) >> 12
+    minute = (timeDate & 0x00000FC0) >> 6
+    second = (timeDate & 0x0000003F)
+    print("   Time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
+    offset = 9
+    for brd in range(8):
+        if dataList[offset+1] == 0 and dataList[offset+2] == 0: break
+        print("   Housekeeping data for Tracker board " + str(brd) + ":")
+        tkrTemp = dataList[offset+1]*256 + dataList[offset+2]
+        Tcelsius = (0.25/4.0)*(tkrTemp/16.)
+        print("      Temperature = " + str(Tcelsius) + " Celsius")
+        shuntVoltage = 2.5*(dataList[offset+3]*256 + dataList[offset+4])/1000000.
+        R = 100.0
+        shuntCurrent = shuntVoltage*1000000./R
+        print("      Bias current = " + str(shuntCurrent) + " microamps")
+        busVoltage = 1.25*(dataList[offset+5]*256 + dataList[offset+6])/1000.
+        print("      Digital 1.2V bus voltage reading = " + str(busVoltage) + " V")
+        shuntVoltage = 2.5*(dataList[offset+7]*256 + dataList[offset+8])/1000000.
+        R = 0.03
+        shuntCurrent = shuntVoltage*1000./R
+        print("      Digital 1.2V shunt current reading = " + str(shuntCurrent) + " microamps")
+        busVoltage = 1.25*(dataList[offset+9]*256 + dataList[offset+10])/1000.
+        print("      Digital 2.5V bus voltage reading = " + str(busVoltage) + " V")
+        shuntVoltage = 2.5*(dataList[offset+11]*256 + dataList[offset+12])/1000000.
+        shuntCurrent = shuntVoltage*1000./R
+        print("      Digital 2.5V shunt current reading = " + str(shuntCurrent) + " microamps")
+        busVoltage = 1.25*(dataList[offset+13]*256 + dataList[offset+14])/1000.
+        print("      Digital 3.3V bus voltage reading = " + str(busVoltage) + " V")
+        shuntVoltage = 2.5*(dataList[offset+15]*256 + dataList[offset+16])/1000000.
+        shuntCurrent = shuntVoltage*1000./R
+        print("      Digital 3.3V shunt current reading = " + str(shuntCurrent) + " microamps")
+        busVoltage = 1.25*(dataList[offset+17]*256 + dataList[offset+18])/1000.
+        print("      Analog 2.1V bus voltage reading = " + str(busVoltage) + " V")
+        shuntVoltage = 2.5*(dataList[offset+19]*256 + dataList[offset+20])/1000000.
+        shuntCurrent = shuntVoltage*1000./R
+        print("      Analog 2.1V shunt current reading = " + str(shuntCurrent) + " microamps")
+        busVoltage = 1.25*(dataList[offset+21]*256 + dataList[offset+22])/1000.
+        print("      Analog 3.3V bus voltage reading = " + str(busVoltage) + " V")
+        shuntVoltage = 2.5*(dataList[offset+23]*256 + dataList[offset+24])/1000000.
+        shuntCurrent = shuntVoltage*1000./R
+        print("      Analog 3.3V shunt current reading = " + str(shuntCurrent) + " microamps")
+        offset = offset + 24
+           
 # Execute a run for a specified number of events to be acquired
 def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, debugTOF = False):
     cmdHeader = mkCmdHdr(4, 0x3C, addrEvnt)
@@ -906,105 +1009,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         if ret != b'\xFF\x00\xFF':
             print("limitedRun: invalid trailer returned: " + str(ret))
         if dataID == "DE" or dataID == "de":   # Parse the housekeeping packet
-            run = dataList[4]*256 + dataList[5]
-            print("Housekeeping packet for run " + str(run))
-            timeDate = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
-            year = ((timeDate & 0x7C000000) >> 26) + 2000
-            month = (timeDate & 0x03C00000) >> 22
-            day = (timeDate & 0x003E0000) >> 17
-            hour = (timeDate & 0x0001F000) >> 12
-            minute = (timeDate & 0x00000FC0) >> 6
-            second = (timeDate & 0x0000003F)
-            print("   Housekeeping time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
-            print("   Last command = " + str(byteList[10].hex() + str(byteList[11].hex())))
-            cmdCnt = dataList[12]*255 + dataList[13]
-            print("   Command count = " + str(cmdCnt))
-            print("   Number of bad commands = " + str(dataList[14]))
-            print("   Number of errors = " + str(dataList[15]))
-            cntGO = dataList[16]*16777216 + dataList[17]*65536 + dataList[18]*256 + dataList[19]
-            cntGO1 = dataList[20]*16777216 + dataList[21]*65536 + dataList[22]*256 + dataList[23]
-            print("   GO count = " + str(cntGO) + "     GO1 count = " + str(cntGO1))
-            avgReadTime = dataList[24]*256 + dataList[25]
-            print("   Average readout time = " + str(avgReadTime) + " microseconds")
-            Grate = dataList[34]*256 + dataList[35]
-            print("   Guard rate = " + str(Grate) + " Hz")
-            T1rate = dataList[26]*256 + dataList[27]
-            print("   T1 rate = " + str(T1rate) + " Hz")
-            T2rate = dataList[28]*256 + dataList[29]
-            print("   T2 rate = " + str(T2rate) + " Hz")
-            T3rate = dataList[30]*256 + dataList[31]
-            print("   T3 rate = " + str(T3rate) + " Hz")
-            T4rate = dataList[32]*256 + dataList[33]
-            print("   T4 rate = " + str(T4rate) + " Hz")
-            tkrCmdCnt = dataList[36]*256 + dataList[37]
-            print("   Tracker command count = " + str(tkrCmdCnt))
-            print("   Fraction of triggers with Tracker 1 bit set = " + str(dataList[38]) + " percent")
-            print("   Fraction of triggers with Tracker 2 bit set = " + str(dataList[39]) + " percent")
-            print("   Number of tracker data errors = " + str(dataList[40]))
-            print("   Number of tracker time-outs = " + str(dataList[41]))
-            for brd in range(8):
-                numChipsHit = dataList[42+brd]/10.0
-                print("    Tracker board " + str(brd) + " has " + str(numChipsHit) + " chips hit per event")
-            for brd in range(8):
-                layerRate = dataList[50 + brd*2]*256 + dataList[50 + brd*2 + 1]
-                print("    Tracker board " + str(brd) + " rate = " + str(layerRate) + " Hz")
-            dieTemp = dataList[66]*256 + dataList[67]
-            print("   Event PSOC die temperature = " + str(dieTemp))
-            tkrTemp = dataList[68]*256 + dataList[69]
-            Tcelsius = (0.25/4.0)*(tkrTemp/16.)
-            print("   Tracker layer 0 temperature = " + str(Tcelsius) + " Celsius")
-            tkrTemp = dataList[70]*256 + dataList[71]
-            Tcelsius = (0.25/4.0)*(tkrTemp/16.)
-            print("   Tracker layer 7 temperature = " + str(Tcelsius) + " Celsius")
+            printHousekeeping(dataList, byteList)
         elif dataID == "DF" or dataID == "df":
-            run = dataList[4]*256 + dataList[5]
-            print("Tracker housekeeping packet for run " + str(run) + ":")
-            timeDate = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
-            year = ((timeDate & 0x7C000000) >> 26) + 2000
-            month = (timeDate & 0x03C00000) >> 22
-            day = (timeDate & 0x003E0000) >> 17
-            hour = (timeDate & 0x0001F000) >> 12
-            minute = (timeDate & 0x00000FC0) >> 6
-            second = (timeDate & 0x0000003F)
-            print("   Time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
-            offset = 9
-            for brd in range(8):
-                if dataList[offset+1] == 0 and dataList[offset+2] == 0: break
-                print("   Housekeeping data for Tracker board " + str(brd) + ":")
-                tkrTemp = dataList[offset+1]*256 + dataList[offset+2]
-                Tcelsius = (0.25/4.0)*(tkrTemp/16.)
-                print("      Temperature = " + str(Tcelsius) + " Celsius")
-                shuntVoltage = 2.5*(dataList[offset+3]*256 + dataList[offset+4])/1000000.
-                R = 100.0
-                shuntCurrent = shuntVoltage*1000000./R
-                print("      Bias current = " + str(shuntCurrent) + " microamps")
-                busVoltage = 1.25*(dataList[offset+5]*256 + dataList[offset+6])/1000.
-                print("      Digital 1.2V bus voltage reading = " + str(busVoltage) + " V")
-                shuntVoltage = 2.5*(dataList[offset+7]*256 + dataList[offset+8])/1000000.
-                R = 0.03
-                shuntCurrent = shuntVoltage*1000./R
-                print("      Digital 1.2V shunt current reading = " + str(shuntCurrent) + " microamps")
-                busVoltage = 1.25*(dataList[offset+9]*256 + dataList[offset+10])/1000.
-                print("      Digital 2.5V bus voltage reading = " + str(busVoltage) + " V")
-                shuntVoltage = 2.5*(dataList[offset+11]*256 + dataList[offset+12])/1000000.
-                shuntCurrent = shuntVoltage*1000./R
-                print("      Digital 2.5V shunt current reading = " + str(shuntCurrent) + " microamps")
-                busVoltage = 1.25*(dataList[offset+13]*256 + dataList[offset+14])/1000.
-                print("      Digital 3.3V bus voltage reading = " + str(busVoltage) + " V")
-                shuntVoltage = 2.5*(dataList[offset+15]*256 + dataList[offset+16])/1000000.
-                shuntCurrent = shuntVoltage*1000./R
-                print("      Digital 3.3V shunt current reading = " + str(shuntCurrent) + " microamps")
-                busVoltage = 1.25*(dataList[offset+17]*256 + dataList[offset+18])/1000.
-                print("      Analog 2.1V bus voltage reading = " + str(busVoltage) + " V")
-                shuntVoltage = 2.5*(dataList[offset+19]*256 + dataList[offset+20])/1000000.
-                shuntCurrent = shuntVoltage*1000./R
-                print("      Analog 2.1V shunt current reading = " + str(shuntCurrent) + " microamps")
-                busVoltage = 1.25*(dataList[offset+21]*256 + dataList[offset+22])/1000.
-                print("      Analog 3.3V bus voltage reading = " + str(busVoltage) + " V")
-                shuntVoltage = 2.5*(dataList[offset+23]*256 + dataList[offset+24])/1000000.
-                shuntCurrent = shuntVoltage*1000./R
-                print("      Analog 3.3V shunt current reading = " + str(shuntCurrent) + " microamps")
-                offset = offset + 24
+            printTkrHousekeeping(dataList)
         else:
             run = dataList[4]*256 + dataList[5]
             trigger = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
@@ -1018,12 +1025,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             hour = (timeDate & 0x0001F000) >> 12
             minute = (timeDate & 0x00000FC0) >> 6
             second = (timeDate & 0x0000003F)
-            deltaTime = timeStamp - lastTime
-            deltaTimeSec = deltaTime * (1./200.)
-            if event > 0:
-                if verbose: print("    Time since the previous event = " + str(deltaTime) + " counts, or " + str(deltaTimeSec) + " seconds")
-                timeSum += deltaTime
-            lastTime = timeStamp
+
             T1 = dataList[23]*256 + dataList[24]
             T2 = dataList[25]*256 + dataList[26]
             T3 = dataList[27]*256 + dataList[28]
@@ -1059,7 +1061,6 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
                 print("        TOF=" + str(dtmin) + " Number A=" + str(nTOFA) + " Number B=" + str(nTOFB))
                 print("        run=" + str(run) + "  trigger " + str(trigger))
             trgStatus = dataList[22]
-            
             rc = 0
             numHitEvt = 0
             if verbose: 
@@ -1068,7 +1069,14 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
                 if debugTOF: print("        REF-A=" + str(tofA) + "  REF-B=" + str(tofB))
                 if debugTOF: print("        TOF clkA=" + str(clkA) + "  TOF clkB=" + str(clkB))
                 print("        Trigger status = " + str(hex(trgStatus)))
-                print("        Number of tracker layers read out = " + str(nTkrLyrs))           
+                print("        Number of tracker layers read out = " + str(nTkrLyrs))          
+            deltaTime = timeStamp - lastTime
+            deltaTimeSec = deltaTime * (1./200.)
+            if event > 0:
+                if verbose: print("    Time since the previous event = " + str(deltaTime) + " counts, or " + str(deltaTimeSec) + " seconds")
+                timeSum += deltaTime
+            lastTime = timeStamp
+            if verbose:             
                 FPGAs = []
                 stripHits = []
                 for brd in range(nTkrLyrs):
@@ -2375,7 +2383,7 @@ def tkrAsicPowerOff():
     time.sleep(0.1)
     echo = getTkrEcho()
     if (str(binascii.hexlify(echo)) != "b'09'"):
-        print("tkrConfigReset: incorrect echo received (" + str(binascii.hexlify(echo)) + "), should be b'09'")   
+        print("tkrAsicPowerOff: incorrect echo received (" + str(binascii.hexlify(echo)) + "), should be b'09'")   
 
 def tkrSetTrgMask(FPGA,Value):
     address = addrEvnt

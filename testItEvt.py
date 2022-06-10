@@ -18,7 +18,6 @@ address = 8   # Address of the event PSOC
 
 print("Set up the Event PSOC to send its output over the UART")
 setOutputMode("UART")
-time.sleep(0.1)
 
 #LED2("on", address)
 #time.sleep(1)
@@ -80,8 +79,6 @@ if nBoards > 0:
 
     if asicReset: tkrAsicHardReset(0x1F)
 
-    if asicReset: tkrAsicSoftReset(0x1F)
-
     #tkrSetNumLyrs(1)
     bumpTKRthreshold(4)
     configureTkrASICs(nBoards)
@@ -100,7 +97,7 @@ if nBoards > 0:
 
     oneShot = 0
     gain = 0
-    shaping = 1
+    shaping = 0
     bufSpeed = 3
     trigDelay = 4
     trigWindow = 1
@@ -108,7 +105,7 @@ if nBoards > 0:
     maxClust = 10
     chips = [0,1,2,3,4,5,6,7,8,9,10,11]
     for brd in boards:
-        #tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
+        tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
         for chip in chips: tkrGetASICconfig(brd, chip)
 
     for brd in boards:
@@ -216,9 +213,6 @@ for brd in boards:
 
 getLyrTrgCnt(0)
 
-#startTkrRateMonitor(2, 2)
-#time.sleep(2)
-
 mask = 0x07    # T1
 print("Setting the first trigger mask to " + str(mask))
 setTriggerMask(1, mask)
@@ -237,19 +231,25 @@ print("Setting the second trigger mask to " + str(mask))
 setTriggerMask(2, mask)
 print("The first trigger mask is set to  " + str(hex(getTriggerMask(1))))
 print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
-tkrSetPMTtrgDly(26)
+tkrSetPMTtrgDly(12)
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
-startHouseKeeping(4)
+startHouseKeeping(4, 1)
 startTkrHouseKeeping(6)
 
 readErrors(address)
 #sys.exit("abort")
-ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 50, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(79, 20, True, False, True)
+readErrors(address)
+
+#response = input("Enter something")
+
 getRunCounters()
+#response = input("Enter something")
 getAvgReadoutTime()
+#response = input("Enter something")
 print("Average ADC values:")
 print("    T1 = " + str(ADC[0]) + " +- " + str(Sigma[0]))
 print("    T2 = " + str(ADC[1]) + " +- " + str(Sigma[1]))
@@ -262,13 +262,17 @@ for ch in range(5):
     cnt = getEndOfRunChannelCount(ch+1)
     print("Counter for channel " + chName[ch] + " = " + str(cnt))
 
-stopPmtRateMonitor()
+readErrors(address)
 getPmtRates()
-#stopTkrRateMonitor()
 getTkrLyrRates()
 
-getLyrTrgCnt(0)
+getLyrTrgCnt(0)   # This goes directly to the tracker to get the rate
 
+#for brd in boards:
+#    for chip in chips: tkrGetASICconfig(brd, chip)
+
+readErrors(address)
+time.sleep(1)
 if asicReset and nBoards>0: tkrAsicPowerOff()
 
 readErrors(address)

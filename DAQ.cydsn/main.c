@@ -32,6 +32,7 @@
  * V24.1: Using the whole of command circular buffers. Fixed some Housekeeping logic -Brian
  * V24.2: Changes in comment fields, updated tracker board map, removed some debug code and pins
  * V24.4: Fixes to problems in the V24.0 ADC control logic
+ * V24.5: Simplifications to the housekeeping and monitoring. Housekeeping operates within or without a run.
  * ========================================
  */
 #include "project.h"
@@ -41,7 +42,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 4
+#define MINOR_VERSION 5
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -331,13 +332,10 @@ RTC_1_TIME_DATE* timeDate;
 
 // Data structures for tracker rate monitoring
 uint8 tkrMonitorInterval;   // time interval in seconds between successive 1-second rate accumulations
-uint8 tkrMonitorNumAvg;      // number of 1-second rate measurements to average
 uint16 tkrMonitorRates[MAX_TKR_BOARDS];
-uint tkrMonitorSums[MAX_TKR_BOARDS];
-uint nTkrMonSamples;
 bool monitorTkrRates;
-uint32 tkrClkAtStart;
-uint32 tkrClkCntStart;
+uint32 tkrClkAtStart;       // Clock count at start of monitoring period
+uint32 tkrClkCntStart;      // Clock count at start of 1-second rate accumulation interval
 bool waitingTkrRateCnt;
 
 #define MAX_PMT_CHANNELS 5
@@ -1005,7 +1003,32 @@ uint16 tkrGetShuntVoltage(uint8 FPGA, uint8 i2cAddress) {
     return result;
 }
 
+// Check whether the trigger is enabled
+bool isTriggerEnabled() {
+    uint8 regValue = Control_Reg_Trg_Read();
+    bool enabled = regValue==0x01;
+    return enabled;
+}
+
+// Control of the trigger enable bit. 
+void triggerEnable(bool enable) {
+    if (enable) {
+        Control_Reg_Pls_Write(PULSE_TRIG_SET);
+        Control_Reg_Trg_Write(1);
+        isr_GO_Enable();
+    } else {
+        // Disable the master trigger 
+        isr_GO_Disable();
+        Control_Reg_Trg_Write(0);
+    }
+}
+
 void makeTkrHouseKeeping() {
+    bool trgStat = isTriggerEnabled();
+    if (trgStat) {
+        triggerEnable(false);
+        sendSimpleTrackerCmd(0x00, 0x66);
+    }
     uint8 data[TKRHOUSESIZE];
     data[0] = 0x54;  // 4 header bytes spell "TRAK" in ASCII
     data[1] = 0x52;
@@ -1062,6 +1085,10 @@ void makeTkrHouseKeeping() {
             for (int i=0; i<24; ++i) data[offset+i] = 0;
         }
         offset +=  24;
+    }
+    if (trgStat) {
+        sendSimpleTrackerCmd(0x00, 0x65);
+        triggerEnable(true);
     }
     nDataReady = TKRHOUSESIZE;
     for (uint i=0; i<TKRHOUSESIZE; ++i) dataOut[i] = data[i];
@@ -1201,13 +1228,6 @@ uint8 readDAC(uint8 I2C_Address, uint16* rvalue) {
     return 0;
 }
 
-// Check whether the trigger is enabled
-bool isTriggerEnabled() {
-    uint8 regValue = Control_Reg_Trg_Read();
-    bool enabled = regValue==0x01;
-    return enabled;
-}
-
 // Set the time delays used for coordinating the peak detector readout:
 // Time to wait for the peak detector to rise and settle before starting the ADC conversion
 // Time to wait for the conversions to finish before signaling the CPU to start the readout
@@ -1289,21 +1309,6 @@ void TOFenable(bool enable) {
             isr_Store_A_Disable();
             isr_Store_B_Disable();
         }
-    }
-}
-
-// Control of the trigger enable bit. 
-void triggerEnable(bool enable) {
-    if (enable) {
-        Control_Reg_Pls_Write(PULSE_TRIG_SET);
-        Control_Reg_Trg_Write(1);
-        isr_GO_Enable();
-        isr_GO1_Enable();
-    } else {
-        // Disable the master trigger 
-        isr_GO_Disable();
-        isr_GO1_Disable();
-        Control_Reg_Trg_Write(0);
     }
 }
 
@@ -1826,10 +1831,10 @@ CY_ISR(isrTkrUART) {
 
 CY_ISR(isr1Hz) {
     cntSeconds++;
-    if (cntSeconds%houseKeepPeriod == 0) {
+    if (cntSeconds%houseKeepPeriod == 0 && cntSeconds != 0) {
         houseKeepingDue = doHouseKeeping;
     }
-    if (cntSeconds%(tkrHouseKeepPeriod*60) == 0) {
+    if (cntSeconds%(tkrHouseKeepPeriod*60) == 0 && cntSeconds != 0) {
         tkrHouseKeepingDue = doTkrHouseKeeping;
     }
 }
@@ -1842,7 +1847,7 @@ CY_ISR(isrGO) {
     timeStamp = time();                    // Save for the event readout 
     timeStamp8 = Cntr8_Timer_ReadCount();  // Save for the TOF event analysis and readout
     cntGO1save = cntGO1;                   // Save for the event readout
-
+    triggerEnable(false);                  // Disable the trigger until readout is complete
     // At this point execution returns to its normal flow, allowing other interrupts. The remainder of the
     // event readout process is done in main(), in the infinite for loop.
 }
@@ -2170,50 +2175,33 @@ void makeEvent() {
     ch5CountSave = ch5Count;
 } // end of subroutine makeEvent
 
-void tkrRateMonitor(bool *waitingTkrRateCnt) {
+void tkrRateMonitor() {
     uint32 diff;
-    if (*waitingTkrRateCnt) {
+    if (waitingTkrRateCnt) {
         if (time() > tkrClkCntStart) {
             diff = time() - tkrClkCntStart;
         } else {
             diff = 0xffffffff - (tkrClkCntStart - time() - 1);                       
         }     
-        if (diff >= 220) {  // Allow 1 second for the Tracker to finish its count
-            *waitingTkrRateCnt = false;
+        if (diff >= 250) {  // Allow >1 second for the Tracker to finish its count
             bool trgStat = isTriggerEnabled();
             if (trgStat) {
                 triggerEnable(false);
                 sendSimpleTrackerCmd(0x00, 0x66);
             }
-            bool tkrErr = false;
-            uint16 theRate[MAX_TKR_BOARDS];
             for (int brd=0; brd<numTkrBrds; ++brd) {
-                theRate[brd] = 0;
+                tkrMonitorRates[brd] = 0;
                 uint8 cmdData[1];
                 sendTrackerCmd(brd, 0x6D, 0, cmdData, TKR_HOUSE_DATA);  // Get counts from tracker
                 if (nTkrHouseKeeping == 0) {
                     addError(ERR_MISSING_HOUSEKEEPING,brd,0x5D);
-                    tkrErr = true;
                 } else {
-                    theRate[brd] = (tkrHouseKeeping[0]<<8 & 0xff00) | tkrHouseKeeping[1];
+                    tkrMonitorRates[brd] = (tkrHouseKeeping[0]<<8 & 0xff00) | tkrHouseKeeping[1];
+                    nTkrHouseKeeping = 0;   // To keep this info from being sent out
                 }
-                nTkrHouseKeeping = 0;
             }
-            if (!tkrErr) {
-                if (nTkrMonSamples == tkrMonitorNumAvg) {
-                    for (int brd=0; brd<numTkrBrds; ++ brd) {
-                        tkrMonitorRates[brd] = tkrMonitorSums[brd]/nTkrMonSamples;
-                        tkrMonitorSums[brd] = theRate[brd];
-                    }
-                    nTkrMonSamples = 1;
-                } else {
-                    for (int brd=0; brd<numTkrBrds; ++ brd) {
-                        tkrMonitorSums[brd] += theRate[brd];
-                    }
-                    nTkrMonSamples++;
-                }
-                tkrClkAtStart = time();
-            }
+            waitingTkrRateCnt = false;
+            tkrClkAtStart = time();
             if (trgStat) {
                 sendSimpleTrackerCmd(0x00, 0x65);
                 triggerEnable(true);
@@ -2234,7 +2222,7 @@ void tkrRateMonitor(bool *waitingTkrRateCnt) {
             }
             sendSimpleTrackerCmd(0x00, 0x6C);
             tkrClkCntStart = time();
-            *waitingTkrRateCnt = true;
+            waitingTkrRateCnt = true;
             if (trgStat) {
                 sendSimpleTrackerCmd(0x00, 0x65);
                 triggerEnable(true);
@@ -2320,7 +2308,7 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
         // 0x00
         // 0xFF
         // data record length
-        // command echo or 0xDB or 0xDD or 0xDE
+        // command echo or 0xDB or 0xDD or 0xDE or 0xDF
         // number command data bytes
         if (outputMode != USBUART_OUTPUT) set_SPI_SSN(SSN_Main, false);
         if (outputMode == USBUART_OUTPUT) {  // Output the header
@@ -2922,10 +2910,9 @@ void interpretCommand(uint8 tofConfig[]) {
                 if (readTracker) {
                     sendSimpleTrackerCmd(0x00, 0x66);  // Disable the Tracker trigger
                 }
+                isr_GO1_Disable();
                 endingRun = true;
                 runNumber = 0;
-                monitorPmtRates = false;
-                monitorTkrRates = false;
                 endData[0] = byte32(cntGO1, 0);
                 endData[1] = byte32(cntGO1, 1);
                 endData[2] = byte32(cntGO1, 2);
@@ -2955,8 +2942,6 @@ void interpretCommand(uint8 tofConfig[]) {
                 nReadAvg = 0;
                 clkCnt = 0;
                 cntSeconds = 0;
-                houseKeepingDue = false;
-                tkrHouseKeepingDue = false;
                 tofA.ptr = 0;
                 tofB.ptr = 0;
                 ch1Count = 0;               
@@ -2965,11 +2950,6 @@ void interpretCommand(uint8 tofConfig[]) {
                 ch4Count = 0;
                 ch5Count = 0;
                 Control_Reg_Pls_Write(PULSE_CNTR_RST);
-                pmtClkCntStart = time();
-                for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
-                    pmtCntInit[cntr] = getChCount(cntr);
-                }
-                waitingPmtRateCnt = true;
                 cntGO1 = 0;
                 for (int i=0; i<MAX_TKR_BOARDS; ++i) nChipsHit[i] = 0;
                 nTkrTrg1 = 0;
@@ -2979,7 +2959,13 @@ void interpretCommand(uint8 tofConfig[]) {
                 nIgnoredCmd = 0;
                 nBadCmd = 0;
                 nBadCRC = 0;
+                pmtClkCntStart = time();
+                for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
+                    pmtCntInit[cntr] = getChCount(cntr);
+                }
+                waitingPmtRateCnt = true;
                 CyExitCriticalSection(InterruptState);
+                isr_GO1_Enable();
                 runNumber = cmdData[0];
                 runNumber = (runNumber<<8) | cmdData[1];
                 readTracker = (cmdData[2] == 1);
@@ -2995,8 +2981,8 @@ void interpretCommand(uint8 tofConfig[]) {
                 nDataReady = 0;  // Don't send the tracker echo back to the UART
                 nDataBytes = 0;  // Also, avoid sending an echo from this command
                 cmdDone = false;
-                awaitingCommand = true;
                 endingRun = false;
+                awaitingCommand = true;
                 break;
             case '\x3D':  // Return trigger enable status
                 nDataReady =1;
@@ -3164,43 +3150,6 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 nDataReady = 2*(1+numTkrBrds);
                 break;
-            case '\x4A': // Set up and initiate tracker rate monitoring
-                if (cmdData[0] == 0 || cmdData[1] == 0) {
-                    monitorTkrRates = false;
-                    waitingTkrRateCnt = false;
-                    break;
-                }
-                tkrMonitorInterval = cmdData[0];  // Number of seconds between monitoring events
-                if (tkrMonitorInterval < 2) tkrMonitorInterval = 2;
-                tkrMonitorNumAvg = cmdData[1];    // Number of successive measurements to average over
-                if (monitorTkrRates) break;
-                nTkrMonSamples = 0;
-                for (int brd=0; brd<numTkrBrds; ++brd) {
-                    tkrMonitorSums[brd] = 0;
-                }
-                tkrClkAtStart = time();        
-                monitorTkrRates = true;
-                waitingTkrRateCnt = false;
-                break;
-            case '\x52': // Set up and initiate PMT singles rate monitoring
-                if (cmdData[0] == 0 || cmdData[1] == 0) {
-                    monitorPmtRates = false;
-                    waitingPmtRateCnt = false;
-                    break;
-                }
-                if (monitorPmtRates) break;
-                pmtDeltaT = cmdData[0];             // Number of seconds over which to accumulate counts
-                pmtMonitorInterval = cmdData[1];    // Interval in seconds between successive measurements
-                if (pmtMonitorInterval < 2*pmtDeltaT) pmtMonitorInterval = 2*pmtDeltaT;
-                InterruptState = CyEnterCriticalSection();
-                pmtClkCntStart = time();
-                for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
-                    pmtCntInit[cntr] = getChCount(cntr);
-                }
-                CyExitCriticalSection(InterruptState);
-                monitorPmtRates = true;
-                waitingPmtRateCnt = true;
-                break;
             case '\x53':  // Get the PMT counter rates
                 dataOut[0] = byte16(pmtMonitorTime,0);
                 dataOut[1] = byte16(pmtMonitorTime,1);
@@ -3277,7 +3226,18 @@ void interpretCommand(uint8 tofConfig[]) {
             case '\x5C': // Start sending tracker monitoring packets
                 tkrHouseKeepPeriod = cmdData[0];
                 doTkrHouseKeeping = true;
+                tkrHouseKeepingDue = false;
                 isr_1Hz_Enable();
+                break;
+            case '\x5E': // Send out a housekeeping packet now
+                if (doHouseKeeping) {
+                    houseKeepingDue = true;
+                }
+                break;
+            case '\x5F': // Set a tracker housekeeping packet now
+                if (doTkrHouseKeeping) {
+                    tkrHouseKeepingDue = true;
+                }
                 break;
             case '\x5D': // Stop sending tracker housekeeping packets
                 doTkrHouseKeeping = false;
@@ -3287,26 +3247,23 @@ void interpretCommand(uint8 tofConfig[]) {
             case '\x57': // Start monitoring processes to create the housekeeping data packets
                 houseKeepPeriod = cmdData[0];
                 doHouseKeeping = true;
+                houseKeepingDue = false;
                 cntSeconds = 0;
-                if (!monitorPmtRates) {
-                    pmtDeltaT = houseKeepPeriod;         // Number of seconds over which to accumulate counts
-                    pmtMonitorInterval = 2*pmtDeltaT;    // Interval in seconds between successive measurements
-                    InterruptState = CyEnterCriticalSection();
-                    pmtClkCntStart = time();
-                    for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
-                        pmtCntInit[cntr] = getChCount(cntr);
-                    }
-                    CyExitCriticalSection(InterruptState);
-                    monitorPmtRates = true;
-                    waitingPmtRateCnt = true;
+                pmtDeltaT = houseKeepPeriod;         // Number of seconds over which to accumulate PMT counts
+                pmtMonitorInterval = 2*pmtDeltaT;    // Interval in seconds between successive measurements
+                InterruptState = CyEnterCriticalSection();
+                pmtClkCntStart = time();
+                for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
+                    pmtCntInit[cntr] = getChCount(cntr);
                 }
-                if (!monitorTkrRates) {
-                    tkrMonitorInterval = houseKeepPeriod - 1;  // Number of seconds between monitoring events
+                CyExitCriticalSection(InterruptState);
+                monitorPmtRates = true;
+                waitingPmtRateCnt = true;
+                if (cmdData[1] > 0) {  // This allows tracker rate monitoring to be disabled, in case it is problematic
+                    tkrMonitorInterval = houseKeepPeriod;  // Number of seconds between TKR monitoring events
                     if (tkrMonitorInterval < 2) tkrMonitorInterval = 2;
-                    tkrMonitorNumAvg = 1;                      // Number of successive measurements to average over
-                    nTkrMonSamples = 0;
                     for (int brd=0; brd<numTkrBrds; ++brd) {
-                        tkrMonitorSums[brd] = 0;
+                        tkrMonitorRates[brd] = 0;
                     }
                     tkrClkAtStart = time();        
                     monitorTkrRates = true;
@@ -3317,6 +3274,8 @@ void interpretCommand(uint8 tofConfig[]) {
             case '\x58': // Stop sending housekeeping packets
                 doHouseKeeping = false;
                 houseKeepingDue = false;
+                monitorPmtRates = false;
+                monitorTkrRates = false;
                 if (!doTkrHouseKeeping) isr_1Hz_Disable();
                 break;
             case '\x59': // Reset the Tracker layer configuration
@@ -3780,16 +3739,16 @@ int main(void)
         }
 
         // Tracker rate monitoring
-        if (monitorTkrRates) {
-            tkrRateMonitor(&waitingTkrRateCnt);
+        if (nDataReady == 0 && monitorTkrRates) {
+            tkrRateMonitor();
         }
         
         // PMT singles rate monitoring
-        if (monitorPmtRates) {
+        if (nDataReady == 0 && monitorPmtRates) {
             pmtRateMonitor();
         }
         
-        if (triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
+        if (nDataReady == 0 && triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
             makeEvent();
         }
         
@@ -3803,8 +3762,8 @@ int main(void)
             }
         }
         
-        // Send housekeeping packets only during a run. Check nDataReady to avoid overwriting an event.
-        if (runNumber > 0 && nDataReady == 0 && !endingRun) {
+        // Send housekeeping packets. Check nDataReady to avoid overwriting an event.
+        if (nDataReady == 0) {
             if (houseKeepingDue) {
                 makeHouseKeeping();
                 houseKeepingDue = false;
@@ -3813,7 +3772,7 @@ int main(void)
         
         // Tracker housekeeping. Note that nDataReady is checked here, because if a regular housekeeping packet
         // is going out now, then we need to wait for the next loop iteration to avoid overwriting it.
-        if (runNumber > 0 && nDataReady == 0 && !endingRun) {
+        if (nDataReady == 0) {
             if (tkrHouseKeepingDue) {
                 makeTkrHouseKeeping();
                 tkrHouseKeepingDue = false;
