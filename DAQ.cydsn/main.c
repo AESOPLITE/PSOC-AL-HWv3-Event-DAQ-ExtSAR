@@ -36,6 +36,7 @@
  * V24.6: Fixed #14 error on first event by switching the trigger delay back to Count7 from Timer. 
  * V24.7: Changed several addError calls to addErrorOnce
  * V24.8: Fixed up the trigger enable and disable ordering and cleared pending before enabling isr_GO1, to avoid a spurious GO1.
+ * V24.9: Greatly increased UART command FIFO, so it will hold many commands at once. Flag CMD bytes out of order. Wait 2s for TKR reset. 
  * ========================================
  */
 #include "project.h"
@@ -45,7 +46,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 8
+#define MINOR_VERSION 9
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -125,7 +126,7 @@
 #define THRDEF (5u)
 
 /* Timeout in 5 millisecond units when waiting for command completion */
-#define TIMEOUT 1000u 
+#define TIMEOUT 2000u 
 
 /* Packet IDs */
 #define FIX_HEAD ('\xDB')  // This one is no longer used, because the command echo was added to the data return
@@ -205,6 +206,8 @@
 #define ERR_GET_TKR_EVENT 42u
 #define BAD_DIE_TEMP 43u
 #define ASIC_CONFIG_WRONG_LEN 44u
+#define ERR_NO_TRK_RESET 45u
+#define ERR_BYTE_ORDER 46u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -355,13 +358,13 @@ bool waitingPmtRateCnt;
 
 // Circular FIFO buffer of bytes received from the Main PSOC via the UART.
 // This buffer gets searched for 29-byte commands, which then go into the cmd_buffer structure
-#define MX_FIFO 57
+#define MX_FIFO 1024
 volatile uint8 cmdFIFO[MX_FIFO];
 volatile int fifoWritePtr, fifoReadPtr;
 
 // Circular FIFO buffer of 29-byte UART commands from the Main PSOC
 #define CMD_LENGTH 29
-#define MX_CMDS 32u
+#define MX_CMDS 35u
 struct MainPSOCcmds {
     uint8 buf[CMD_LENGTH];    // An actual command is made up of multiple buf elements
     uint8 nBytes;
@@ -465,7 +468,7 @@ uint8 byte16(uint16 word, int byte) {
 }
 
 bool cmdAllowedInRun(uint8 cmd) {
-    uint8 cmdsAllowed[NUM_CMDS_IN_RUN] = {0x44, 0x03, 0x39, 0x3B, 0x3D, 0x4A, 0x53, 0x5C, 0x5D, 0x57, 0x58};
+    uint8 cmdsAllowed[NUM_CMDS_IN_RUN] = {0x44, 0x03, 0x39, 0x3B, 0x4C, 0x5C, 0x5D, 0x57, 0x58, 0x5E, 0x5F};
     for (int i=0; i<NUM_CMDS_IN_RUN; ++i) {
         if (cmd == cmdsAllowed[i]) {
             return true;
@@ -825,7 +828,7 @@ uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint 
 }
 
 // Function to send a command to the tracker that has no data bytes sent or returned
-void sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
+int sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
     tkrLED(true);
     tkrCmdCode = code;
     clearTkrFIFO();
@@ -843,18 +846,20 @@ void sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
         if (time() - tStart > 200) {
             addError(ERR_TX_FAILED, code, 0xFF);
             tkrLED(false);
-            return;
+            return -1;
         }
     }                                
     // Now look for the echo coming back from the Tracker.
+    int rc = 0;
     if (tkrCmdCode != 0x67 && tkrCmdCode != 0x6C) {
-        int rc = getTrackerData(TKR_ECHO_DATA);
+        rc = getTrackerData(TKR_ECHO_DATA);
         if (rc != 0) {
             addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
         }
     }
     nDataReady = 0;  // Suppress the echo from being sent out to the world
     tkrLED(false);
+    return rc;
 }
 
 // Load a Tracker I2C register
@@ -1521,13 +1526,15 @@ void configureASICs() {
 }
 
 // Read the ASIC configuration register 
-void readASICconfig(uint8 FPGA, uint8 chip) {
+uint8 readASICconfig(uint8 FPGA, uint8 chip) {
     tkrCmdCode = 0x22; // Config read command code 
-    sendTrackerCmd(FPGA, tkrCmdCode, 1, &chip, 0);
+    uint8 rc = sendTrackerCmd(FPGA, tkrCmdCode, 1, &chip, 0);
+    return rc;
 }
 
 uint32 getTkrASICconfig(uint8 FPGA, uint8 chip) {
-    readASICconfig(FPGA, chip);
+    uint8 rc = readASICconfig(FPGA, chip);
+    if (rc != 0) return 0;
     if (dataOut[0] != 0x09) {
         addErrorOnce(ASIC_CONFIG_WRONG_LEN,FPGA,chip);
     }
@@ -1540,23 +1547,39 @@ uint32 getTkrASICconfig(uint8 FPGA, uint8 chip) {
 
 // Reset all of the Tracker board FPGAs (soft reset) and the ASICs (soft reset)
 // Unfortunately, the ASIC reset destroys the configuration, so the ASICs have to be reconfigured.
-void resetAllTrackerLogic() {
+int resetAllTrackerLogic() {
+    bool trgStat = isTriggerEnabled();
+    if (trgStat) {
+        triggerEnable(false);
+    }
+    // Wait 2 seconds for all possible Verilog timeouts in the command state machine
+    CyDelay(2000);
+    int rc = 0;
     for (uint8 brd=0; brd<numTkrBrds; ++brd) {
         tkrCmdCode = 0x04;
-        sendSimpleTrackerCmd(brd, tkrCmdCode);         
+        rc = sendSimpleTrackerCmd(brd, tkrCmdCode);   // Reset the FPGA state machines
+        if (rc != 0) return rc;
     }
     // Reset the ASICs only if there are non-parity errors flagged in the configuration register, or if
     // the configuration register read failed.
     // It is only necessary to check one arbitrary chip, as all should have the same DAQ errors, if any.
     uint32 config = getTkrASICconfig(0, 3);
-    uint8 errCodes = (config & 0x03000000)>>24;
-    uint8 regType =  (config & 0x70000000)>>28;
-    if (errCodes != 0 || regType != 0x03) {   // Getting the correct register type (i.e. config.) indicates successful register read
-        tkrCmdCode = 0x0C;   // ASIC soft reset
-        cmdData[0] = 0x1F;   // All chips selected
-        sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);
-        configureASICs();
+    if (config == 0) rc = -2;
+    else {
+        uint8 errCodes = (config & 0x03000000)>>24;
+        uint8 regType =  (config & 0x70000000)>>28;
+        if (errCodes != 0 || regType != 0x03) {   // Getting the correct register type (i.e. config.) indicates successful register read
+            tkrCmdCode = 0x0C;   // ASIC soft reset
+            cmdData[0] = 0x1F;   // All chips selected
+            sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);
+            configureASICs();
+        }
+        if (trgStat) {
+            sendSimpleTrackerCmd(0x00, 0x65);
+            triggerEnable(true);
+        }
     }
+    return rc;
 }
 
 // Should be called after startup to make the specifiedTracker board FPGA go through a calibration sequence to center
@@ -1807,7 +1830,7 @@ CY_ISR(isrUART) {
         cmdFIFO[fifoWritePtr] = (uint8)theByte;
         fifoWritePtr = WRAPINC(fifoWritePtr, MX_FIFO);
         if (fifoWritePtr == fifoReadPtr) {
-            fifoReadPtr = WRAPINC(fifoReadPtr, MX_FIFO);  // Throw out the oldest byte
+            fifoWritePtr = WRAPDEC(fifoWritePtr, MX_FIFO);  // The byte will get overwritten---we're screwed. . .
             addErrorOnce(ERR_FIFO_OVERFLOW, byte32(clkCnt, 0), byte32(clkCnt, 1));
         }
     }
@@ -1977,7 +2000,8 @@ void makeEvent() {
             addErrorOnce(ERR_GET_TKR_EVENT, rc, byte32(cntGO, 0));
             UART_TKR_ClearTxBuffer();
             UART_TKR_ClearRxBuffer(); 
-            resetAllTrackerLogic();
+            int rc2 = resetAllTrackerLogic();
+            if (rc2 != 0) addError(ERR_NO_TRK_RESET, rc2, rc); 
             makeDummyTkrEvent(0, 0, 0, 6);
             numTkrResets++;
         }
@@ -2987,9 +3011,9 @@ void interpretCommand(uint8 tofConfig[]) {
                 TOFenable(true);
                 nDataReady = 0;  // Don't send the tracker echo back to the UART
                 nDataBytes = 0;  // Also, avoid sending an echo from this command
+                awaitingCommand = true;
                 cmdDone = false;
                 endingRun = false;
-                awaitingCommand = true;
                 break;
             case '\x3D':  // Return trigger enable status
                 nDataReady =1;
@@ -3715,9 +3739,9 @@ int main(void)
     numTkrBrds = MAX_TKR_BOARDS;  // By default all Tracker boards are present.
     eventDataReady = false;
     awaitingCommand = true;   
+    cmdDone = false;        // If true, A command has been fully received but data have not yet been sent back
     
     uint32 cmdStartTime = time();
-    cmdDone = false;        // If true, A command has been fully received but data have not yet been sent back
     set_SPI_SSN(0, true);   // Deselect all SPI slaves
     triggerEnable(false);
     endingRun = false;
@@ -3746,12 +3770,12 @@ int main(void)
         }
 
         // Tracker rate monitoring
-        if (nDataReady == 0 && monitorTkrRates) {
+        if (nDataReady == 0 && monitorTkrRates && !endingRun) {
             tkrRateMonitor();
         }
         
         // PMT singles rate monitoring
-        if (nDataReady == 0 && monitorPmtRates) {
+        if (nDataReady == 0 && monitorPmtRates && !endingRun) {
             pmtRateMonitor();
         }
         
@@ -3793,6 +3817,7 @@ int main(void)
         
         // Time-out protection in case the expected data for a command are never sent.
         // The command buffers are completely flushed, hoping for a fresh start
+        // Note that this could be operator error (i.e. not sending the required command data bytes)
         if (!awaitingCommand) {
             if (time() - cmdStartTime > TIMEOUT) {
                 int InterruptState = CyEnterCriticalSection();
@@ -3809,19 +3834,19 @@ int main(void)
         
         // Parse the FIFO of commands from the Main PSOC, via UART. Identify commands
         // from the <CR><LF> characters, and move complete commands into the command buffer.
+        // Get ALL of the complete commands now that are currently in the fifo buffer.
         int numBytes = ACTIVELEN(fifoReadPtr, fifoWritePtr, MX_FIFO);
-        if (numBytes >= CMD_LENGTH) {   
-            // Search backkwards for the <CR><LF> termination of the latest command
-            int tmpRdPtr = WRAPDEC(fifoWritePtr, MX_FIFO);
-            for (int i=0; i<numBytes+1-CMD_LENGTH; ++i) {
-                if (cmdFIFO[tmpRdPtr] == LF && cmdFIFO[WRAPDEC(tmpRdPtr, MX_FIFO)] == CR) {
-                    isr_UART_Disable();
-                    fifoReadPtr = (tmpRdPtr + 1 - CMD_LENGTH + MX_FIFO) % MX_FIFO;
+        if (numBytes >= CMD_LENGTH) {  // Only move forward if there are enough bytes in the buffer for >= 1 command
+            int fifoWritePtrNow = fifoWritePtr;   // Save this, to allow bytes to continue to flow in via interrupt
+            int tmpRdPtr = (fifoReadPtr + CMD_LENGTH - 2) % MX_FIFO;  // Jump ahead to look for <CR><LF>
+            int lastByte = WRAPDEC(fifoWritePtrNow, MX_FIFO);
+            while (true) {
+                if (cmdFIFO[tmpRdPtr] == CR && cmdFIFO[WRAPINC(tmpRdPtr, MX_FIFO)] == LF) {
+                    fifoReadPtr = (tmpRdPtr + 2 - CMD_LENGTH + MX_FIFO) % MX_FIFO;
                     for (int j=0; j<CMD_LENGTH; ++j) {
                         cmd_buffer[cmdWritePtr].buf[j] = cmdFIFO[fifoReadPtr];
                         fifoReadPtr = WRAPINC(fifoReadPtr, MX_FIFO);
                     }
-                    isr_UART_Enable();
                     cmd_buffer[cmdWritePtr].nBytes = CMD_LENGTH;
                     if (WRAPINC(cmdWritePtr, MX_CMDS) == cmdReadPtr) {
                         addError(ERR_CMD_BUF_OVERFLOW, byte32(clkCnt,0), byte32(clkCnt,1)); // This will almost certainly make a mess if it happens!
@@ -3829,13 +3854,16 @@ int main(void)
                         cmdWritePtr = WRAPINC(cmdWritePtr, MX_CMDS);  
                         cmd_buffer[cmdWritePtr].nBytes = 0;
                     }
-                    break;
+                    numBytes = ACTIVELEN(fifoReadPtr, fifoWritePtrNow, MX_FIFO);
+                    if (numBytes < CMD_LENGTH) break;
+                    tmpRdPtr = (fifoReadPtr + CMD_LENGTH - 2) % MX_FIFO; // Jump ahead to look for the next <CR><LF>
+                } else {
+                    tmpRdPtr = WRAPINC(tmpRdPtr, MX_FIFO);  // <CR><LF> wasn't where expected. Keep looking. . .
+                    if (tmpRdPtr == lastByte) break;
                 }
-                if (tmpRdPtr == fifoReadPtr) break;  // This check shouldn't be necessary
-                tmpRdPtr = WRAPDEC(tmpRdPtr, MX_FIFO);
             }
-        }
-
+        } 
+        
         // Get a 9-byte command input from the UART or USB-UART
         // The two should not be used at the same time (no reason for that, anyway)
         int count = 0;
@@ -3924,16 +3952,20 @@ int main(void)
                                 badCMD = true;
                             }
                             dCnt++;
+                            if (dCnt != byteCnt || dCnt > nDataBytes) {
+                                addError(ERR_BYTE_ORDER, command, dCnt);
+                            }
                             if (dCnt == nDataBytes) cmdDone = true; 
                         }
                     }
-                    if (cmdDone && badCMD) {
-                        cmdDone = false;
-                        awaitingCommand = true;  // Abort a command with a bad data byte
-                        nDataBytes = 0;
-                    }
-                    if (cmdDone && !badCMD) {
-                        interpretCommand(tofConfig);
+                    if (cmdDone) {
+                        if (badCMD) {
+                            cmdDone = false;
+                            awaitingCommand = true;  // Abort a command with a bad data byte
+                            nDataBytes = 0;
+                        } else {
+                            interpretCommand(tofConfig);
+                        }
                     }
                 }
             } // End of command polling  

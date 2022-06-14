@@ -970,6 +970,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             if ret == b'\xDC': break
             time.sleep(0.1)
             cnt = cnt + 1
+            if cnt%30 == 0: readErrors(addrEvnt);
         ret = ser.read(2)
         if ret != b'\x00\xFF':
             print("limitedRun: bad header found: b'\\xdc' " + str(ret))
