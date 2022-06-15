@@ -858,7 +858,7 @@ def printHousekeeping(dataList, byteList):
         layerRate = dataList[50 + brd*2]*256 + dataList[50 + brd*2 + 1]
         print("    Tracker board " + str(brd) + " rate = " + str(layerRate) + " Hz")
     dieTemp = dataList[66]*256 + dataList[67]
-    print("   Event PSOC die temperature = " + str(dieTemp))
+    print("   Event PSOC die temperature = " + str(dieTemp) + " Celsius")
     tkrTemp = dataList[68]*256 + dataList[69]
     Tcelsius = (0.25/4.0)*(tkrTemp/16.)
     print("   Tracker layer 0 temperature = " + str(Tcelsius) + " Celsius")

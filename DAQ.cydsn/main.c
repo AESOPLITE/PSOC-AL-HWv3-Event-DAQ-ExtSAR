@@ -37,6 +37,7 @@
  * V24.7: Changed several addError calls to addErrorOnce
  * V24.8: Fixed up the trigger enable and disable ordering and cleared pending before enabling isr_GO1, to avoid a spurious GO1.
  * V24.9: Greatly increased UART command FIFO, so it will hold many commands at once. Flag CMD bytes out of order. Wait 2s for TKR reset. 
+ * V24.10: Gated the GO signal. Changes in main loop to finish a command before doing anything else.
  * ========================================
  */
 #include "project.h"
@@ -46,7 +47,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 9
+#define MINOR_VERSION 10
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -208,6 +209,7 @@
 #define ASIC_CONFIG_WRONG_LEN 44u
 #define ERR_NO_TRK_RESET 45u
 #define ERR_BYTE_ORDER 46u
+#define ERR_BYTECOUNT 47u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -2316,6 +2318,7 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
     }
     if (nDataReady > 0) {    // Send out a command echo only if there are also data to send
         dataLED(true);
+        uint16 nPadding;
         if (!cmdDone) { // Output is event data, not a command response
             if (dataOut[0] == 0x5A && dataOut[1] == 0x45 && dataOut[2] == 0x52 && dataOut[3] == 0x4F) {
                 if (debugTOF) dataPacket[4] = 0xDB;
@@ -2325,14 +2328,16 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
                     dataPacket[4] = 0xDE;
                 } else dataPacket[4] = 0xDF;
             }
-            nDataBytes = 0;   // Set to zero just in case a value is still hanging around in this variable
+            dataPacket[3] = nDataReady;
+            nPadding = 3 - nDataReady%3;
+            dataPacket[5] = 0;
         } else {              // Output directly responding to a command
-            dataPacket[4] = command;               
-        }
-        dataPacket[3] = nDataReady + nDataBytes;
-        uint16 nPadding = 3 - (nDataBytes + nDataReady)%3;
-        if (nPadding == 3) nPadding = 0;
-        dataPacket[5] = nDataBytes;
+            dataPacket[4] = command;
+            dataPacket[3] = nDataReady + nDataBytes;
+            nPadding = 3 - (nDataBytes + nDataReady)%3;
+            dataPacket[5] = nDataBytes;
+        }               
+        if (nPadding == 3) nPadding = 0;        
         // Header data packet:
         // 0xDC
         // 0x00
@@ -2351,7 +2356,7 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
                 SPIM_WriteTxData(dataPacket[i]);
             }
         }
-        if (nDataBytes > 0) {
+        if (dataPacket[5] > 0) {
             if (outputMode == USBUART_OUTPUT) {  // Output the command data echo
                 if (USBUART_GetConfiguration() != 0u) {
                     while(!USBUART_CDCIsReady());
@@ -3252,6 +3257,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);     // Set the number of layers to read out
                 tkrCmdCode = 0x08;
                 sendTrackerCmd(0x00, tkrCmdCode, 0, cmdData, TKR_ECHO_DATA);     // Turn on the ASIC power
+                CyDelay(100);
                 configureASICs();
                 break;
             case '\x5C': // Start sending tracker monitoring packets
@@ -3768,58 +3774,52 @@ int main(void)
             /* Enumeration is done, enable OUT endpoint to receive data from Host */
             USBUART_CDC_Init();
         }
-
-        // Tracker rate monitoring
-        if (nDataReady == 0 && monitorTkrRates && !endingRun) {
-            tkrRateMonitor();
-        }
-        
-        // PMT singles rate monitoring
-        if (nDataReady == 0 && monitorPmtRates && !endingRun) {
-            pmtRateMonitor();
-        }
-        
-        if (nDataReady == 0 && triggered && !cmdDone && awaitingCommand) {    // Delay the data output if a command is in progress 
-            makeEvent();
-        }
-        
-        // Send out the end-of-run info if the run is ending. However, check nDataReady,
-        // to be sure to send out the last event packet first.
-        if (!triggered && endingRun && nDataReady == 0) {
-            endingRun = false;
-            nDataReady = END_DATA_SIZE;
-            for (uint i=0; i<END_DATA_SIZE; ++i) {
-                dataOut[i] = endData[i];
+        if (awaitingCommand) {   // Don't do other stuff while command bytes are coming in
+            // Tracker rate monitoring
+            if (nDataReady == 0 && monitorTkrRates && !endingRun) {
+                tkrRateMonitor();
             }
-        }
-        
-        // Send housekeeping packets. Check nDataReady to avoid overwriting an event.
-        if (nDataReady == 0) {
-            if (houseKeepingDue) {
-                makeHouseKeeping();
-                houseKeepingDue = false;
+            
+            // PMT singles rate monitoring
+            if (nDataReady == 0 && monitorPmtRates && !endingRun) {
+                pmtRateMonitor();
             }
-        }
-        
-        // Tracker housekeeping. Note that nDataReady is checked here, because if a regular housekeeping packet
-        // is going out now, then we need to wait for the next loop iteration to avoid overwriting it.
-        if (nDataReady == 0) {
-            if (tkrHouseKeepingDue) {
-                makeTkrHouseKeeping();
-                tkrHouseKeepingDue = false;
+            
+            if (nDataReady == 0 && triggered) {    
+                makeEvent();
             }
-        }
-        
-        // Send out event data, housekeeping data, command-generated data and echo, end-of-run data etc.
-        if (nDataReady > 0 || cmdDone) {   
-            sendAllData(dataPacket, command, cmdData);
-        }
-        
-        // Time-out protection in case the expected data for a command are never sent.
-        // The command buffers are completely flushed, hoping for a fresh start
-        // Note that this could be operator error (i.e. not sending the required command data bytes)
-        if (!awaitingCommand) {
-            if (time() - cmdStartTime > TIMEOUT) {
+            
+            // Send out the end-of-run info if the run is ending. However, check nDataReady,
+            // to be sure to send out the last event packet first.
+            if (!triggered && endingRun && nDataReady == 0) {
+                endingRun = false;
+                nDataReady = END_DATA_SIZE;
+                for (uint i=0; i<END_DATA_SIZE; ++i) {
+                    dataOut[i] = endData[i];
+                }
+            }
+            
+            // Send housekeeping packets. Check nDataReady to avoid overwriting an event.
+            if (nDataReady == 0) {
+                if (houseKeepingDue) {
+                    makeHouseKeeping();
+                    houseKeepingDue = false;
+                }
+            }
+            
+            // Tracker housekeeping. Note that nDataReady is checked here, because if a regular housekeeping packet
+            // is going out now, then we need to wait for the next loop iteration to avoid overwriting it.
+            if (nDataReady == 0) {
+                if (tkrHouseKeepingDue) {
+                    makeTkrHouseKeeping();
+                    tkrHouseKeepingDue = false;
+                }
+            }
+        } else {
+            // Time-out protection in case the expected data for a command are never sent.
+            // The command buffers are completely flushed, hoping for a fresh start
+            // Note that this could be operator error (i.e. not sending the required command data bytes)
+            if (!cmdDone && time() - cmdStartTime > TIMEOUT) {
                 int InterruptState = CyEnterCriticalSection();
                 awaitingCommand = true;
                 cmdDone = false;
@@ -3830,8 +3830,13 @@ int main(void)
                 nCmdTimeOut++;
                 addError(ERR_CMD_TIMEOUT,command,dCnt);
             }
-        }        
+        }      
         
+        // Send out event data, housekeeping data, command-generated data and echo, end-of-run data etc.
+        if (nDataReady > 0 || cmdDone) {   
+            sendAllData(dataPacket, command, cmdData);
+        }
+            
         // Parse the FIFO of commands from the Main PSOC, via UART. Identify commands
         // from the <CR><LF> characters, and move complete commands into the command buffer.
         // Get ALL of the complete commands now that are currently in the fifo buffer.
@@ -3952,10 +3957,13 @@ int main(void)
                                 badCMD = true;
                             }
                             dCnt++;
-                            if (dCnt != byteCnt || dCnt > nDataBytes) {
+                            if (dCnt != byteCnt) {
                                 addError(ERR_BYTE_ORDER, command, dCnt);
                             }
-                            if (dCnt == nDataBytes) cmdDone = true; 
+                            if (dCnt >= nDataBytes) cmdDone = true; 
+                            if (dCnt > nDataBytes) {
+                                addError(ERR_BYTECOUNT, command, dCnt);
+                            }
                         }
                     }
                     if (cmdDone) {
