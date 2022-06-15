@@ -40,6 +40,7 @@
  * V24.10: Gated the GO signal. Changes in main loop to finish a command before doing anything else.
  * V24.11: Specify for each tracker command send what the return data type is (Echo vs Housekeeping). Try to read more bytes
  *         when the ID code from the tracker comes back bad, so look for the correct start.
+ * V24.12: Try to recover when an out-of-order command data byte comes in. Check all commands for validity and correct number of data bytes.
  * ========================================
  */
 #include "project.h"
@@ -49,7 +50,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 11
+#define MINOR_VERSION 12
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -212,6 +213,7 @@
 #define ERR_NO_TRK_RESET 45u
 #define ERR_BYTE_ORDER 46u
 #define ERR_BYTECOUNT 47u
+#define ERR_WRONG_NUM_BYTES 48u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -472,7 +474,7 @@ uint8 byte16(uint16 word, int byte) {
 }
 
 bool cmdAllowedInRun(uint8 cmd) {
-    uint8 cmdsAllowed[NUM_CMDS_IN_RUN] = {0x44, 0x03, 0x39, 0x3B, 0x4C, 0x5C, 0x5D, 0x57, 0x58, 0x5E, 0x5F};
+    static uint8 cmdsAllowed[NUM_CMDS_IN_RUN] = {0x44, 0x03, 0x39, 0x3B, 0x4C, 0x5C, 0x5D, 0x57, 0x58, 0x5E, 0x5F};
     for (int i=0; i<NUM_CMDS_IN_RUN; ++i) {
         if (cmd == cmdsAllowed[i]) {
             return true;
@@ -485,9 +487,9 @@ bool cmdAllowedInRun(uint8 cmd) {
 #define NUM_CMD_WITH_DATA 24
 #define NUM_CMD_WITH_ECHO 30
 uint8 tkrCmdType(uint8 cmd) {
-    uint8 cmdWithData[NUM_CMD_WITH_DATA] = {0x07, 0x0A, 0x0B, 0x1E, 0x1F, 0x54, 0x55, 0x57, 0x58, 0x59, 0x5C, 
+    static uint8 cmdWithData[NUM_CMD_WITH_DATA] = {0x07, 0x0A, 0x0B, 0x1E, 0x1F, 0x54, 0x55, 0x57, 0x58, 0x59, 0x5C, 
                   0x60, 0x68, 0x69, 0x6A, 0x6B, 0x6D, 0x71, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78};
-    uint8 cmdWithEcho[NUM_CMD_WITH_ECHO] = {0x02, 0x03, 0x04, 0x05, 0x06, 0x08, 0x09, 0x0C, 0x0E, 0x0F, 0x10,
+    static uint8 cmdWithEcho[NUM_CMD_WITH_ECHO] = {0x02, 0x03, 0x04, 0x05, 0x06, 0x08, 0x09, 0x0C, 0x0E, 0x0F, 0x10,
                   0x11, 0x12, 0x13, 0x14, 0x15, 0x45, 0x56, 0x5A, 0x5B, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
                   0x6E, 0x81, 0x82, 0x83};
     for (int i=0; i<NUM_CMD_WITH_DATA; ++i) {
@@ -1868,7 +1870,7 @@ CY_ISR(isrUART) {
         fifoWritePtr = WRAPINC(fifoWritePtr, MX_FIFO);
         if (fifoWritePtr == fifoReadPtr) {
             fifoWritePtr = WRAPDEC(fifoWritePtr, MX_FIFO);  // The byte will get overwritten---we're screwed. . .
-            addErrorOnce(ERR_FIFO_OVERFLOW, byte32(clkCnt, 0), byte32(clkCnt, 1));
+            addErrorOnce(ERR_FIFO_OVERFLOW, fifoReadPtr, theByte);
         }
     }
 }
@@ -2478,6 +2480,26 @@ void readEEprom() {
         tkrConfigReg[i] = EEPROM_1_ReadByte(base + MAX_TKR_PCB*SIZEOF_EEPROM_ROW + i);
     }
 } // End of function readEEprom
+
+// Check whether a byte represents a valid command and return the number of expected data bytes
+// Bits 6 and 7 of the number of data bytes are set if the number is a lower limit (variable data)
+#define NUM_COMMANDS 64
+uint8 isAcommand(uint8 cmd) {
+    static uint8 validCommands[NUM_COMMANDS] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x10, 0x54, 0x55, 0x41, 0x42, 0x43,
+        0x0C, 0x0D, 0x0E, 0x20, 0x21, 0x22, 0x23, 0x24, 0x26, 0x27, 0x30, 0x31, 0x32, 0x3F, 0x34, 0x35, 0x36, 0x37, 0x38,
+        0x39, 0x3A, 0x3B, 0x44, 0x50, 0x3C, 0x3D, 0x3E, 0x33, 0x40, 0x45, 0x46, 0x47, 0x48, 0x49, 0x53, 0x4B, 0x4C, 0x4D,
+        0x4E, 0x4F, 0x51, 0x56, 0x5C, 0x5E, 0x5F, 0x5D, 0x57, 0x58, 0x59, 0x5A, 0x5B};
+    static uint8 numData[NUM_COMMANDS] = {0xC2, 1, 0, 3, 1, 1, 0, 0xC3, 3, 3, 0xC5, 3, 1,
+        0, 2, 0, 1, 1, 0, 1, 2, 1, 2, 1, 0, 0, 0, 0, 1, 2, 1, 0,
+        2, 1, 1, 0, 0, 4, 0, 1, 1, 0, 10, 0, 0, 1, 0, 0, 1, 1, 1,
+        1, 1, 0, 1, 1, 0, 0, 0, 2, 0, 8, 0, 1};
+    for (int i=0; i<NUM_COMMANDS; ++i) {
+        if (validCommands[i] == cmd) {
+            return numData[i];
+        }
+    }
+    return 0xFF;
+}
 
 // Interpret and act on commands received from USB-UART or the Main PSOC
 void interpretCommand(uint8 tofConfig[]) {
@@ -3982,22 +4004,49 @@ int main(void)
                             dCnt = 0;
                             nDataBytes = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
                             command = dataByte;
+                            uint8 stuff = isAcommand(command);  // Check whether the right number of data bytes was supplied
+                            uint8 nDataExpected = stuff & 0x0F;
+                            bool lowerLimit = (stuff & 0xC0) == 0xC0;
+                            if (nDataExpected != nDataBytes) {
+                                if (!lowerLimit || (nDataBytes < nDataExpected)) {
+                                    addError(ERR_WRONG_NUM_BYTES, command, nDataBytes);
+                                }
+                            }
                             if (nDataBytes == 0) cmdDone = true;
                         } else {                       // Receiving data from a command in progress
+                            bool badDataByte = false;
                             uint8 byteCnt = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
                             if (byteCnt != 0) {
                                 cmdData[byteCnt-1] = dataByte;
                             } else {
                                 addError(ERR_BAD_BYTE, command, dCnt);
-                                badCMD = true;
+                                badDataByte = true;
                             }
                             dCnt++;
                             if (dCnt != byteCnt) {
                                 addError(ERR_BYTE_ORDER, command, dCnt);
+                                badDataByte = true;
                             }
-                            if (dCnt >= nDataBytes) cmdDone = true; 
-                            if (dCnt > nDataBytes) {
-                                addError(ERR_BYTECOUNT, command, dCnt);
+                            if (badDataByte) {  // Try to interpret this byte as a new command
+                                uint8 stuff = isAcommand(dataByte);
+                                uint8 nDataExpected = stuff & 0x0F;
+                                bool lowerLimit = (stuff & 0xC000) == 0xC0;
+                                if (nDataExpected == byteCnt || (lowerLimit && (byteCnt >= nDataExpected))) {
+                                    awaitingCommand = false;
+                                    cmdStartTime = time();
+                                    cmdCount++;
+                                    dCnt = 0;
+                                    nDataBytes = byteCnt;
+                                    command = dataByte;
+                                    if (nDataBytes == 0) cmdDone = true;                                    
+                                } else {
+                                    badCMD = true;
+                                }
+                            } else {
+                                if (dCnt >= nDataBytes) cmdDone = true; 
+                                if (dCnt > nDataBytes) {
+                                    addError(ERR_BYTECOUNT, command, dCnt);
+                                }
                             }
                         }
                     }
