@@ -38,6 +38,8 @@
  * V24.8: Fixed up the trigger enable and disable ordering and cleared pending before enabling isr_GO1, to avoid a spurious GO1.
  * V24.9: Greatly increased UART command FIFO, so it will hold many commands at once. Flag CMD bytes out of order. Wait 2s for TKR reset. 
  * V24.10: Gated the GO signal. Changes in main loop to finish a command before doing anything else.
+ * V24.11: Specify for each tracker command send what the return data type is (Echo vs Housekeeping). Try to read more bytes
+ *         when the ID code from the tracker comes back bad, so look for the correct start.
  * ========================================
  */
 #include "project.h"
@@ -47,7 +49,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 10
+#define MINOR_VERSION 11
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -479,6 +481,28 @@ bool cmdAllowedInRun(uint8 cmd) {
     return false;
 }
 
+// Specify the type of return bytes to expect from each Tracker command
+#define NUM_CMD_WITH_DATA 24
+#define NUM_CMD_WITH_ECHO 30
+uint8 tkrCmdType(uint8 cmd) {
+    uint8 cmdWithData[NUM_CMD_WITH_DATA] = {0x07, 0x0A, 0x0B, 0x1E, 0x1F, 0x54, 0x55, 0x57, 0x58, 0x59, 0x5C, 
+                  0x60, 0x68, 0x69, 0x6A, 0x6B, 0x6D, 0x71, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78};
+    uint8 cmdWithEcho[NUM_CMD_WITH_ECHO] = {0x02, 0x03, 0x04, 0x05, 0x06, 0x08, 0x09, 0x0C, 0x0E, 0x0F, 0x10,
+                  0x11, 0x12, 0x13, 0x14, 0x15, 0x45, 0x56, 0x5A, 0x5B, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
+                  0x6E, 0x81, 0x82, 0x83};
+    for (int i=0; i<NUM_CMD_WITH_DATA; ++i) {
+        if (cmd == cmdWithData[i]) {
+            return TKR_HOUSE_DATA;
+        }
+    }
+    for (int i=0; i<NUM_CMD_WITH_ECHO; ++i) {
+        if (cmd == cmdWithEcho[i]) {
+            return TKR_ECHO_DATA;
+        }
+    }
+    return 0;
+}
+
 // Function to pack the time and date information into 4 bytes
 uint32 packTime() {
     uint32 timeWord = ((uint32)timeDate->Year - 2000) << 26;
@@ -522,15 +546,14 @@ void addErrorOnce(uint8 code, uint8 val0, uint8 val1) {
 
 // Get a byte of data from the Tracker UART software buffer, with a time-out in case nothing is coming.
 // The second argument (flag) helps to identify where a timeout error originated.
-uint8 tkr_getByte(uint32 startTime, uint8 flag) {
+// The upper 8 bits flag a timeout.
+uint16 tkr_getByte(uint32 startTime, uint8 flag) {
     while (tkrReadPtr < 0) {  // No buffered data are available
         uint32 timeElapsed = time() - startTime;
         if (timeElapsed > TKR_READ_TIMEOUT || (startTime > time() && time() > TKR_READ_TIMEOUT)) {
-            //uint8 temp = (uint8)(timeElapsed & 0x000000ff);
-            //addError(ERR_TKR_READ_TIMEOUT, temp, flag);
             addError(ERR_TKR_READ_TIMEOUT, tkrCmdCode, flag);
             if (nTkrTimeOut < 0xFF) nTkrTimeOut++;
-            return tkrBuf[((tkrWritePtr - 1) % MAX_TKR)]; // On timeout, return the last valid byte
+            return 0xFF00 | tkrBuf[((tkrWritePtr - 1) % MAX_TKR)]; // On timeout, return the last valid byte
         }
     }
     isr_TKR_Disable();
@@ -539,7 +562,7 @@ uint8 tkr_getByte(uint32 startTime, uint8 flag) {
     else tkrReadPtr = 0;
     if (tkrReadPtr == tkrWritePtr) tkrReadPtr = -1;  // All buffered data have been read
     isr_TKR_Enable();
-    return theByte;
+    return (uint16)theByte;    
 }
 
 // Function to receive i2c register data from the Tracker
@@ -601,6 +624,18 @@ int getTrackerData(uint8 idExpected) {
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 return 54;
             }
+            // We're seeing rubbish, so try searching for the start of the data packet
+            uint8 timeOut = 0;
+            len = IDcode;  // The length should be the byte before the correct ID code
+            do {
+                uint16 retBytes = tkr_getByte(startTime, 151);
+                IDcode = (uint8)(retBytes & 0x00FF);
+                if (IDcode == idExpected) {
+                    break;
+                }
+                len = IDcode;
+                timeOut = (uint8)((retBytes & 0xFF00)>>8);
+            } while (timeOut == 0);           
         } else {
             if (IDcode == TKR_EVT_DATA) {
                 addErrorOnce(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
@@ -2566,7 +2601,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 // Ignore commands that are supposed to be internal to the tracker,
                 // to avoid confusing the tracker logic.
                 if (tkrCmdCode == 0x52 || tkrCmdCode == 0x53) break;
-                sendTrackerCmd(cmdData[0], cmdData[1], cmdData[2], &cmdData[3], 0);
+                sendTrackerCmd(cmdData[0], tkrCmdCode, cmdData[2], &cmdData[3], tkrCmdType(tkrCmdCode));
                 break;
             case '\x54':        // Load the ASIC configuration registers
                 tkrCmdCode = 0x12;
