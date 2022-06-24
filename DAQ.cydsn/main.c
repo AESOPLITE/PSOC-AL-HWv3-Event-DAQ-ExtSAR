@@ -41,6 +41,7 @@
  * V24.11: Specify for each tracker command send what the return data type is (Echo vs Housekeeping). Try to read more bytes
  *         when the ID code from the tracker comes back bad, so look for the correct start.
  * V24.12: Try to recover when an out-of-order command data byte comes in. Check all commands for validity and correct number of data bytes.
+ * V24.13: Changes to resetAllTrackerLogic to facilitate debugging
  * ========================================
  */
 #include "project.h"
@@ -50,7 +51,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 12
+#define MINOR_VERSION 13
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -214,6 +215,7 @@
 #define ERR_BYTE_ORDER 46u
 #define ERR_BYTECOUNT 47u
 #define ERR_WRONG_NUM_BYTES 48u
+#define ERR_ASICS_RESET 49u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -1604,19 +1606,18 @@ int resetAllTrackerLogic() {
     // It is only necessary to check one arbitrary chip, as all should have the same DAQ errors, if any.
     uint32 config = getTkrASICconfig(0, 3);
     if (config == 0) rc = -2;
-    else {
-        uint8 errCodes = (config & 0x03000000)>>24;
-        uint8 regType =  (config & 0x70000000)>>28;
-        if (errCodes != 0 || regType != 0x03) {   // Getting the correct register type (i.e. config.) indicates successful register read
-            tkrCmdCode = 0x0C;   // ASIC soft reset
-            cmdData[0] = 0x1F;   // All chips selected
-            sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);
-            configureASICs();
-        }
-        if (trgStat) {
-            sendSimpleTrackerCmd(0x00, 0x65);
-            triggerEnable(true);
-        }
+    uint8 errCodes = (config & 0x03000000)>>24;
+    uint8 regType =  (config & 0x70000000)>>28;
+    if (errCodes != 0 || regType != 0x03) {   // Getting the correct register type (i.e. config.) indicates successful register read
+        tkrCmdCode = 0x05;   // ASIC hard reset
+        cmdData[0] = 0x1F;   // All chips selected
+        sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);
+        configureASICs();
+        addError(ERR_ASICS_RESET, errCodes, regType);
+    }
+    if (trgStat) {
+        sendSimpleTrackerCmd(0x00, 0x65);
+        triggerEnable(true);
     }
     return rc;
 }
