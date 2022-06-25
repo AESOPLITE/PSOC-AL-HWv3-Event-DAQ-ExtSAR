@@ -42,6 +42,7 @@
  *         when the ID code from the tracker comes back bad, so look for the correct start.
  * V24.12: Try to recover when an out-of-order command data byte comes in. Check all commands for validity and correct number of data bytes.
  * V24.13: Changes to resetAllTrackerLogic to facilitate debugging
+ * V24.14: Check on number of data bytes returned by Tracker housekeeping. Flag and correct if wrong.
  * ========================================
  */
 #include "project.h"
@@ -51,7 +52,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 13
+#define MINOR_VERSION 14
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -216,6 +217,7 @@
 #define ERR_BYTECOUNT 47u
 #define ERR_WRONG_NUM_BYTES 48u
 #define ERR_ASICS_RESET 49u
+#define ERR_WRONG_NUM_TKR_DATA 50u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -488,9 +490,10 @@ bool cmdAllowedInRun(uint8 cmd) {
 // Specify the type of return bytes to expect from each Tracker command
 #define NUM_CMD_WITH_DATA 24
 #define NUM_CMD_WITH_ECHO 30
-uint8 tkrCmdType(uint8 cmd) {
-    static uint8 cmdWithData[NUM_CMD_WITH_DATA] = {0x07, 0x0A, 0x0B, 0x1E, 0x1F, 0x54, 0x55, 0x57, 0x58, 0x59, 0x5C, 
+static uint8 cmdWithData[NUM_CMD_WITH_DATA] = {0x57, 0x0A, 0x0B, 0x1E, 0x1F, 0x54, 0x55, 0x07, 0x58, 0x59, 0x5C, 
                   0x60, 0x68, 0x69, 0x6A, 0x6B, 0x6D, 0x71, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78};
+
+uint8 tkrCmdType(uint8 cmd) {
     static uint8 cmdWithEcho[NUM_CMD_WITH_ECHO] = {0x02, 0x03, 0x04, 0x05, 0x06, 0x08, 0x09, 0x0C, 0x0E, 0x0F, 0x10,
                   0x11, 0x12, 0x13, 0x14, 0x15, 0x45, 0x56, 0x5A, 0x5B, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
                   0x6E, 0x81, 0x82, 0x83};
@@ -504,6 +507,18 @@ uint8 tkrCmdType(uint8 cmd) {
             return TKR_ECHO_DATA;
         }
     }
+    return 0;
+}
+
+// Return the number of data bytes expected for a given Tracker command
+uint8 tkrNumDataBytes(uint8 cmd) {
+    static uint8 cmdNumData[NUM_CMD_WITH_DATA] = {1, 1, 1, 2, 1, 1, 1, 2, 2, 1, 2, 
+                  2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 1, 1};
+    for (int i=0; i<NUM_CMD_WITH_DATA; ++i) {
+        if (cmd == cmdWithData[i]) {
+            return cmdNumData[i]+1;
+        }
+    }    
     return 0;
 }
 
@@ -639,7 +654,8 @@ int getTrackerData(uint8 idExpected) {
                 }
                 len = IDcode;
                 timeOut = (uint8)((retBytes & 0xFF00)>>8);
-            } while (timeOut == 0);           
+            } while (timeOut == 0);
+            IDcode = idExpected;
         } else {
             if (IDcode == TKR_EVT_DATA) {
                 addErrorOnce(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
@@ -719,6 +735,11 @@ int getTrackerData(uint8 idExpected) {
         }
     } else if (IDcode == TKR_HOUSE_DATA) {  // Housekeeping data
         uint8 nData = tkr_getByte(startTime, 11);
+        uint8 nDataExpected = tkrNumDataBytes(tkrCmdCode);
+        if (nData != nDataExpected) {
+            addError(ERR_WRONG_NUM_TKR_DATA, tkrCmdCode, nData);
+            nData = nDataExpected;
+        }
         if (len != nData+6) {   // Formal check
             addErrorOnce(ERR_TKR_BAD_NDATA, len, nData);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
@@ -850,8 +871,7 @@ uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint 
     uint8 rc = 0;
     if (tkrCmdCode == 0x67 || tkrCmdCode == 0x6C) {
         tkrLED(false);
-        rc = 0xCF;
-        return rc;    // These commands have no echo or data to return
+        return 0;    // These commands have no echo or data to return
     }
     // Now look for the bytes coming back from the Tracker.
     if (tkrCmdCode >= 0x20 && tkrCmdCode <= 0x25) {
@@ -2009,8 +2029,8 @@ void makeEvent() {
     if (readTracker) {
         while (tkrDataReady != TKR_DATA_READY) {
             tkrCmdCode = 0x57;   // Command to check whether Tkr data are ready
-            sendTrackerCmd(0x00, tkrCmdCode, 0x00, cmdData, TKR_HOUSE_DATA);
-            if (nTkrHouseKeeping > 0) {
+            uint8 rc = sendTrackerCmd(0x00, tkrCmdCode, 0x00, cmdData, TKR_HOUSE_DATA);
+            if (rc == 0 && nTkrHouseKeeping > 0) {
                 nTkrHouseKeeping = 0;    // Keep the housekeeping data from being sent out to the world
                 if (tkrHouseKeeping[0] == TKR_DATA_READY) {
                     tkrDataReady = TKR_DATA_READY;    // Yes, an event is ready
@@ -2024,10 +2044,11 @@ void makeEvent() {
                 addError(ERR_TKR_BAD_STATUS, tkrDataReady, nTry);
             }
             nTry++;
-            if (nTry > 9) {
+            if (nTry > 5) {
                 addError(ERR_TKR_BAD_STATUS, tkrDataReady, nTry+1);
                 break;
             }
+            CyDelayUs(5);  // A short delay before checking again
         }        
         uint8 rc = 0xDF;
         if (tkrDataReady == TKR_DATA_READY) {
