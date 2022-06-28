@@ -46,6 +46,7 @@
  * V24.15: Update tracker rate counts and temperatures at a slower cadence than the rest of the housekeeping. Added code to try to debug 
  *         tracker read timeouts and count how many TOF top events are coming in. Lots added to the end-of-run record.
  * V24.16: Fixed typo in end-of-run record
+ * V24.17: Added TOF statistics to the housekeeping record
  * ========================================
  */
 #include "project.h"
@@ -55,7 +56,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 16
+#define MINOR_VERSION 17
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -239,7 +240,7 @@
 #define TKR_READ_TIMEOUT 31u    // Length of time to wait on the tracker before giving a time-out error
 
 // Some variables defined only for housekeeping information
-#define HOUSESIZE 72u
+#define HOUSESIZE 78u
 #define TKRHOUSESIZE 201u
 bool doHouseKeeping;           // Set true to send housekeeping packets out
 bool doTkrHouseKeeping;
@@ -262,6 +263,11 @@ uint8 houseKeepPeriod;
 bool houseKeepingDue, tkrHouseKeepingDue;
 uint16 tkrTemp0 = 0;
 uint16 tkrTemp7 = 0;
+uint32 nEvtH = 0;
+uint32 nTOFAavgH = 0;
+uint32 nTOFBavgH = 0;
+uint8  nTOFAmaxH = 0;
+uint8  nTOFBmaxH = 0;
 
 int boardMAP[MAX_TKR_BOARDS];   // Map from tracker board FPGA address to hardware board number (alphabetical)
 struct TkrConfig {
@@ -1067,6 +1073,25 @@ void makeHouseKeeping() {
     dataOut[69] = byte16(tkrTemp0, 1);
     dataOut[70] = byte16(tkrTemp7, 0);
     dataOut[71] = byte16(tkrTemp7, 1);
+    
+    if (nEvtH > 0) {
+        dataOut[72] = (uint8)(nTOFAavgH/nEvtH);
+        dataOut[73] = (uint8)(nTOFBavgH/nEvtH);
+    } else {
+        dataOut[72] = 0;
+        dataOut[73] = 0;
+    }
+    dataOut[74] = nTOFAmaxH;
+    dataOut[75] = nTOFBmaxH;
+    float busyFraction = ((float)cntBusy)/((float)cntGO);
+    dataOut[76] = (uint8)(100.*busyFraction);
+    float liveFraction = ((float)(cntGO))/((float)(cntGO+cntGO1));
+    dataOut[77] = (uint8)(100.*liveFraction);
+    nEvtH = 0;
+    nTOFAavgH = 0;
+    nTOFBavgH = 0;
+    nTOFAmaxH = 0;
+    nTOFBmaxH = 0;
     nDataReady = HOUSESIZE;
 }
 
@@ -2222,10 +2247,17 @@ void makeEvent() {
         dataOut[39] = tkrData.nTkrBoards;
         nDataReady = 40;
     }
+    // Sums for EOR record
     nTOF_A_avg += nI;
     nTOF_B_avg += nJ;
     if (nI > nTOF_A_max) nTOF_A_max = nI;
     if (nJ > nTOF_B_max) nTOF_B_max = nJ;
+    // Sums for housekeeping records
+    nEvtH++;
+    nTOFAavgH += nI;
+    nTOFBavgH += nJ;
+    if (nI > nTOFAmaxH) nTOFAmaxH = nI;
+    if (nJ > nTOFBmaxH) nTOFBmaxH = nJ;
     if (doCRCcheck) {  // Check whether the hitslist CRCs match what the TKR calculated.
         for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
             if (!checkCRC(tkrData.boardHits[brd].nBytes, tkrData.boardHits[brd].hitList)) {

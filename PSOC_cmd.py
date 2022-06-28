@@ -875,6 +875,12 @@ def printHousekeeping(dataList, byteList):
     tkrTemp = dataList[70]*256 + dataList[71]
     Tcelsius = (0.25/4.0)*(tkrTemp/16.)
     print("   Tracker layer 7 temperature = " + str(Tcelsius) + " Celsius")
+    print("   Average number of TOF-A stops per event = " + str(dataList[72]))
+    print("   Average number of TOF-B stops per event = " + str(dataList[73]))
+    print("   Maximum number of TOF-A stops per event = " + str(dataList[74]))
+    print("   Maximum number of TOF-B stops per event = " + str(dataList[75]))
+    print("   Percent SPI busy = " + str(dataList[76]))
+    print("   Percent live = " + str(dataList[77]))
 
 def printTkrHousekeeping(dataList):
     run = dataList[4]*256 + dataList[5]
