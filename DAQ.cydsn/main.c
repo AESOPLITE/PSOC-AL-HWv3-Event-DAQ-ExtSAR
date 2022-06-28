@@ -45,6 +45,7 @@
  * V24.14: Check on number of data bytes returned by Tracker housekeeping. Flag and correct if wrong.
  * V24.15: Update tracker rate counts and temperatures at a slower cadence than the rest of the housekeeping. Added code to try to debug 
  *         tracker read timeouts and count how many TOF top events are coming in. Lots added to the end-of-run record.
+ * V24.16: Fixed typo in end-of-run record
  * ========================================
  */
 #include "project.h"
@@ -54,7 +55,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 15
+#define MINOR_VERSION 16
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -3071,8 +3072,8 @@ void interpretCommand(uint8 tofConfig[]) {
                 endData[10] = byte32(nTkrReadReady, 1);
                 endData[11] = byte32(nTkrReadReady, 2);
                 endData[12] = byte32(nTkrReadReady, 3);
-                endData[13] = byte32(nTkrReadReady, 0);
-                endData[14] = byte32(nTkrReadReady, 1);
+                endData[13] = byte32(nTkrReadNotReady, 0);
+                endData[14] = byte32(nTkrReadNotReady, 1);
                 uint8 nTOF_A_average = nTOF_A_avg/cntGO;
                 uint8 nTOF_B_average = nTOF_B_avg/cntGO;
                 endData[15] = nTOF_A_average;
