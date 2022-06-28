@@ -43,6 +43,8 @@
  * V24.12: Try to recover when an out-of-order command data byte comes in. Check all commands for validity and correct number of data bytes.
  * V24.13: Changes to resetAllTrackerLogic to facilitate debugging
  * V24.14: Check on number of data bytes returned by Tracker housekeeping. Flag and correct if wrong.
+ * V24.15: Update tracker rate counts and temperatures at a slower cadence than the rest of the housekeeping. Added code to try to debug 
+ *         tracker read timeouts and count how many TOF top events are coming in. Lots added to the end-of-run record.
  * ========================================
  */
 #include "project.h"
@@ -52,7 +54,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 14
+#define MINOR_VERSION 15
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -149,7 +151,7 @@
 #define MAX_CMD_DATA 16
 #define TOFSIZE 17
 #define TKRHOUSE_LEN 70
-#define TOFMAX_EVT 64
+#define TOFMAX_EVT 256
 #define MAX_TKR_BOARDS 8
 #define MAX_TKR_PCB 9     // Including the spare board
 #define MAX_TKR_ASIC 12
@@ -218,6 +220,7 @@
 #define ERR_WRONG_NUM_BYTES 48u
 #define ERR_ASICS_RESET 49u
 #define ERR_WRONG_NUM_TKR_DATA 50u
+#define ERR_TRG_NOT_READY 51u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -239,8 +242,10 @@
 #define TKRHOUSESIZE 201u
 bool doHouseKeeping;           // Set true to send housekeeping packets out
 bool doTkrHouseKeeping;
+int nHouseKeepMade;            // Number of housekeeping packets assembled
 uint8 houseKeepPeriod;         // Number of seconds between housekeeping packets 
 uint8 tkrHouseKeepPeriod;      // Number of minutes between tracker housekeeping packets   
+uint8 tkrRatesMult = 4;        // Multiply the housKeepPeriod by this to get the period for measuring tracker rates and temperatures
 uint16 lastCommand;
 uint16 commandCount;
 uint8 nBadCmd;
@@ -254,6 +259,8 @@ uint16 nIgnoredCmd;
 uint32 cntSeconds;
 uint8 houseKeepPeriod;
 bool houseKeepingDue, tkrHouseKeepingDue;
+uint16 tkrTemp0 = 0;
+uint16 tkrTemp7 = 0;
 
 int boardMAP[MAX_TKR_BOARDS];   // Map from tracker board FPGA address to hardware board number (alphabetical)
 struct TkrConfig {
@@ -332,7 +339,7 @@ const uint8 SSN_CH5  = 0x0C;
 uint8 outputMode;              // Data output mode (SPI or USB-UART)
 bool debugTOF;
 
-#define END_DATA_SIZE 9u
+#define END_DATA_SIZE 81u
 bool endingRun;                // Set true when the run is ending
 uint8 endData[END_DATA_SIZE];
 
@@ -400,8 +407,12 @@ volatile struct TOF {
     uint32 shiftReg[TOFMAX_EVT];
     uint8 clkCnt[TOFMAX_EVT];  
     bool filled[TOFMAX_EVT];
-    uint8 ptr;
+    uint32 ptr;
 } tofA, tofB;
+uint32 nTOF_A_avg = 0;
+uint32 nTOF_B_avg = 0;
+uint8 nTOF_A_max = 0;
+uint8 nTOF_B_max = 0;
 uint8 nTOF_DMA_samples;
 volatile uint8 DMA_TOFA_Chan;
 uint8 DMA_TOFA_TD[2*TOF_DMA_MAX_NO_OF_SAMPLES];   
@@ -454,6 +465,9 @@ volatile uint32 ch4Count;
 volatile uint32 ch5Count;
 volatile uint32 cntGO;
 volatile uint32 cntGO1;
+volatile uint32 cntBusy;
+uint32 nTkrReadReady;
+uint16 nTkrReadNotReady;
 uint16 runNumber;
 
 // Saved counts for end of run, from the 8-bit hardware counters and the 16-bit software counters
@@ -513,7 +527,7 @@ uint8 tkrCmdType(uint8 cmd) {
 // Return the number of data bytes expected for a given Tracker command
 uint8 tkrNumDataBytes(uint8 cmd) {
     static uint8 cmdNumData[NUM_CMD_WITH_DATA] = {1, 1, 1, 2, 1, 1, 1, 2, 2, 1, 2, 
-                  2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 1, 1};
+                  2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 1, 2};
     for (int i=0; i<NUM_CMD_WITH_DATA; ++i) {
         if (cmd == cmdWithData[i]) {
             return cmdNumData[i]+1;
@@ -957,14 +971,13 @@ uint16 getTkrTemp(uint8 FPGA) {
 
 // Routine to fill in the housekeeping array
 void makeHouseKeeping() {
-    uint16 tkrTemp0 = 0;
-    if (numTkrBrds > 0) {
+    if (numTkrBrds > 0 && nHouseKeepMade%tkrRatesMult == 0) {
         tkrTemp0 = getTkrTemp(0);
     }
-    uint16 tkrTemp7 = 0;
-    if (numTkrBrds > 7) {
+    if (numTkrBrds > 7 && nHouseKeepMade%tkrRatesMult == 0) {
         tkrTemp7 = getTkrTemp(7);
     }
+    nHouseKeepMade++;
     dataOut[0] = 0x48;  // 4 header bytes spell "HAUS" in ASCII
     dataOut[1] = 0x41;
     dataOut[2] = 0x55;
@@ -1399,7 +1412,10 @@ void logicReset() {
     Pin_LED_TKR_Write(0);
     Pin_LED_DAT_Write(0);
     cntGO = 0;
+    cntBusy = 0;
     cntGO1 = 0;
+    nTkrReadReady = 0;
+    nTkrReadNotReady = 0;
     Control_Reg_Pls_Write(PULSE_LOGIC_RST);
     Control_Reg_Pls_Write(PULSE_CNTR_RST);
     pmtClkCntStart = time();
@@ -1937,6 +1953,10 @@ CY_ISR(isrGO) {
     timeStamp8 = Cntr8_Timer_ReadCount();  // Save for the TOF event analysis and readout
     cntGO1save = cntGO1;                   // Save for the event readout
     triggerEnable(false);                  // Disable the trigger until readout is complete
+    cntGO++;                               // The event number counter
+    if (cntGO == nTkrReadReady + nTkrReadNotReady) {  // Look for a trigger coming before the previous event is read out (shoudn't happen)
+        addError(ERR_TRG_NOT_READY,(uint8)(cntGO>>8),(uint8)(cntGO));
+    }
     // At this point execution returns to its normal flow, allowing other interrupts. The remainder of the
     // event readout process is done in main(), in the infinite for loop.
 }
@@ -1971,7 +1991,6 @@ void setSettlingWindow(uint8 dt) {
 }
 
 void makeEvent() {
-    cntGO++;  // The event number counter
 
     // Stop acquiring TOF hits until the trigger is re-enabled.
     TOFenable(false);
@@ -2051,12 +2070,13 @@ void makeEvent() {
             CyDelayUs(5);  // A short delay before checking again
         }        
         uint8 rc = 0xDF;
-        if (tkrDataReady == TKR_DATA_READY) {
-            // Start the read of the Tracker data by sending a read-event command
-            tkrCmdCode = 0x01;
-            cmdData[0] = 0x00;
-            rc = sendTrackerCmd(0x00, tkrCmdCode, 0x01, cmdData, TKR_EVT_DATA);    
-        } 
+        if (tkrDataReady == TKR_DATA_READY) nTkrReadReady++;
+        else nTkrReadNotReady++;
+        
+        // Start the read of the Tracker data by sending a read-event command, ready or not. . .
+        tkrCmdCode = 0x01;
+        cmdData[0] = 0x00;
+        rc = sendTrackerCmd(0x00, tkrCmdCode, 0x01, cmdData, TKR_EVT_DATA);    
         if (rc != 0) {
             addErrorOnce(ERR_GET_TKR_EVENT, rc, byte32(cntGO, 0));
             UART_TKR_ClearTxBuffer();
@@ -2082,7 +2102,7 @@ void makeEvent() {
     for (int i=0; i<TOFMAX_EVT; ++i) {           // Make a list of TOF hits in channel A
         int iptr = tofA.ptr - i - 1;             // Work backwards in time, starting with the most recent measurement
         if (iptr < 0) iptr = iptr + TOFMAX_EVT;  // Wrap around the circular buffer
-        if (!tofA.filled[iptr]) continue;        // Use only entries filled since the previous readout
+        if (!tofA.filled[iptr]) break;           // Use only entries filled since the previous readout
         if (timeStamp8 == tofA.clkCnt[iptr] || timeStamp8 == tofA.clkCnt[iptr]+1) {
             idx[nI] = iptr;                      // Only look at entries within two 5ms clock periods of the event time stamp
             ++nI;
@@ -2097,7 +2117,7 @@ void makeEvent() {
     for (int j=0; j<TOFMAX_EVT; ++j) {           // Loop over the TOF hits in channel B
         int jptr = tofB.ptr - j - 1;             // Work backwards in time, starting with the most recent measurement
         if (jptr < 0) jptr = jptr + TOFMAX_EVT;  // Wrap around the circular buffer
-        if (!tofB.filled[jptr]) continue;        // Use only entries filled since the previous readout
+        if (!tofB.filled[jptr]) break;           // Use only entries filled since the previous readout
         // Look only at entries filled within two 5 ms clock periods of the event time stamp
         if (!(tofB.clkCnt[jptr] == timeStamp8 || tofB.clkCnt[jptr] == timeStamp8m1)) continue;
         uint32 BT = tofB.shiftReg[jptr];
@@ -2201,6 +2221,10 @@ void makeEvent() {
         dataOut[39] = tkrData.nTkrBoards;
         nDataReady = 40;
     }
+    nTOF_A_avg += nI;
+    nTOF_B_avg += nJ;
+    if (nI > nTOF_A_max) nTOF_A_max = nI;
+    if (nJ > nTOF_B_max) nTOF_B_max = nJ;
     if (doCRCcheck) {  // Check whether the hitslist CRCs match what the TKR calculated.
         for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
             if (!checkCRC(tkrData.boardHits[brd].nBytes, tkrData.boardHits[brd].hitList)) {
@@ -2264,6 +2288,7 @@ void makeEvent() {
     ch3CountSave = ch3Count;
     ch4CountSave = ch4Count;
     ch5CountSave = ch5Count;
+    if (Pin_Busy_Read()) cntBusy++;        // To track the BUSY fraction
 } // end of subroutine makeEvent
 
 void tkrRateMonitor() {
@@ -2378,14 +2403,20 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
     if (nDataReady > 0) {    // Send out a command echo only if there are also data to send
         dataLED(true);
         uint16 nPadding;
-        if (!cmdDone) { // Output is event data, not a command response
-            if (dataOut[0] == 0x5A && dataOut[1] == 0x45 && dataOut[2] == 0x52 && dataOut[3] == 0x4F) {
+        if (!cmdDone) { // Output is event data, housekeeping, or EOR, not a command response
+            if (dataOut[0] == 0x5A && dataOut[1] == 0x45 && dataOut[2] == 0x52 && dataOut[3] == 0x4F) {  // Event data
                 if (debugTOF) dataPacket[4] = 0xDB;
                 else dataPacket[4] = 0xDD;
             } else {
-                if (dataOut[0] == 0x48 && dataOut[1] == 0x41 && dataOut[2] == 0x55 && dataOut[3] == 0x53) {
+                if (dataOut[0] == 0x48 && dataOut[1] == 0x41 && dataOut[2] == 0x55 && dataOut[3] == 0x53) {  // Housekeeping
                     dataPacket[4] = 0xDE;
-                } else dataPacket[4] = 0xDF;
+                } else {
+                    if (dataOut[0] == 0x54 && dataOut[1] == 0x52 && dataOut[2] == 0x41 && dataOut[3] == 0x4B) {  // Tracker housekeeping
+                        dataPacket[4] = 0xDF;
+                    } else {
+                        dataPacket[4] = 0x44;    // end of run packet
+                    }
+                }
             }
             dataPacket[3] = nDataReady;
             nPadding = 3 - nDataReady%3;
@@ -3036,6 +3067,45 @@ void interpretCommand(uint8 tofConfig[]) {
                 endData[6] = byte32(cntGO, 2);
                 endData[7] = byte32(cntGO, 3);
                 endData[8] = nBadCRC;
+                endData[9] = byte32(nTkrReadReady, 0);
+                endData[10] = byte32(nTkrReadReady, 1);
+                endData[11] = byte32(nTkrReadReady, 2);
+                endData[12] = byte32(nTkrReadReady, 3);
+                endData[13] = byte32(nTkrReadReady, 0);
+                endData[14] = byte32(nTkrReadReady, 1);
+                uint8 nTOF_A_average = nTOF_A_avg/cntGO;
+                uint8 nTOF_B_average = nTOF_B_avg/cntGO;
+                endData[15] = nTOF_A_average;
+                endData[16] = nTOF_B_average;
+                endData[17] = nTOF_A_max;
+                endData[18] = nTOF_B_max;
+                sendTrackerCmd(0, 0x69, 0, cmdData, TKR_HOUSE_DATA);
+                endData[19] = tkrHouseKeeping[0];
+                endData[20] = tkrHouseKeeping[1];
+                for (int i=0; i<MAX_TKR_BOARDS; ++i) {
+                    if (i < numTkrBrds) {
+                        sendTrackerCmd(i, 0x68, 0, cmdData, TKR_HOUSE_DATA);
+                        endData[21+7*i] = tkrHouseKeeping[0];
+                        endData[21+7*i+1] = tkrHouseKeeping[1];
+                        sendTrackerCmd(i, 0x6B, 0, cmdData, TKR_HOUSE_DATA);
+                        endData[21+7*i+2] = tkrHouseKeeping[0];
+                        endData[21+7*i+3] = tkrHouseKeeping[1];
+                        sendTrackerCmd(i, 0x75, 0, cmdData, TKR_HOUSE_DATA);
+                        endData[21+7*i+4] = tkrHouseKeeping[0];
+                        cmdData[0] = 3;
+                        sendTrackerCmd(i, 0x77, 1, cmdData, TKR_HOUSE_DATA);
+                        endData[21+7*i+5] = tkrHouseKeeping[0];
+                        sendTrackerCmd(i, 0x78, 0, cmdData, TKR_HOUSE_DATA);
+                        endData[21+7*i+6] = tkrHouseKeeping[0];
+                    } else {
+                        for (int j=0; j<7; ++j) endData[21+7*i+j] = 0;
+                    }
+                }
+                endData[77] = byte32(cntBusy, 0);
+                endData[78] = byte32(cntBusy, 1);
+                endData[79] = byte32(cntBusy, 2);
+                endData[80] = byte32(cntBusy, 3);
+                nTkrHouseKeeping = 0;
                 break;
             case '\x50':  // Send counter information
                 nDataReady = 6;
@@ -3073,6 +3143,10 @@ void interpretCommand(uint8 tofConfig[]) {
                 nIgnoredCmd = 0;
                 nBadCmd = 0;
                 nBadCRC = 0;
+                nTOF_A_avg = 0;
+                nTOF_B_avg = 0;
+                nTOF_A_max = 0;
+                nTOF_B_max = 0;
                 pmtClkCntStart = time();
                 for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
                     pmtCntInit[cntr] = getChCount(cntr);
@@ -3084,6 +3158,9 @@ void interpretCommand(uint8 tofConfig[]) {
                 readTracker = (cmdData[2] == 1);
                 debugTOF = (cmdData[3] == 1);
                 cntGO = 0;
+                cntBusy = 0;
+                nTkrReadReady = 0;
+                nTkrReadNotReady = 0;
                 numTkrResets = 0;
                 // Enable the tracker trigger
                 if (readTracker) {
@@ -3376,7 +3453,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 monitorPmtRates = true;
                 waitingPmtRateCnt = true;
                 if (cmdData[1] > 0) {  // This allows tracker rate monitoring to be disabled, in case it is problematic
-                    tkrMonitorInterval = houseKeepPeriod;  // Number of seconds between TKR monitoring events
+                    tkrMonitorInterval = tkrRatesMult*houseKeepPeriod;  // Number of seconds between TKR monitoring events
                     if (tkrMonitorInterval < 2) tkrMonitorInterval = 2;
                     for (int brd=0; brd<numTkrBrds; ++brd) {
                         tkrMonitorRates[brd] = 0;
@@ -3419,6 +3496,9 @@ void interpretCommand(uint8 tofConfig[]) {
                         tkrConfig[lyr][chip].threshDAC = EEPROM_1_ReadByte(base + brd*SIZEOF_EEPROM_ROW + chip) + deltaThr;
                     }
                 }
+                break;
+            case '\x60': // Set the cadence for measuring tracker rates and temperatures
+                tkrRatesMult = cmdData[0];
                 break;
         } // End of command switch
     } else { // Log an error if the user is sending spurious commands while the trigger is enabled
@@ -3523,6 +3603,7 @@ int main(void)
     
     nDataReady = 0;
     clkCnt = 0;
+    nHouseKeepMade = 0;
     nTkrHouseKeeping = 0;
     houseKeepingDue = false;
     tkrHouseKeepingDue = false;
@@ -3872,9 +3953,12 @@ int main(void)
             // to be sure to send out the last event packet first.
             if (!triggered && endingRun && nDataReady == 0) {
                 endingRun = false;
-                nDataReady = END_DATA_SIZE;
+                nDataReady = END_DATA_SIZE + 3;
+                dataOut[0] = 0x45;
+                dataOut[1] = 0x4F;
+                dataOut[3] = 0x52;
                 for (uint i=0; i<END_DATA_SIZE; ++i) {
-                    dataOut[i] = endData[i];
+                    dataOut[3+i] = endData[i];
                 }
             }
             

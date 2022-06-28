@@ -396,6 +396,16 @@ def setPeakDetResetWait(count):
     data1 = mkDataByte(count, addrEvnt, 1)
     ser.write(data1)
     print("setPeakDetResetWait: setting the peak detector settling wait time to " + str(count) + " counts")
+
+def setTkrRatesMuliplier(setting):
+    if setting < 1 or setting > 255:
+        print("setTkrRatesMuliplier: invalid setting " + str(setting))
+        return
+    cmdHeader = mkCmdHdr(1, 0x60, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(setting, addrEvnt, 1)
+    ser.write(data1)
+    print("setTkrRatesMuliplier: multiplying the tracker monitoring period by " + str(setting))
     
 def enableTrigger():
     cmdHeader = mkCmdHdr(1, 0x3B, addrEvnt)
@@ -687,7 +697,7 @@ def tkrGetShuntCurrent(FPGA, item):
     I = shuntCurrent * 1000.
     print("  Shunt voltage for " + item + " = " + str(V) + " mV; Shunt current = " + str(I) + " microamps for board " + str(FPGA))
   else: 
-    print("  Shunt voltage for " + item + " = " + str(shuntVoltage) + " mV; Shunt current = " + str(shuntCurrent) + " microamps for board " + str(FPGA))
+    print("  Shunt voltage for " + item + " = " + str(shuntVoltage) + " mV; Shunt current = " + str(shuntCurrent) + " milliamps for board " + str(FPGA))
   return shuntVoltage  
 
 def tkrGetTemperature(FPGA):
@@ -893,27 +903,27 @@ def printTkrHousekeeping(dataList):
         shuntVoltage = 2.5*(dataList[offset+7]*256 + dataList[offset+8])/1000000.
         R = 0.03
         shuntCurrent = shuntVoltage*1000./R
-        print("      Digital 1.2V shunt current reading = " + str(shuntCurrent) + " microamps")
+        print("      Digital 1.2V shunt current reading = " + str(shuntCurrent) + " milliamps")
         busVoltage = 1.25*(dataList[offset+9]*256 + dataList[offset+10])/1000.
         print("      Digital 2.5V bus voltage reading = " + str(busVoltage) + " V")
         shuntVoltage = 2.5*(dataList[offset+11]*256 + dataList[offset+12])/1000000.
         shuntCurrent = shuntVoltage*1000./R
-        print("      Digital 2.5V shunt current reading = " + str(shuntCurrent) + " microamps")
+        print("      Digital 2.5V shunt current reading = " + str(shuntCurrent) + " milliamps")
         busVoltage = 1.25*(dataList[offset+13]*256 + dataList[offset+14])/1000.
         print("      Digital 3.3V bus voltage reading = " + str(busVoltage) + " V")
         shuntVoltage = 2.5*(dataList[offset+15]*256 + dataList[offset+16])/1000000.
         shuntCurrent = shuntVoltage*1000./R
-        print("      Digital 3.3V shunt current reading = " + str(shuntCurrent) + " microamps")
+        print("      Digital 3.3V shunt current reading = " + str(shuntCurrent) + " milliamps")
         busVoltage = 1.25*(dataList[offset+17]*256 + dataList[offset+18])/1000.
         print("      Analog 2.1V bus voltage reading = " + str(busVoltage) + " V")
         shuntVoltage = 2.5*(dataList[offset+19]*256 + dataList[offset+20])/1000000.
         shuntCurrent = shuntVoltage*1000./R
-        print("      Analog 2.1V shunt current reading = " + str(shuntCurrent) + " microamps")
+        print("      Analog 2.1V shunt current reading = " + str(shuntCurrent) + " milliamps")
         busVoltage = 1.25*(dataList[offset+21]*256 + dataList[offset+22])/1000.
         print("      Analog 3.3V bus voltage reading = " + str(busVoltage) + " V")
         shuntVoltage = 2.5*(dataList[offset+23]*256 + dataList[offset+24])/1000000.
         shuntCurrent = shuntVoltage*1000./R
-        print("      Analog 3.3V shunt current reading = " + str(shuntCurrent) + " microamps")
+        print("      Analog 3.3V shunt current reading = " + str(shuntCurrent) + " milliamps")
         offset = offset + 24
            
 # Execute a run for a specified number of events to be acquired
@@ -950,6 +960,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     tkrTrg0 = 0
     tkrTrg1 = 0
     pmtGrd = 0
+    nAvg = 0
     ADCavg = [0.,0.,0.,0.,0.]
     ADCavg2 = [0.,0.,0.,0.,0.]
     TOFavg = 0.
@@ -1110,6 +1121,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             TOFavg = TOFavg + float(dtmin)
             TOFavg2 = TOFavg2 + float(dtmin)*float(dtmin)
             if event != 0:
+                nAvg = nAvg + 1
                 ADCavg[0] = ADCavg[0] + T1
                 ADCavg[1] = ADCavg[1] + T2
                 ADCavg[2] = ADCavg[2] + T3
@@ -1142,7 +1154,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     # Tell the Event PSOC to stop the run
     cmdHeader = mkCmdHdr(0, 0x44, addrEvnt)
     ser.write(cmdHeader)
-    print("limitedRun: EOR expecting 8 bytes coming back.")
+    print("limitedRun: EOR expecting 84 bytes coming back.")
     cnt = 0
     while True:
         if cnt > 10:
@@ -1150,27 +1162,28 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             break
         ret = ser.read(1)
         if cnt%1 == 0:
-            print("limitedRun " + str(cnt) + ": looking for start of trailer. Received byte " + str(ret))
+            print("limitedRun " + str(cnt) + ": looking for start of EOR record. Received byte " + str(ret))
         if ret == b'\xDC': 
             ret = ser.read(2)
             if ret != b'\x00\xFF':
                 print("limitedRun: bad header found: b'\\xdc' " + str(ret)) 
             nBytes = bytes2int(ser.read(1))
             print("limitedRun: number of header bytes = " + str(nBytes))
-            if nBytes != 9:
+            ret = ser.read(1)
+            if ret == b'0xDB' or ret == b'0xDD' or ret == b'0xDE' or ret == b'0xDF':
                 print("limitedRun: dumping the bytes for an extra event trigger that came in while ending the run:")
                 for i in range(nBytes+2):
                     ret = ser.read(1);      
-                    if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
+                    if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex" + " = " + str(ret))
                 ret = ser.read(3)
                 if ret != b'\xFF\x00\xFF':
                     print("limitedRun: invalid trailer returned: " + str(ret))     
                 continue
+            print("limitedRun: command code = " + str(ret.hex()))
+            print("limitedRun: found EOR record, number of header bytes = " + str(nBytes))
             break               
         time.sleep(0.1)
         cnt = cnt + 1       
-    ret = ser.read(1)
-    if ret != b'\x44': print("limitedRun: invalid command echo " + str(ret) + " received for EOR header")
     ret = ser.read(1)
     if ret != b'\x00': print("limitedRun: invalid command data bytes " + str(ret) + " received for EOR header")
     byteList = []
@@ -1178,22 +1191,26 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         ret = ser.read(1)
         if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
         byteList.append(ret)
+    #ret = ser.read(1)   # padding byte
     ret = ser.read(3)
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))         
-    go0 = bytes2int(byteList[0])
-    go1 = bytes2int(byteList[1])
-    go2 = bytes2int(byteList[2])
-    go3 = bytes2int(byteList[3])
+    go0 = bytes2int(byteList[3])
+    go1 = bytes2int(byteList[4])
+    go2 = bytes2int(byteList[5])
+    go3 = bytes2int(byteList[6])
     cntGo1 = go0*16777216 + go1*65536 + go2*256 + go3
 
-    go0 = bytes2int(byteList[4])
-    go1 = bytes2int(byteList[5])
-    go2 = bytes2int(byteList[6])
-    go3 = bytes2int(byteList[7])
+    go0 = bytes2int(byteList[7])
+    go1 = bytes2int(byteList[8])
+    go2 = bytes2int(byteList[9])
+    go3 = bytes2int(byteList[10])
     cntGo = go0*16777216 + go1*65536 + go2*256 + go3
     
-    nBadCRC = bytes2int(byteList[8])
+    nBadCRC = bytes2int(byteList[11])
+    
+    nTkrReadReady = bytes2int(byteList[12])*16777216 + bytes2int(byteList[13])*65536 + bytes2int(byteList[14])*256 + bytes2int(byteList[15])
+    nTkrReadNotReady = bytes2int(byteList[16])*256 + bytes2int(byteList[17])
     
     Sigma = [0.,0.,0.,0.,0.,0.]
     TOFavg = TOFavg/float(numEvnts)
@@ -1203,8 +1220,8 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     sigmaTOF = math.sqrt(TOFavg2 - TOFavg*TOFavg)
     for ch in range(5):
         if numEvnts > 1:
-            ADCavg[ch] = ADCavg[ch]/float(numEvnts-1)
-            ADCavg2[ch] = ADCavg2[ch]/float(numEvnts-1)
+            ADCavg[ch] = ADCavg[ch]/float(nAvg)
+            ADCavg2[ch] = ADCavg2[ch]/float(nAvg)
             Sigma[ch] = math.sqrt(ADCavg2[ch] - ADCavg[ch]*ADCavg[ch])
         else:
             Sigma[ch] = 0.
@@ -1213,6 +1230,24 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     print("Number of triggers generated = " + str(cntGo1+cntGo))
     print("Number of triggers accepted = " + str(cntGo))
     print("Number of bad Tracker CRC = " + str(nBadCRC))
+    print("Number of tracker reads when status is ready = " + str(nTkrReadReady))
+    print("Number of tracker reads when status is not ready = " + str(nTkrReadNotReady))
+    print("Average number of TOF-A stops per event = " + str(bytes2int(byteList[18])))
+    print("Average number of TOF-B stops per event = " + str(bytes2int(byteList[19])))
+    print("Maximum number of TOF-A stops in an event = " + str(bytes2int(byteList[20])))
+    print("Maximum number of TOF-B stops in an event = " + str(bytes2int(byteList[21])))
+    nTkrMasterGo = bytes2int(byteList[22])*256 + bytes2int(byteList[23])
+    print("Number of GO signals received by the Tracker master = " + str(nTkrMasterGo))
+    for lyr in range(8):
+        nTrigs = bytes2int(byteList[24+7*lyr])*256 + bytes2int(byteList[24+7*lyr+1])
+        print("  Layer " + str(lyr) + ": number of triggers received = " + str(nTrigs))
+        nReads = bytes2int(byteList[24+7*lyr+2])*256 + bytes2int(byteList[24+7*lyr+3])
+        print("  Layer " + str(lyr) + ": number of read commands received = " + str(nReads))
+        print("  Layer " + str(lyr) + ": number of missed triggers = " + str(bytes2int(byteList[24+7*lyr+4])))
+        print("  Layer " + str(lyr) + ": number of reads with no trigger = " + str(bytes2int(byteList[24+7*lyr+5])))
+        print("  Layer " + str(lyr) + ": error codes = " + str(byteList[24+7*lyr+6].hex()))
+    nBusy = bytes2int(byteList[80])*16777216 + bytes2int(byteList[81])*65536 + bytes2int(byteList[82])*256 + bytes2int(byteList[83])
+    print("Number of events created when the SPI link is BUSY = " + str(nBusy))
     if (cntGo+cntGo1 == 0):
         live = 0.
     else:
@@ -1224,6 +1259,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     print("Number of tracker-1 triggers captured = " + str(tkrTrg1))
     print("Number of triggers with guard fired = " + str(pmtGrd))
     print("Number of bad tracker events = " + str(nBadTkr))
+    print("Number of events included in the ADC averages = " + str(nAvg))
     return ADCavg, Sigma, TOFavg, sigmaTOF
 
 def plotTkrEvnt(run, event, layers, hitList):
