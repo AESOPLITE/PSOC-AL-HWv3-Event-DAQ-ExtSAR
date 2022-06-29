@@ -47,6 +47,7 @@
  *         tracker read timeouts and count how many TOF top events are coming in. Lots added to the end-of-run record.
  * V24.16: Fixed typo in end-of-run record
  * V24.17: Added TOF statistics to the housekeeping record
+ * V24.18: Reset all tracker board counters at the beginning of a run
  * ========================================
  */
 #include "project.h"
@@ -56,7 +57,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 17
+#define MINOR_VERSION 18
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -856,6 +857,7 @@ void clearTkrFIFO() {
 
 // Send a command to the tracker via the UART
 uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rtnType) {
+    if (!readTracker) return 0;
     tkrLED(true);
     tkrCmdCode = code;
     clearTkrFIFO();
@@ -911,6 +913,7 @@ uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint 
 
 // Function to send a command to the tracker that has no data bytes sent or returned
 int sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
+    if (!readTracker) return 0;
     tkrLED(true);
     tkrCmdCode = code;
     clearTkrFIFO();
@@ -3076,19 +3079,17 @@ void interpretCommand(uint8 tofConfig[]) {
                 break;
             case '\x3B':   // Enable or disable the trigger
                 if (cmdData[0] == 1) {
-                    if (readTracker) sendSimpleTrackerCmd(0x00, 0x65);
+                    sendSimpleTrackerCmd(0x00, 0x65);
                     triggerEnable(true);
                 } else if (cmdData[0] == 0) {
                     triggerEnable(false);
-                    if (readTracker) sendSimpleTrackerCmd(0x00, 0x66);
+                    sendSimpleTrackerCmd(0x00, 0x66);
                 }
                 break;
             case '\x44':  // End a run and send out the run summary
                 isr_GO1_Disable();
                 triggerEnable(false);
-                if (readTracker) {
-                    sendSimpleTrackerCmd(0x00, 0x66);  // Disable the Tracker trigger
-                }
+                sendSimpleTrackerCmd(0x00, 0x66);  // Disable the Tracker trigger
                 endingRun = true;
                 runNumber = 0;
                 endData[0] = byte32(cntGO1, 0);
@@ -3104,8 +3105,8 @@ void interpretCommand(uint8 tofConfig[]) {
                 endData[10] = byte32(nTkrReadReady, 1);
                 endData[11] = byte32(nTkrReadReady, 2);
                 endData[12] = byte32(nTkrReadReady, 3);
-                endData[13] = byte32(nTkrReadNotReady, 0);
-                endData[14] = byte32(nTkrReadNotReady, 1);
+                endData[13] = byte16(nTkrReadNotReady, 0);
+                endData[14] = byte16(nTkrReadNotReady, 1);
                 uint8 nTOF_A_average = nTOF_A_avg/cntGO;
                 uint8 nTOF_B_average = nTOF_B_avg/cntGO;
                 endData[15] = nTOF_A_average;
@@ -3195,10 +3196,11 @@ void interpretCommand(uint8 tofConfig[]) {
                 nTkrReadReady = 0;
                 nTkrReadNotReady = 0;
                 numTkrResets = 0;
-                // Enable the tracker trigger
-                if (readTracker) {
-                    sendSimpleTrackerCmd(0x00, 0x65);
+                // Reset Tracker counters and enable the tracker trigger
+                for (int brd=0; brd<numTkrBrds; ++brd) {
+                    sendSimpleTrackerCmd(brd, 0x04);
                 }
+                sendSimpleTrackerCmd(0x00, 0x65);
                 triggerEnable(true);
                 isr_GO1_ClearPending();
                 isr_GO1_Enable();
@@ -3460,7 +3462,7 @@ void interpretCommand(uint8 tofConfig[]) {
                     houseKeepingDue = true;
                 }
                 break;
-            case '\x5F': // Set a tracker housekeeping packet now
+            case '\x5F': // Send a tracker housekeeping packet now
                 if (doTkrHouseKeeping) {
                     tkrHouseKeepingDue = true;
                 }
@@ -3642,7 +3644,7 @@ int main(void)
     tkrHouseKeepingDue = false;
     doTkrHouseKeeping = false;
     doHouseKeeping = false;
-    readTracker = false;
+    readTracker = true;
     debugTOF = false;
     lastTkrCmdCount = 0;
     nIgnoredCmd = 0;
@@ -3989,7 +3991,7 @@ int main(void)
                 nDataReady = END_DATA_SIZE + 3;
                 dataOut[0] = 0x45;
                 dataOut[1] = 0x4F;
-                dataOut[3] = 0x52;
+                dataOut[2] = 0x52;
                 for (uint i=0; i<END_DATA_SIZE; ++i) {
                     dataOut[3+i] = endData[i];
                 }
