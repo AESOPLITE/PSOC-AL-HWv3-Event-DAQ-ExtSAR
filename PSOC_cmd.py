@@ -1056,6 +1056,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
                 print("        T4 ADC=" + str(T4))
                 print("         G ADC=" + str(G))
             dtmin = 10*np.int16(dataList[33]*256 + dataList[34])
+            trgCount = dataList[35]*256 + dataList[36]
             if debugTOF:
                 nTOFA = dataList[39]
                 nTOFB = dataList[40]
@@ -1077,7 +1078,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             if verbose:
                 print("        TimeStamp = " + str(timeStamp))
                 print("        TOF=" + str(dtmin) + " Number A=" + str(nTOFA) + " Number B=" + str(nTOFB))
-                print("        run=" + str(run) + "  trigger " + str(trigger))
+                print("        run=" + str(run) + "  trigger " + str(trigger) + " Tkr Trig Cnt = " + str(trgCount))
             trgStatus = dataList[22]
             rc = 0
             numHitEvt = 0
@@ -1160,8 +1161,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     # Tell the Event PSOC to stop the run
     cmdHeader = mkCmdHdr(0, 0x44, addrEvnt)
     ser.write(cmdHeader)
-    print("limitedRun: EOR expecting 84 bytes coming back.")
+    print("limitedRun: EOR expecting 92 bytes coming back.")
     cnt = 0
+    byteList = []
     while True:
         if cnt > 10:
             readErrors(addrEvnt)
@@ -1176,28 +1178,43 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             nBytes = bytes2int(ser.read(1))
             print("limitedRun: number of header bytes = " + str(nBytes))
             ret = ser.read(1)
-            if ret == b'0xDB' or ret == b'0xDD' or ret == b'0xDE' or ret == b'0xDF':
+            if ret == b'\xDB' or ret == b'\xDD' or ret == '\xDE' or ret == b'\xDF':
                 print("limitedRun: dumping the bytes for an extra event trigger that came in while ending the run:")
                 for i in range(nBytes+2):
                     ret = ser.read(1);      
-                    if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex" + " = " + str(ret))
+                    if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex  = " + str(ret))
                 ret = ser.read(3)
                 if ret != b'\xFF\x00\xFF':
                     print("limitedRun: invalid trailer returned: " + str(ret))     
                 continue
             print("limitedRun: command code = " + str(ret.hex()))
             print("limitedRun: found EOR record, number of header bytes = " + str(nBytes))
+            ret = ser.read(1)
+            if ret != b'\x00': print("limitedRun: invalid command data bytes " + str(ret) + " received for EOR header")
+            for i in range(3):
+                ret = ser.read(1)
+                if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex  = " + str(ret))
+                byteList.append(ret)
+            if (byteList[0] == b'\x45' and  byteList[1] == b'\x52' and byteList[2] == b'\x52'):
+                print("limitedRun: printing out an error record:")
+                for i in range(2,nBytes):
+                    ret = ser.read(1)
+                    if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
+                ret = ser.read(1)   # padding byte
+                ret = ser.read(3)
+                if ret != b'\xFF\x00\xFF':
+                    print("limitedRun: invalid trailer returned: " + str(ret))    
+                byteList = []
+                continue                
             break               
         time.sleep(0.1)
         cnt = cnt + 1       
-    ret = ser.read(1)
-    if ret != b'\x00': print("limitedRun: invalid command data bytes " + str(ret) + " received for EOR header")
-    byteList = []
-    for i in range(nBytes):
+
+    for i in range(2,nBytes):
         ret = ser.read(1)
         if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
         byteList.append(ret)
-    #ret = ser.read(1)   # padding byte
+    ret = ser.read(1)   # padding byte
     ret = ser.read(3)
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))         
@@ -1242,18 +1259,19 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     print("Average number of TOF-B stops per event = " + str(bytes2int(byteList[19])))
     print("Maximum number of TOF-A stops in an event = " + str(bytes2int(byteList[20])))
     print("Maximum number of TOF-B stops in an event = " + str(bytes2int(byteList[21])))
-    nTkrMasterGo = bytes2int(byteList[22])*256 + bytes2int(byteList[23])
+    nBusy = bytes2int(byteList[22])*16777216 + bytes2int(byteList[23])*65536 + bytes2int(byteList[24])*256 + bytes2int(byteList[25])
+    print("Number of events created when the SPI link is BUSY = " + str(nBusy))
+    nTkrMasterGo = bytes2int(byteList[26])*256 + bytes2int(byteList[27])
     print("Number of GO signals received by the Tracker master = " + str(nTkrMasterGo))
     for lyr in range(8):
-        nTrigs = bytes2int(byteList[24+7*lyr])*256 + bytes2int(byteList[24+7*lyr+1])
+        nTrigs = bytes2int(byteList[28+8*lyr])*256 + bytes2int(byteList[28+8*lyr+1])
         print("  Layer " + str(lyr) + ": number of triggers received = " + str(nTrigs))
-        nReads = bytes2int(byteList[24+7*lyr+2])*256 + bytes2int(byteList[24+7*lyr+3])
+        nReads = bytes2int(byteList[28+8*lyr+2])*256 + bytes2int(byteList[28+8*lyr+3])
         print("  Layer " + str(lyr) + ": number of read commands received = " + str(nReads))
-        print("  Layer " + str(lyr) + ": number of missed triggers = " + str(bytes2int(byteList[24+7*lyr+4])))
-        print("  Layer " + str(lyr) + ": number of reads with no trigger = " + str(bytes2int(byteList[24+7*lyr+5])))
-        print("  Layer " + str(lyr) + ": error codes = " + str(byteList[24+7*lyr+6].hex()))
-    nBusy = bytes2int(byteList[80])*16777216 + bytes2int(byteList[81])*65536 + bytes2int(byteList[82])*256 + bytes2int(byteList[83])
-    print("Number of events created when the SPI link is BUSY = " + str(nBusy))
+        print("  Layer " + str(lyr) + ": number of missed triggers = " + str(bytes2int(byteList[28+8*lyr+4])))
+        print("  Layer " + str(lyr) + ": number of reads with no trigger = " + str(bytes2int(byteList[28+8*lyr+5])))
+        print("  Layer " + str(lyr) + ": error codes = " + str(byteList[28+8*lyr+6].hex()))
+        print("  Layer " + str(lyr) + ": ASIC error codes = " + str(byteList[28+8*lyr+7].hex()))
     if (cntGo+cntGo1 == 0):
         live = 0.
     else:

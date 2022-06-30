@@ -49,6 +49,7 @@
  * V24.17: Added TOF statistics to the housekeeping record
  * V24.18: Reset all tracker board counters at the beginning of a run
  * V24.19: Fixed bug in storing the tracker trigger count
+ * V24.20: Added ASIC error codes to the EOR and added error records that get built for each timeout
  * ========================================
  */
 #include "project.h"
@@ -58,7 +59,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 19
+#define MINOR_VERSION 20
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -348,7 +349,7 @@ const uint8 SSN_CH5  = 0x0C;
 uint8 outputMode;              // Data output mode (SPI or USB-UART)
 bool debugTOF;
 
-#define END_DATA_SIZE 81u
+#define END_DATA_SIZE 89u
 bool endingRun;                // Set true when the run is ending
 uint8 endData[END_DATA_SIZE];
 
@@ -590,7 +591,7 @@ void addErrorOnce(uint8 code, uint8 val0, uint8 val1) {
 // The second argument (flag) helps to identify where a timeout error originated.
 // The upper 8 bits flag a timeout.
 uint16 tkr_getByte(uint32 startTime, uint8 flag) {
-    while (tkrReadPtr < 0) {  // No buffered data are available
+    while (tkrReadPtr == tkrWritePtr) {  // No buffered data are available
         uint32 timeElapsed = time() - startTime;
         if (timeElapsed > TKR_READ_TIMEOUT || (startTime > time() && time() > TKR_READ_TIMEOUT)) {
             addError(ERR_TKR_READ_TIMEOUT, tkrCmdCode, flag);
@@ -600,9 +601,7 @@ uint16 tkr_getByte(uint32 startTime, uint8 flag) {
     }
     isr_TKR_Disable();
     uint8 theByte = tkrBuf[tkrReadPtr];
-    if (tkrReadPtr < MAX_TKR-1) tkrReadPtr++;
-    else tkrReadPtr = 0;
-    if (tkrReadPtr == tkrWritePtr) tkrReadPtr = -1;  // All buffered data have been read
+    tkrReadPtr = WRAPINC(tkrReadPtr, MAX_TKR);
     isr_TKR_Enable();
     return (uint16)theByte;    
 }
@@ -650,6 +649,43 @@ void getASICdata() {
         startTime = time();
         dataOut[i] = tkr_getByte(startTime, 70+i);
     }
+}
+
+// Check whether the trigger is enabled
+bool isTriggerEnabled() {
+    uint8 regValue = Control_Reg_Trg_Read();
+    bool enabled = regValue==0x01;
+    return enabled;
+}
+
+// Function to assemble an error record for diagnosing timeouts of the tracker event read
+#define MAX_ERROR_RECORDS 10
+#define ERR_REC_SIZE 16
+struct ErrorRecord {
+    uint8 A[ERR_REC_SIZE];
+} errRecord[MAX_ERROR_RECORDS];
+int numErrRec = 0;
+void makeErrorRecord(uint16 timeOut, uint8 byte) {
+    if (runNumber <= 0) return;
+    if (numErrRec >= MAX_ERROR_RECORDS) return;
+    errRecord[numErrRec].A[0] = byte32(cntGO, 0);
+    errRecord[numErrRec].A[1] = byte32(cntGO, 1);
+    errRecord[numErrRec].A[2] = byte32(cntGO, 2);
+    errRecord[numErrRec].A[3] = byte32(cntGO, 3);
+    errRecord[numErrRec].A[4] = timeOut;
+    errRecord[numErrRec].A[5] = Pin_Busy_Read();
+    errRecord[numErrRec].A[6] = UART_TKR_GetRxBufferSize();
+    errRecord[numErrRec].A[7] = UART_TKR_ReadRxStatus();
+    errRecord[numErrRec].A[8] = UART_TKR_GetTxBufferSize();
+    errRecord[numErrRec].A[9] = UART_TKR_ReadTxStatus();
+    errRecord[numErrRec].A[10] = byte16((uint16)tkrWritePtr,0);
+    errRecord[numErrRec].A[11] = byte16((uint16)tkrWritePtr,1);
+    errRecord[numErrRec].A[12] = byte16((uint16)tkrReadPtr,0);
+    errRecord[numErrRec].A[13] = byte16((uint16)tkrReadPtr,1);
+    if (isTriggerEnabled()) errRecord[numErrRec].A[14] = 0x01;
+    else errRecord[numErrRec].A[14] = 0x00;
+    errRecord[numErrRec].A[15] = byte;
+    numErrRec++;
 }
 
 // Function to get a full data packet from the Tracker.
@@ -706,12 +742,18 @@ int getTrackerData(uint8 idExpected) {
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             return 56;
         }
+        uint8 timeOut = 0;
         tkrData.triggerCount = trgCnt;
         tkrData.cmdCount = cmdCnt;
         tkrData.trgPattern = trgPtr;
         tkrData.nTkrBoards = nBoards;
-        for (int brd=0; brd < nBoards; ++brd) {
-            uint8 nBrdBytes = tkr_getByte(startTime, 7);  // Length of the hit list, in bytes
+        for (uint8 brd=0; brd < nBoards; ++brd) {
+            uint16 ret = tkr_getByte(startTime, 7);  // Length of the hit list, in bytes
+            if ((ret & 0xFF00) != 0) {
+                timeOut = (brd | 0x10);
+                makeErrorRecord(timeOut, 0);
+            }
+            uint8 nBrdBytes = (uint8)ret;
             if (nBrdBytes < 4) {
                 addErrorOnce(ERR_TKR_BOARD_SHORT, nBrdBytes, brd);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
@@ -719,7 +761,12 @@ int getTrackerData(uint8 idExpected) {
                 rc = 57;
                 continue;
             }
-            uint8 IDbyte = tkr_getByte(startTime, 8);     // Hit list identifier, should always be 11100111
+            ret = tkr_getByte(startTime, 8);     // Hit list identifier, should always be 11100111
+            if ((ret & 0xFF00) != 0) {
+                timeOut = (brd | 0x20);
+                makeErrorRecord(timeOut, 1);
+            }    
+            uint8 IDbyte = (uint8)ret;
             if (IDbyte != 0xE7) {
                 addErrorOnce(ERR_TKR_BAD_BOARD_ID, IDbyte, brd);
                 makeDummyHitList(brd, 5);
@@ -727,7 +774,12 @@ int getTrackerData(uint8 idExpected) {
                 rc = 58;
                 continue;
             }
-            uint8 byte2 = tkr_getByte(startTime, 9);        // Byte containing the board address
+            ret = tkr_getByte(startTime, 9);        // Byte containing the board address
+            if ((ret & 0xFF00) != 0) {
+                timeOut = (brd | 0x30);
+                makeErrorRecord(timeOut, 2);
+            }
+            uint8 byte2 = (uint8)ret;
             if (byte2 > 8) {   // Formal check. Note that 8 denotes the master board, which really is layer 0
                 addErrorOnce(ERR_TKR_BAD_FPGA, byte2, brd);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
@@ -750,9 +802,13 @@ int getTrackerData(uint8 idExpected) {
             tkrData.boardHits[lyr].hitList[0] = IDbyte;
             tkrData.boardHits[lyr].hitList[1] = byte2;
             for (int i=2; i<nBrdBytes; ++i) {
-                uint8 theByte = tkr_getByte(startTime, 10);
+                ret = tkr_getByte(startTime, 10);
+                if ((ret & 0xFF00) != 0) {
+                    timeOut = (brd | 0x40);
+                    makeErrorRecord(timeOut, 3+i);
+                }
                 if (i<MAX_TKR_BOARD_BYTES) {       
-                    tkrData.boardHits[lyr].hitList[i] = theByte;
+                    tkrData.boardHits[lyr].hitList[i] = (uint8)ret;
                 }
             }
         }
@@ -821,11 +877,9 @@ int getTrackerData(uint8 idExpected) {
         isr_TKR_Disable();
         nDataReady = 0;
         while (tkrReadPtr != tkrWritePtr) {
-            dataOut[nDataReady++] = tkrBuf[tkrReadPtr];            
-            if (tkrReadPtr < MAX_TKR-1) tkrReadPtr++;
-            else tkrReadPtr = 0;
+            dataOut[nDataReady++] = tkrBuf[tkrReadPtr]; 
+            tkrReadPtr = WRAPINC(tkrReadPtr, MAX_TKR);
         }  
-        tkrReadPtr = -1;
         isr_TKR_Enable(); 
         rc = 5;
     }
@@ -847,7 +901,7 @@ void tkrLED(bool on) {
 void clearTkrFIFO() {
     uint8 intState = isr_TKR_GetState();
     if (intState) isr_TKR_Disable();
-    tkrReadPtr = -1;
+    tkrReadPtr = tkrWritePtr;
     CyDelayUs(80);
     while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
         UART_TKR_ClearRxBuffer();
@@ -1113,13 +1167,6 @@ uint16 tkrGetShuntVoltage(uint8 FPGA, uint8 i2cAddress) {
     CyDelayUs(600);
     uint16 result = tkrReadI2cReg(FPGA, i2cAddress);
     return result;
-}
-
-// Check whether the trigger is enabled
-bool isTriggerEnabled() {
-    uint8 regValue = Control_Reg_Trg_Read();
-    bool enabled = regValue==0x01;
-    return enabled;
 }
 
 // Control of the trigger enable bit. Always make sure that the tracker trigger is disabled after disabling the trigger here.
@@ -1944,23 +1991,18 @@ CY_ISR(isrUART) {
 
 // Receive data from the Tracker over the UART using a circular FIFO buffer
 CY_ISR(isrTkrUART) {
-    if (tkrWritePtr != tkrReadPtr) { // Ignore the interrupt if the software buffer is full
-        while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
-            uint16 theByte = UART_TKR_GetByte();
-            if ((theByte & 0xDF00) != 0) {
-                uint8 code = (uint8)((theByte & 0xDF00)>>8);
-                addError(ERR_UART_TKR, code, (uint8)theByte);
-            }
-            tkrBuf[tkrWritePtr] = (uint8)theByte;
-            if (tkrReadPtr < 0) tkrReadPtr = tkrWritePtr;
-            if (tkrWritePtr == MAX_TKR - 1) tkrWritePtr = 0;
-            else tkrWritePtr++;
-            if (tkrWritePtr == tkrReadPtr) {   // FIFO overflow condition, very bad!
-                addError(ERR_TKR_BUFFER_OVERFLOW, byte32(cntGO, 0), byte32(cntGO, 1));
-            }
+    while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
+        uint16 theByte = UART_TKR_GetByte();
+        if ((theByte & 0xDF00) != 0) {
+            uint8 code = (uint8)((theByte & 0xDF00)>>8);
+            addError(ERR_UART_TKR, code, (uint8)theByte);
         }
-    } else {  // Throwing away the data here will probably cause the DAQ to fail. . .
-        while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) UART_TKR_GetByte();
+        tkrBuf[tkrWritePtr] = (uint8)theByte;
+        tkrWritePtr = WRAPINC(tkrWritePtr, MAX_TKR);
+        if (tkrWritePtr == tkrReadPtr) {   // FIFO overflow condition, very bad!
+            tkrWritePtr = WRAPDEC(tkrWritePtr, MAX_TKR);  // The byte will get overwritten!
+            addErrorOnce(ERR_TKR_BUFFER_OVERFLOW, tkrReadPtr, theByte);
+        }
     }
 }
 
@@ -3114,33 +3156,43 @@ void interpretCommand(uint8 tofConfig[]) {
                 endData[16] = nTOF_B_average;
                 endData[17] = nTOF_A_max;
                 endData[18] = nTOF_B_max;
+                endData[19] = byte32(cntBusy, 0);
+                endData[20] = byte32(cntBusy, 1);
+                endData[21] = byte32(cntBusy, 2);
+                endData[22] = byte32(cntBusy, 3);
                 sendTrackerCmd(0, 0x69, 0, cmdData, TKR_HOUSE_DATA);
-                endData[19] = tkrHouseKeeping[0];
-                endData[20] = tkrHouseKeeping[1];
+                endData[23] = tkrHouseKeeping[0];
+                endData[24] = tkrHouseKeeping[1];
+                const int nItems = 8;
+                const int offSet = 25;
                 for (int i=0; i<MAX_TKR_BOARDS; ++i) {
                     if (i < numTkrBrds) {
                         sendTrackerCmd(i, 0x68, 0, cmdData, TKR_HOUSE_DATA);
-                        endData[21+7*i] = tkrHouseKeeping[0];
-                        endData[21+7*i+1] = tkrHouseKeeping[1];
+                        endData[offSet+nItems*i] = tkrHouseKeeping[0];
+                        endData[offSet+nItems*i+1] = tkrHouseKeeping[1];
                         sendTrackerCmd(i, 0x6B, 0, cmdData, TKR_HOUSE_DATA);
-                        endData[21+7*i+2] = tkrHouseKeeping[0];
-                        endData[21+7*i+3] = tkrHouseKeeping[1];
+                        endData[offSet+nItems*i+2] = tkrHouseKeeping[0];
+                        endData[offSet+nItems*i+3] = tkrHouseKeeping[1];
                         sendTrackerCmd(i, 0x75, 0, cmdData, TKR_HOUSE_DATA);
-                        endData[21+7*i+4] = tkrHouseKeeping[0];
+                        endData[offSet+nItems*i+4] = tkrHouseKeeping[0];
                         cmdData[0] = 3;
                         sendTrackerCmd(i, 0x77, 1, cmdData, TKR_HOUSE_DATA);
-                        endData[21+7*i+5] = tkrHouseKeeping[0];
+                        endData[offSet+nItems*i+5] = tkrHouseKeeping[0];
                         sendTrackerCmd(i, 0x78, 0, cmdData, TKR_HOUSE_DATA);
-                        endData[21+7*i+6] = tkrHouseKeeping[0];
+                        endData[offSet+nItems*i+6] = tkrHouseKeeping[0];
+                        uint32 config = getTkrASICconfig(i, 4);
+                        uint8 ASICerrs;
+                        if (config == 0) ASICerrs = 0xFF;
+                        else {
+                            ASICerrs = (config & 0x77000000)>>24;
+                        }
+                        endData[offSet+nItems*i+7] = ASICerrs;
                     } else {
-                        for (int j=0; j<7; ++j) endData[21+7*i+j] = 0;
+                        for (int j=0; j<nItems; ++j) endData[offSet+nItems*i+j] = 0;
                     }
                 }
-                endData[77] = byte32(cntBusy, 0);
-                endData[78] = byte32(cntBusy, 1);
-                endData[79] = byte32(cntBusy, 2);
-                endData[80] = byte32(cntBusy, 3);
                 nTkrHouseKeeping = 0;
+                nDataReady = 0;
                 break;
             case '\x50':  // Send counter information
                 nDataReady = 6;
@@ -3756,7 +3808,7 @@ int main(void)
     isr_1Hz_Disable();
     
     tkrWritePtr = 0;    // Initialize the write pointer for the tracker UART RX FIFO
-    tkrReadPtr = -1;    // Negative indicates that no data are available to read
+    tkrReadPtr = 0;     // Equal to write pointer indicates that no data are available to read
     
     // Initialize pointers for the UART command buffer
     cmdReadPtr = 0;   
@@ -3983,6 +4035,20 @@ int main(void)
             
             if (nDataReady == 0 && triggered) {    
                 makeEvent();
+            }
+            
+            // Send out error records if there are any
+            if (!triggered && endingRun && nDataReady == 0) {
+                if (numErrRec > 0) {
+                    nDataReady = ERR_REC_SIZE + 3;
+                    dataOut[0] = 0x45;
+                    dataOut[1] = 0x52;
+                    dataOut[2] = 0x52;
+                    for (int i=0; i<ERR_REC_SIZE; ++i) {
+                        dataOut[3+i] = errRecord[numErrRec-1].A[i];
+                    }
+                    numErrRec--;
+                }
             }
             
             // Send out the end-of-run info if the run is ending. However, check nDataReady,
