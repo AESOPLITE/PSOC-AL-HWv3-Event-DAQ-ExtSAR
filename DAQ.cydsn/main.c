@@ -48,6 +48,7 @@
  * V24.16: Fixed typo in end-of-run record
  * V24.17: Added TOF statistics to the housekeeping record
  * V24.18: Reset all tracker board counters at the beginning of a run
+ * V24.19: Fixed bug in storing the tracker trigger count
  * ========================================
  */
 #include "project.h"
@@ -57,7 +58,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 18
+#define MINOR_VERSION 19
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -693,7 +694,7 @@ int getTrackerData(uint8 idExpected) {
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             return 55;
         }
-        uint8 trgCnt = ((uint16)tkr_getByte(startTime, 3) & 0x00FF) << 8;
+        uint16 trgCnt = ((uint16)tkr_getByte(startTime, 3) & 0x00FF) << 8;
         trgCnt = trgCnt | ((uint16)tkr_getByte(startTime, 4) & 0x00FF);
         uint8 cmdCnt = tkr_getByte(startTime, 5);
         uint8 nBoards = tkr_getByte(startTime, 6);
