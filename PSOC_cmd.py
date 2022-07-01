@@ -1178,9 +1178,12 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             nBytes = bytes2int(ser.read(1))
             print("limitedRun: number of header bytes = " + str(nBytes))
             ret = ser.read(1)
+            print("return = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex  = " + str(ret))
             if ret == b'\xDB' or ret == b'\xDD' or ret == '\xDE' or ret == b'\xDF':
+                ret = ser.read(1)
+                if ret != b'\x00': print("limitedRun: invalid command data bytes " + str(ret) + " received for EOR header")
                 print("limitedRun: dumping the bytes for an extra event trigger that came in while ending the run:")
-                for i in range(nBytes+2):
+                for i in range(nBytes):
                     ret = ser.read(1);      
                     if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex  = " + str(ret))
                 ret = ser.read(3)
@@ -1214,7 +1217,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         ret = ser.read(1)
         if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
         byteList.append(ret)
-    ret = ser.read(1)   # padding byte
+    #ret = ser.read(1)   # padding byte
     ret = ser.read(3)
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))         

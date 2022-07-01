@@ -50,6 +50,8 @@
  * V24.18: Reset all tracker board counters at the beginning of a run
  * V24.19: Fixed bug in storing the tracker trigger count
  * V24.20: Added ASIC error codes to the EOR and added error records that get built for each timeout
+ * V24.21: Added a few more timeout checks
+ * V24.22: Check for some error bits in the tracker hit lists
  * ========================================
  */
 #include "project.h"
@@ -59,7 +61,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 24
-#define MINOR_VERSION 20
+#define MINOR_VERSION 22
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -226,6 +228,10 @@
 #define ERR_ASICS_RESET 49u
 #define ERR_WRONG_NUM_TKR_DATA 50u
 #define ERR_TRG_NOT_READY 51u
+#define TKR_TAG_EVT_MISMATCH 52u
+#define ERR_FPGA_ASIC_HEAD 53u
+#define ERR_TKR_ASIC 54u
+#define ERR_ASIC_PARITY 55u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -621,7 +627,7 @@ void makeDummyHitList(int brd, uint8 code) {
     tkrData.boardHits[brd].nBytes = 5;                  // Minimum length of a board hit list
     tkrData.boardHits[brd].hitList[0] = 0xE7;           // Identifier
     tkrData.boardHits[brd].hitList[1] = brd;            // Layer number
-    tkrData.boardHits[brd].hitList[2] = 1;              // Trigger count set to 0, error bit set to 1
+    tkrData.boardHits[brd].hitList[2] = 0;              // Trigger count set to 0, error bit set to 0
     tkrData.boardHits[brd].hitList[3] = (0x0F & code);  // 4 bits for 0 ASICs plus 4 bits of the CRC
     tkrData.boardHits[brd].hitList[4] = 0x30;           // 2 bits of the CRC set to 0, then 11, then 0 filler nibble
                                                         // The CRC is wrong and will get flagged. The code that
@@ -691,9 +697,20 @@ void makeErrorRecord(uint16 timeOut, uint8 byte) {
 // Function to get a full data packet from the Tracker.
 int getTrackerData(uint8 idExpected) {
     int rc = 0;
+    uint8 timeOut = 0;
     uint32 startTime = time();
-    uint8 len = tkr_getByte(startTime, 1);
-    uint8 IDcode = tkr_getByte(startTime, 2);
+    uint16 ret = tkr_getByte(startTime, 1);
+    if ((ret & 0xFF00) != 0) {
+        timeOut = 0xAF;
+        makeErrorRecord(timeOut, 10);
+    }
+    uint8 len = (uint8)ret;
+    ret = tkr_getByte(startTime, 2);
+    if ((ret & 0xFF00) != 0) {
+        timeOut = 0xBF;
+        makeErrorRecord(timeOut, 11);
+    }
+    uint8 IDcode = (uint8)ret;
     if (IDcode != idExpected) {
         if (idExpected != 0) {
             addErrorOnce(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
@@ -730,10 +747,20 @@ int getTrackerData(uint8 idExpected) {
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             return 55;
         }
-        uint16 trgCnt = ((uint16)tkr_getByte(startTime, 3) & 0x00FF) << 8;
-        trgCnt = trgCnt | ((uint16)tkr_getByte(startTime, 4) & 0x00FF);
-        uint8 cmdCnt = tkr_getByte(startTime, 5);
-        uint8 nBoards = tkr_getByte(startTime, 6);
+        uint16 trgCnt = (tkr_getByte(startTime, 3) & 0x00FF) << 8;
+        trgCnt = trgCnt | (tkr_getByte(startTime, 4) & 0x00FF);
+        ret = tkr_getByte(startTime, 5);
+        if ((ret & 0xFF00) != 0) {
+            timeOut = 0xCF;
+            makeErrorRecord(timeOut, 12);
+        }
+        uint8 cmdCnt = (uint8)ret;
+        ret = tkr_getByte(startTime, 6);
+        if ((ret & 0xFF00) != 0) {
+            timeOut = 0xDF;
+            makeErrorRecord(timeOut, 13);
+        }
+        uint8 nBoards = (uint8)ret;
         uint8 trgPtr = nBoards & 0xC0;
         nBoards = nBoards & 0x3F;
         if (nBoards != numTkrBrds) {
@@ -742,13 +769,12 @@ int getTrackerData(uint8 idExpected) {
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             return 56;
         }
-        uint8 timeOut = 0;
         tkrData.triggerCount = trgCnt;
         tkrData.cmdCount = cmdCnt;
         tkrData.trgPattern = trgPtr;
         tkrData.nTkrBoards = nBoards;
         for (uint8 brd=0; brd < nBoards; ++brd) {
-            uint16 ret = tkr_getByte(startTime, 7);  // Length of the hit list, in bytes
+            ret = tkr_getByte(startTime, 7);  // Length of the hit list, in bytes
             if ((ret & 0xFF00) != 0) {
                 timeOut = (brd | 0x10);
                 makeErrorRecord(timeOut, 0);
@@ -2312,6 +2338,7 @@ void makeEvent() {
                 }
         }
     }
+    uint8 lastEvt = 0xFF;
     for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
         // Min. # bytes needed: board address, hitlist length, hitlist, 4-byte trailer
         if (nDataReady >= MAX_DATA_OUT - (5 + tkrData.boardHits[brd].nBytes)) {
@@ -2334,13 +2361,36 @@ void makeEvent() {
             break;  // We're really out of space. The event will be truncated.
         }
 
-        nChipsHit[brd] += (tkrData.boardHits[brd].hitList[3])>>4;  // Adding the number of chips with hits
         dataOut[nDataReady++] = tkrData.boardHits[brd].nBytes;
         for (int b=0; b<tkrData.boardHits[brd].nBytes; ++b) {
             dataOut[nDataReady++] = tkrData.boardHits[brd].hitList[b];
         }
         tkrData.boardHits[brd].nBytes = 0;
         tkrData.boardHits[brd].nBytes = 0;  // Zero this out to facilitate debugging
+        // Some data integrity checks
+        uint8 evt = (tkrData.boardHits[brd].hitList[2])>>1;
+        if (lastEvt != 0xFF) {
+            if (evt != lastEvt) {
+                addErrorOnce(TKR_TAG_EVT_MISMATCH, evt, brd);
+            }
+        }
+        lastEvt = evt;
+        uint8 err = tkrData.boardHits[brd].hitList[2] & 0x01;
+        if (err) {
+            addErrorOnce(ERR_FPGA_ASIC_HEAD, (uint8)cntGO, brd);
+        } 
+        uint8 nChips = (tkrData.boardHits[brd].hitList[3])>>4;
+        nChipsHit[brd] += nChips;  // Adding the number of chips with hits
+        if (nChips > 0) {
+            uint8 chipErr = tkrData.boardHits[brd].hitList[4] & 0x08;
+            if (chipErr) {
+                addErrorOnce(ERR_TKR_ASIC, (uint8)cntGO, brd);
+            }
+            uint8 parityErr = tkrData.boardHits[brd].hitList[4] & 0x04;
+            if (parityErr) {
+                addError(ERR_ASIC_PARITY, (uint8)cntGO, brd);
+            }
+        }
     }
     tkrData.nTkrBoards = 0;  // Zero this out to facilitate debugging
     
