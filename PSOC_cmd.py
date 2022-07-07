@@ -4,6 +4,7 @@ import binascii
 from bitstring import BitArray
 import math
 import numpy as np
+import random
 
 # Address = 8 for the event PSOC, 10 for the main PSOC
 addrMain = 10
@@ -1179,7 +1180,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             print("limitedRun: number of header bytes = " + str(nBytes))
             ret = ser.read(1)
             print("return = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex  = " + str(ret))
-            if ret == b'\xDB' or ret == b'\xDD' or ret == '\xDE' or ret == b'\xDF':
+            if ret == b'\xDB' or ret == b'\xDD' or ret == b'\xDE' or ret == b'\xDF':
                 ret = ser.read(1)
                 if ret != b'\x00': print("limitedRun: invalid command data bytes " + str(ret) + " received for EOR header")
                 print("limitedRun: dumping the bytes for an extra event trigger that came in while ending the run:")
@@ -1217,7 +1218,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         ret = ser.read(1)
         if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
         byteList.append(ret)
-    #ret = ser.read(1)   # padding byte
+    ret = ser.read(1)   # padding byte
     ret = ser.read(3)
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))         
@@ -1267,14 +1268,15 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     nTkrMasterGo = bytes2int(byteList[26])*256 + bytes2int(byteList[27])
     print("Number of GO signals received by the Tracker master = " + str(nTkrMasterGo))
     for lyr in range(8):
-        nTrigs = bytes2int(byteList[28+8*lyr])*256 + bytes2int(byteList[28+8*lyr+1])
+        nTrigs = bytes2int(byteList[28+9*lyr])*256 + bytes2int(byteList[28+9*lyr+1])
         print("  Layer " + str(lyr) + ": number of triggers received = " + str(nTrigs))
-        nReads = bytes2int(byteList[28+8*lyr+2])*256 + bytes2int(byteList[28+8*lyr+3])
+        nReads = bytes2int(byteList[28+9*lyr+2])*256 + bytes2int(byteList[28+9*lyr+3])
         print("  Layer " + str(lyr) + ": number of read commands received = " + str(nReads))
-        print("  Layer " + str(lyr) + ": number of missed triggers = " + str(bytes2int(byteList[28+8*lyr+4])))
-        print("  Layer " + str(lyr) + ": number of reads with no trigger = " + str(bytes2int(byteList[28+8*lyr+5])))
-        print("  Layer " + str(lyr) + ": error codes = " + str(byteList[28+8*lyr+6].hex()))
-        print("  Layer " + str(lyr) + ": ASIC error codes = " + str(byteList[28+8*lyr+7].hex()))
+        print("  Layer " + str(lyr) + ": number of missed triggers = " + str(bytes2int(byteList[28+9*lyr+4])))
+        print("  Layer " + str(lyr) + ": number of reads with no trigger = " + str(bytes2int(byteList[28+9*lyr+5])))
+        print("  Layer " + str(lyr) + ": error codes = " + str(byteList[28+9*lyr+6].hex()))
+        print("  Layer " + str(lyr) + ": ASIC error codes = " + str(byteList[28+9*lyr+7].hex()))
+        print("  Layer " + str(lyr) + ": number of timeouts in event reading state machine = " + str(byteList[28+9*lyr+8].hex()))
     if (cntGo+cntGo1 == 0):
         live = 0.
     else:
@@ -2099,9 +2101,18 @@ def getRunCounters():
     time.sleep(0.1)
     command,cmdDataBytes,dataBytes = getData(addrEvnt)
     print("getRunCounters: Global command count = " + str(bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])))
-    print("getRunCounters: Command count = " + str(bytes2int(dataBytes[2])*256 + bytes2int(dataBytes[3])))
-    print("getRunCounters: Number of command timeouts = " + str(bytes2int(dataBytes[4])))
-    print("getRunCounters: Number of Tracker resets = " + str(bytes2int(dataBytes[5])))
+    print("                Command count = " + str(bytes2int(dataBytes[2])*256 + bytes2int(dataBytes[3])))
+    print("                Number of command timeouts = " + str(bytes2int(dataBytes[4])))
+    print("                Number of Tracker resets = " + str(bytes2int(dataBytes[5])))
+    print("                Number of events with ASIC error flag set = " + str(bytes2int(dataBytes[6])))
+    print("                Number of events with ASIC parity errors = " + str(bytes2int(dataBytes[7])))
+    print("                Number of bad ASIC headers = " + str(bytes2int(dataBytes[8])))
+    print("                Number of bad ASIC clusters = " + str(bytes2int(dataBytes[9])))
+    print("                Number of bad tracker CRC = " + str(bytes2int(dataBytes[10])))
+    print("                Number of bad commands = " + str(bytes2int(dataBytes[11])))
+    print("                Number of tracker chips with > 10 clusters = " + str(bytes2int(dataBytes[12])))
+    print("                Number of tracker hit-list overruns while parsing = " + str(bytes2int(dataBytes[13])))
+    print("                Number of tracker tag mismatches = " + str(bytes2int(dataBytes[14])))
 
 def tkrGetCodeVersion(FPGA):
     address = addrEvnt
@@ -2302,7 +2313,42 @@ def tkrSetTriggerMask(FPGA, chip, sense, list):
     if (str(binascii.hexlify(echo)) != "b'14'"):
         print("tkrSetTriggerMask: incorrect Tracker echo received (" + str(binascii.hexlify(echo)) + "), should be b'14'")
 
-def tkrGetCalMask(FPGA, chip):
+def tkrRandomCalMask(FPGA, chip):
+    address = addrEvnt
+    cmdHeader = mkCmdHdr(12, 0x10, address)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(FPGA, address, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0x15, address, 2)
+    ser.write(data2)
+    data3 = mkDataByte(9, address, 3)
+    ser.write(data3)
+    data4 = mkDataByte(chip, address, 4)
+    #print("data4= " + str(data4))
+    ser.write(data4)
+    data5 = mkDataByte(random.randint(0,255), address, 5)
+    ser.write(data5)
+    #print("data5= " + str(data5))
+    data6 = mkDataByte(random.randint(0,255), address, 6)
+    ser.write(data6)
+    data7 = mkDataByte(random.randint(0,255), address, 7)
+    ser.write(data7)
+    data8 = mkDataByte(random.randint(0,255), address, 8)
+    ser.write(data8)
+    data9 = mkDataByte(random.randint(0,255), address, 9)
+    ser.write(data9)
+    data10 = mkDataByte(random.randint(0,255), address, 10)
+    ser.write(data10)
+    data11 = mkDataByte(random.randint(0,255), address, 11)
+    ser.write(data11)
+    data12 = mkDataByte(random.randint(0,255), address, 12)
+    ser.write(data12)
+    time.sleep(0.1)
+    echo = getTkrEcho()
+    if (str(binascii.hexlify(echo)) != "b'15'"):
+        print("tkrRandomCalMask: incorrect Tracker echo received (" + str(binascii.hexlify(echo)) + "), should be b'15'")
+
+def tkrGetCalMask(FPGA, chip, verbose = True):
     if chip > 11: 
         print("tkrGetCalMask: the chip number " + str(chip) + " is out of range")
         return
@@ -2326,7 +2372,7 @@ def tkrGetCalMask(FPGA, chip):
         return
     stuff = getBinaryString(byteList[1:10])
     if stuff[1:4] != "110": print("tkrGetCalMask: wrong register ID " + stuff[1:4])
-    print("Calibration mask for chip " + str(chip) + " of board " + str(FPGA) + ": " + stuff[5:69])
+    if verbose: print("Calibration mask for chip " + str(chip) + " of board " + str(FPGA) + ": " + stuff[5:69])
     return stuff[5:69]
 
 def tkrGetDataMask(FPGA, chip):
