@@ -55,6 +55,7 @@
  * V25.0:  Added lots of error checking on tracker hit lists, and turned it on by default
  * V25.1:  Revised the error record and added a couple more counters
  * V25.2:  Retry command to tracker if nothing at all comes back
+ * V26.0:  Changed GO1 to be always enabled when GOlatch is low.  Livetime in housekeeping now resets each time.
  * ========================================
  */
 #include "project.h"
@@ -63,8 +64,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define MAJOR_VERSION 25
-#define MINOR_VERSION 2
+#define MAJOR_VERSION 26
+#define MINOR_VERSION 0
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -178,7 +179,7 @@
 #define TKR_DATA_READY 0x59
 #define TKR_DATA_NOT_READY 0x4E
 #define NUM_CMDS_IN_RUN 11
-#define MAX_CMD_TRY 5
+#define MAX_CMD_TRY 3
 
 // Error codes
 #define ERR_DAC_LOAD 1u
@@ -508,6 +509,7 @@ volatile uint32 ch5Count;
 volatile uint32 cntGO;
 volatile uint32 cntGO1;
 volatile uint32 cntBusy;
+uint32 lastGOcnt, lastGO1cnt;      // counts at the previous housekeeping
 uint32 nTkrReadReady;
 uint16 nTkrReadNotReady;
 uint16 runNumber;
@@ -1225,13 +1227,22 @@ void makeHouseKeeping() {
     dataOut[75] = nTOFBmaxH;
     float busyFraction = ((float)cntBusy)/((float)cntGO);
     dataOut[76] = (uint8)(100.*busyFraction);
-    float liveFraction = ((float)(cntGO))/((float)(cntGO+cntGO1));
+    uint32 nEvents = cntGO - lastGOcnt;
+    uint32 nMissed = cntGO1 - lastGO1cnt;
+    float liveFraction;
+    if (nEvents + nMissed > 0) {
+        liveFraction = ((float)(nEvents))/((float)(nEvents + nMissed));
+    } else {
+        liveFraction = 0.;
+    }
     dataOut[77] = (uint8)(100.*liveFraction);
     nEvtH = 0;
     nTOFAavgH = 0;
     nTOFBavgH = 0;
     nTOFAmaxH = 0;
     nTOFBmaxH = 0;
+    lastGOcnt = cntGO;
+    lastGO1cnt = cntGO1;
     nDataReady = HOUSESIZE;
 }
 
@@ -1571,6 +1582,8 @@ void logicReset() {
     Pin_LED_TKR_Write(0);
     Pin_LED_DAT_Write(0);
     cntGO = 0;
+    lastGOcnt = 0;
+    lastGO1cnt = 0;
     cntBusy = 0;
     cntGO1 = 0;
     nTkrReadReady = 0;
@@ -2188,7 +2201,7 @@ void makeEvent() {
         int InterruptState = CyEnterCriticalSection(); 
         while (!(Status_Reg_M_Read() & 0x08)) {   // Wait here for the done signal
             if (time() - t0 > 10 || t0 > time()) {
-                addError(ERR_PMT_DAQ_TIMEOUT, (uint8)cntGO, (uint8)(cntGO >> 8));
+                addError(ERR_PMT_DAQ_TIMEOUT, (uint8)(cntGO>>8), (uint8)(cntGO));
                 break;
             }
         }
@@ -3464,6 +3477,8 @@ void interpretCommand(uint8 tofConfig[]) {
                 readTracker = (cmdData[2] == 1);
                 debugTOF = (cmdData[3] == 1);
                 cntGO = 0;
+                lastGOcnt = 0;
+                lastGO1cnt = 0;
                 cntBusy = 0;
                 nTkrReadReady = 0;
                 nTkrReadNotReady = 0;
@@ -3957,6 +3972,10 @@ int main(void)
     nBadClust = 0;
     nTkrOverFlow = 0;
     nTkrTagMismatch = 0;
+    cntGO = 0;
+    cntGO1 = 0;
+    lastGOcnt = 0;
+    lastGO1cnt = 0;
     
     uint8 *buffer;        // Buffer for incoming commands
     uint8 USBUART_buf[BUFFER_LEN];

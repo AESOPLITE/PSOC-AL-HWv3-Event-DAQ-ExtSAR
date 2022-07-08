@@ -60,16 +60,15 @@ parameter [2:0] Down = 3'b100;  // Wait for the trigger OR to go back to zero
 parameter [2:0] Fini = 3'b101;  // Send out the signal to reset peak detectors, holding it long enough for full reset
 
 reg [2:0] State, NextState;
-reg Golatch;
+reg GOlatch;
 
 assign RstPk = (State == Fini);
 assign GOen = (State == Wait || State == Dlay);
-assign GO1en = (State == Wait || State == Fini);
+assign GO1en = ~GOlatch;
 
 // Note: the external Count7 time must be longer than the conversion time.
 //       It also determines the time waiting for the peak detector to settle 
 //       and the time needed to fully reset the peak detectors.
-reg GOlatch;
 always @ (State or GOlatch or ChOR or TC) begin
     case (State) 
       Wait: begin
@@ -105,7 +104,7 @@ always @ (State or GOlatch or ChOR or TC) begin
                 NextState = Down;
                 ConvStb2 = 1'b1;
                 RstCt2 = 1'b1;
-                Done2 = 1'b1;        // The DONE signal is checked by the CPU during readout
+                Done2 = 1'b1;        // The DONE signal is checked by the CPU during readout;
             end
       Down: begin
                 if (!ChOR) NextState = Fini;   // Wait here if the Channel-OR is still high
@@ -133,7 +132,6 @@ end
 always @ (posedge CLK) begin
     if (RST) begin
         State <= Wait;
-        GOlatch <= 1'b0;
     end else begin
         State <= NextState;
         if (State == Fini) begin  // Capture the GO signal if and when it arrives.
