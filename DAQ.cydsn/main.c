@@ -54,6 +54,7 @@
  * V24.22: Check for some error bits in the tracker hit lists
  * V25.0:  Added lots of error checking on tracker hit lists, and turned it on by default
  * V25.1:  Revised the error record and added a couple more counters
+ * V25.2:  Retry command to tracker if nothing at all comes back
  * ========================================
  */
 #include "project.h"
@@ -63,7 +64,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 25
-#define MINOR_VERSION 1
+#define MINOR_VERSION 2
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -177,6 +178,7 @@
 #define TKR_DATA_READY 0x59
 #define TKR_DATA_NOT_READY 0x4E
 #define NUM_CMDS_IN_RUN 11
+#define MAX_CMD_TRY 5
 
 // Error codes
 #define ERR_DAC_LOAD 1u
@@ -289,9 +291,9 @@ uint8 nTkrTimeOut;
 uint32 nChipsHit[MAX_TKR_BOARDS];
 uint32 nTkrTrg1, nTkrTrg2;
 uint16 nIgnoredCmd;
-uint32 cntSeconds;
+volatile uint32 cntSeconds;
 uint8 houseKeepPeriod;
-bool houseKeepingDue, tkrHouseKeepingDue;
+volatile bool houseKeepingDue, tkrHouseKeepingDue;
 uint16 tkrTemp0 = 0;
 uint16 tkrTemp7 = 0;
 uint32 nEvtH = 0;
@@ -689,6 +691,7 @@ bool isTriggerEnabled() {
 }
 
 // Function to get a full data packet from the Tracker.
+// Note that a negative return code indicates a time-out
 int getTrackerData(uint8 idExpected) {
     int rc = 0;
     uint32 startTime = time();
@@ -922,7 +925,7 @@ void clearTkrFIFO() {
 }
 
 // Send a command to the tracker via the UART
-uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rtnType) {
+int sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rtnType) {
     if (!readTracker) return 0;
     tkrLED(true);
     tkrCmdCode = code;
@@ -957,7 +960,7 @@ uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint 
             break;
         }
     }        
-    uint8 rc = 0;
+    int rc = 0;
     if (tkrCmdCode == 0x67 || tkrCmdCode == 0x6C) {
         tkrLED(false);
         return rc;    // These commands have no echo or data to return
@@ -968,9 +971,14 @@ uint8 sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint 
     } else if (tkrCmdCode == 0x46) {
         getTKRi2cData();
     } else {
-        rc = getTrackerData(rtnType);
+        for (int itr=0; itr<MAX_CMD_TRY; ++itr) {
+            rc = getTrackerData(rtnType);
+            if (rc != -1) break;  // Try again if there is a time-out on the 1st byte
+        }
         if (rc != 0) {
-            addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
+            uint8 rc8;
+            if (rc < 0) rc8 = rc + 255; else rc8 = rc;
+            addError(ERR_GET_TKR_DATA, rc8, tkrCmdCode);
         }
     }
     tkrLED(false);
@@ -2216,10 +2224,11 @@ void makeEvent() {
     // This check generally works the first try and can maybe be removed in the long run.
     uint8 tkrDataReady = 0;
     uint8 nTry =0;
+    int rc;
     if (readTracker) {
         while (tkrDataReady != TKR_DATA_READY) {
             tkrCmdCode = 0x57;   // Command to check whether Tkr data are ready
-            uint8 rc = sendTrackerCmd(0x00, tkrCmdCode, 0x00, cmdData, TKR_HOUSE_DATA);
+            rc = sendTrackerCmd(0x00, tkrCmdCode, 0x00, cmdData, TKR_HOUSE_DATA);
             if (rc == 0 && nTkrHouseKeeping > 0) {
                 nTkrHouseKeeping = 0;    // Keep the housekeeping data from being sent out to the world
                 if (tkrHouseKeeping[0] == TKR_DATA_READY) {
@@ -2240,13 +2249,12 @@ void makeEvent() {
             }
             CyDelayUs(5);  // A short delay before checking again
         }        
-        uint8 rc = 0xDF;
         if (tkrDataReady == TKR_DATA_READY) nTkrReadReady++;
         else nTkrReadNotReady++;
         
         // Start the read of the Tracker data by sending a read-event command, ready or not. . .
         cmdData[0] = 0x00;
-        rc = sendTrackerCmd(0x00, 0x01, 0x01, cmdData, TKR_EVT_DATA);    
+        rc = sendTrackerCmd(0x00, 0x01, 0x01, cmdData, TKR_EVT_DATA); 
         if (rc != 0) {
             addErrorOnce(ERR_GET_TKR_EVENT, rc, byte32(cntGO, 0));
             UART_TKR_ClearTxBuffer();
