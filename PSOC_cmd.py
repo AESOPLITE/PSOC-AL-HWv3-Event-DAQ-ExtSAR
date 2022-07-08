@@ -825,6 +825,17 @@ def getTKRlayers():
     for lyr in range(8):
         print("   Layer " + str(lyr) + " is board " + str(bytes2int(byteList[lyr])))
 
+def getTkrASICerrors():
+    print("getTkrASICerrors: list of all DAQ error codes from ASIC configuration registers:")
+    cmdHeader = mkCmdHdr(0, 0x61, addrEvnt)
+    ser.write(cmdHeader)
+    time.sleep(0.2)
+    command,cmdDataBytes,byteList = getData(addrEvnt)
+    for lyr in range(8):
+        print("   Layer " + str(lyr) + " chips 0-3: " + str(byteList[3*lyr]))
+        print("   Layer " + str(lyr) + " chips 4-7: " + str(byteList[3*lyr+1]))
+        print("   Layer " + str(lyr) + " chips 8-11: " + str(byteList[3*lyr+2]))
+
 def printHousekeeping(dataList, byteList):
     run = dataList[4]*256 + dataList[5]
     print("Housekeeping packet for run " + str(run))
@@ -1187,6 +1198,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
                 for i in range(nBytes):
                     ret = ser.read(1);      
                     if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex  = " + str(ret))
+                nPadding = 3 - nBytes%3
+                if nPadding == 3: nPadding = 0
+                for i in range(nPadding): ser.read(1)
                 ret = ser.read(3)
                 if ret != b'\xFF\x00\xFF':
                     print("limitedRun: invalid trailer returned: " + str(ret))     
@@ -1201,7 +1215,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
                 byteList.append(ret)
             if (byteList[0] == b'\x45' and  byteList[1] == b'\x52' and byteList[2] == b'\x52'):
                 print("limitedRun: printing out an error record:")
-                for i in range(2,nBytes):
+                for i in range(3,nBytes):
                     ret = ser.read(1)
                     if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
                 ret = ser.read(1)   # padding byte
@@ -2113,6 +2127,9 @@ def getRunCounters():
     print("                Number of tracker chips with > 10 clusters = " + str(bytes2int(dataBytes[12])))
     print("                Number of tracker hit-list overruns while parsing = " + str(bytes2int(dataBytes[13])))
     print("                Number of tracker tag mismatches = " + str(bytes2int(dataBytes[14])))
+    print("                Number of events too big to output = " + str(bytes2int(dataBytes[15])))
+    print("                Number of tracker data errors = " + str(bytes2int(dataBytes[16])))
+    print("                Number of tracker records with bad N-Data = " + str(bytes2int(dataBytes[17])))
 
 def tkrGetCodeVersion(FPGA):
     address = addrEvnt
