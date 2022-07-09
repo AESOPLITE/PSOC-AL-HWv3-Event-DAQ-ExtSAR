@@ -2130,6 +2130,8 @@ def getRunCounters():
     print("                Number of events too big to output = " + str(bytes2int(dataBytes[15])))
     print("                Number of tracker data errors = " + str(bytes2int(dataBytes[16])))
     print("                Number of tracker records with bad N-Data = " + str(bytes2int(dataBytes[17])))
+    numTkrTimeOuts = bytes2int(dataBytes[18])*256 + bytes2int(dataBytes[19])
+    print("                Number of tracker time-outs = " + str(numTkrTimeOuts))
 
 def tkrGetCodeVersion(FPGA):
     address = addrEvnt

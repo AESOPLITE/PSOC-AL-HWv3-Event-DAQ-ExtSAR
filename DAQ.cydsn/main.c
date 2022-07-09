@@ -56,6 +56,7 @@
  * V25.1:  Revised the error record and added a couple more counters
  * V25.2:  Retry command to tracker if nothing at all comes back
  * V26.0:  Changed GO1 to be always enabled when GOlatch is low.  Livetime in housekeeping now resets each time.
+ * V26.1:  Modified trigger mask on board C. Sync the 200 Hz clock to the bus clock.
  * ========================================
  */
 #include "project.h"
@@ -65,7 +66,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 26
-#define MINOR_VERSION 0
+#define MINOR_VERSION 1
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -288,7 +289,7 @@ uint8 nTkrTagMismatch;
 uint16 lastTkrCmdCount;
 uint8 nTkrDatErr;
 uint8 nTkrBadNdata;
-uint8 nTkrTimeOut;
+uint32 nTkrTimeOut, lastNTkrTimeOut;
 uint32 nChipsHit[MAX_TKR_BOARDS];
 uint32 nTkrTrg1, nTkrTrg2;
 uint16 nIgnoredCmd;
@@ -629,7 +630,7 @@ uint16 tkr_getByte(uint32 startTime, uint8 flag) {
         uint32 timeElapsed = time() - startTime;
         if (timeElapsed > TKR_READ_TIMEOUT || (startTime > time() && time() > TKR_READ_TIMEOUT)) {
             addError(ERR_TKR_READ_TIMEOUT, tkrCmdCode, flag);
-            if (nTkrTimeOut < 0xFF) nTkrTimeOut++;
+            nTkrTimeOut++;
             return 0xFF00 | tkrBuf[((tkrWritePtr - 1) % MAX_TKR)]; // On timeout, return the last valid byte
         }
     }
@@ -1191,7 +1192,7 @@ void makeHouseKeeping() {
         dataOut[39] = 0;
     }
     dataOut[40] = nTkrDatErr;
-    dataOut[41] = nTkrTimeOut;
+    dataOut[41] = (uint8)(nTkrTimeOut - lastNTkrTimeOut);
     for (int i=0; i<MAX_TKR_BOARDS; ++i) {
         if (cntGO > 0) {
             dataOut[42+i] = (uint8)(10*nChipsHit[i]/cntGO);
@@ -1243,6 +1244,7 @@ void makeHouseKeeping() {
     nTOFBmaxH = 0;
     lastGOcnt = cntGO;
     lastGO1cnt = cntGO1;
+    lastNTkrTimeOut = nTkrTimeOut;
     nDataReady = HOUSESIZE;
 }
 
@@ -1833,10 +1835,10 @@ int resetAllTrackerLogic() {
         if (rc != 0) return rc;
     }
     // Reset the ASICs only if there are non-parity errors flagged in the configuration register, or if
-    // the configuration register read failed.
+    // the configuration register read failed, or there are many recent time-outs (stuck).
     uint32 allErrCodes[MAX_TKR_BOARDS];
     bool bad = getTkrASICerrors(doDiagnostics, allErrCodes, &rc);
-    if (bad) {   
+    if (bad || (nTkrTimeOut - lastNTkrTimeOut) > 12) {   
         cmdData[0] = 0x1F;   // All chips selected
         if (rc != 0) {
             tkrCmdCode = 0x05;   // ASIC hard reset
@@ -2522,12 +2524,12 @@ void makeEvent() {
                     }
                     uint8 chipErr = (words[idx] & 0x20)>>5;           
                     if (chipErr) {
-                        addErrorOnce(ERR_TKR_ASIC, (uint8)cntGO, brd);
+                        addErrorOnce(ERR_TKR_ASIC, chip, brd);
                         if (nASICerrorEvts < 255) nASICerrorEvts++;
                     }
                     uint8 parityErr = (words[idx] & 0x10)>>4;
                     if (parityErr) {
-                        addErrorOnce(ERR_ASIC_PARITY, (uint8)cntGO, brd);
+                        addErrorOnce(ERR_ASIC_PARITY, chip, brd);
                         if (nASICparityErr < 255) nASICparityErr++;
                     }
                     uint8 chip = (words[idx++] & 0x0F);
@@ -3408,7 +3410,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 nDataReady = 0;
                 break;
             case '\x50':  // Send counter information
-                nDataReady = 18;
+                nDataReady = 20;
                 dataOut[0] = byte16(cmdCountGLB, 0); 
                 dataOut[1] = byte16(cmdCountGLB, 1); 
                 dataOut[2] = byte16(cmdCount, 0);
@@ -3427,6 +3429,8 @@ void interpretCommand(uint8 tofConfig[]) {
                 dataOut[15] = nEvtTooBig;
                 dataOut[16] = nTkrDatErr;
                 dataOut[17] = nTkrBadNdata;
+                dataOut[18] = byte32(nTkrTimeOut, 2);
+                dataOut[19] = byte32(nTkrTimeOut, 3);
                 break;
             case '\x3C':  // Start a run
                 InterruptState = CyEnterCriticalSection();
@@ -3451,6 +3455,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 nTkrTrg1 = 0;
                 nTkrTrg2 = 0;
                 nTkrTimeOut = 0;
+                lastNTkrTimeOut = 0;
                 nTkrDatErr = 0;
                 nTkrBadNdata = 0;
                 nIgnoredCmd = 0;
@@ -3913,6 +3918,8 @@ void tofDMAsetup() {
 int main(void)
 {     
     // Load the default Tracker configuration from EEPROM
+    // A  B  C  D  E  F  G  H  I
+    // 0  1  2  3  4  5  6  7  8
     EEPROM_1_Start();
     boardMAP[0] = 2;   // C
     boardMAP[1] = 7;   // H
@@ -3922,6 +3929,7 @@ int main(void)
     boardMAP[5] = 5;   // F
     boardMAP[6] = 8;   // I
     boardMAP[7] = 3;   // D
+    // The spare board is G
     readEEprom();
     
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  
@@ -3962,6 +3970,7 @@ int main(void)
     nTkrTrg1 = 0;
     nTkrTrg2 = 0;
     nTkrTimeOut = 0;
+    lastNTkrTimeOut = 0;
     nTkrDatErr = 0;
     nTkrBadNdata = 0;
     nBadCmd = 0;
