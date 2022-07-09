@@ -56,7 +56,7 @@
  * V25.1:  Revised the error record and added a couple more counters
  * V25.2:  Retry command to tracker if nothing at all comes back
  * V26.0:  Changed GO1 to be always enabled when GOlatch is low.  Livetime in housekeeping now resets each time.
- * V26.1:  Modified trigger mask on board C. Sync the 200 Hz clock to the bus clock.
+ * V26.1:  Modified trigger mask on board I. Sync the 200 Hz clock to the bus clock.
  * ========================================
  */
 #include "project.h"
@@ -323,9 +323,10 @@ bool doDiagnostics;                  // Whether to check the Tracker hitlist CRC
 uint16 cmdCountGLB = 0;           // Count of all command packets received
 uint16 cmdCount = 0;              // Count of all event PSOC commands received
 uint8 nCmdTimeOut = 0;            // Count the number of command timeouts
-uint8 numTkrResets = 0;
+uint32 numTkrResets = 0;
 uint32 readTimeAvg = 0;
 uint32 nReadAvg = 0;
+uint32 lastNumTkrResets = 0;
 uint8 nASICparityErr = 0;
 uint8 nASICerrorEvts = 0;
 
@@ -1245,6 +1246,7 @@ void makeHouseKeeping() {
     lastGOcnt = cntGO;
     lastGO1cnt = cntGO1;
     lastNTkrTimeOut = nTkrTimeOut;
+    lastNumTkrResets = numTkrResets;
     nDataReady = HOUSESIZE;
 }
 
@@ -1835,10 +1837,10 @@ int resetAllTrackerLogic() {
         if (rc != 0) return rc;
     }
     // Reset the ASICs only if there are non-parity errors flagged in the configuration register, or if
-    // the configuration register read failed, or there are many recent time-outs (stuck).
+    // the configuration register read failed, or there are many recent time-outs or resets (stuck).
     uint32 allErrCodes[MAX_TKR_BOARDS];
     bool bad = getTkrASICerrors(doDiagnostics, allErrCodes, &rc);
-    if (bad || (nTkrTimeOut - lastNTkrTimeOut) > 12) {   
+    if (bad || (nTkrTimeOut - lastNTkrTimeOut) > 12 || (numTkrResets - lastNumTkrResets) > 2) {   
         cmdData[0] = 0x1F;   // All chips selected
         if (rc != 0) {
             tkrCmdCode = 0x05;   // ASIC hard reset
@@ -2277,7 +2279,7 @@ void makeEvent() {
             int rc2 = resetAllTrackerLogic();
             if (rc2 != 0) addError(ERR_NO_TRK_RESET, rc2, rc); 
             makeDummyTkrEvent(0, 0, 0, 6);
-            if (numTkrResets < 255) numTkrResets++;
+            numTkrResets++;
         }
     } else {
         makeDummyTkrEvent(0, 0, 0, 6);
@@ -3416,7 +3418,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 dataOut[2] = byte16(cmdCount, 0);
                 dataOut[3] = byte16(cmdCount, 1);
                 dataOut[4] = nCmdTimeOut;
-                dataOut[5] = numTkrResets;
+                dataOut[5] = (uint8)numTkrResets;
                 dataOut[6] = nASICerrorEvts;
                 dataOut[7] = nASICparityErr;
                 dataOut[8] = nBadASIChead;
@@ -3488,6 +3490,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 nTkrReadReady = 0;
                 nTkrReadNotReady = 0;
                 numTkrResets = 0;
+                lastNumTkrResets = 0;
                 nASICerrorEvts = 0;
                 nASICparityErr = 0;
                 // Reset Tracker counters and enable the tracker trigger
@@ -4212,6 +4215,7 @@ int main(void)
     int dCnt = 0;                  // To count the number of data bytes received
     nCmdTimeOut = 0;
     numTkrResets = 0;
+    lastNumTkrResets = 0;
     const uint8 eventPSOCaddress = '\x08';
     
     // Set up the default trigger configuration
