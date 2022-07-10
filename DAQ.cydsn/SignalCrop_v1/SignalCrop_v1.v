@@ -10,10 +10,11 @@
 // CONFIDENTIAL AND PROPRIETARY INFORMATION
 // WHICH IS THE PROPERTY OF UCSC.
 //
+// Set default coincidence time to 6 counts (0.5 us), longer than the 330ns peaking time. 7/9/22  RJ
 // ========================================
 `include "cypress.v"
 //`#end` -- edit above this line, do not edit this line
-// Generated on 04/03/2022 at 17:25
+// Generated on 07/09/2022 at 17:35
 // Component: SignalCrop_v1
 module SignalCrop_v1 (
 	output  RstCtr,
@@ -23,7 +24,7 @@ module SignalCrop_v1 (
 	input   Reset,
 	input   tc
 );
-	parameter CoincWindow = 14;
+	parameter CoincWindow = 6;
 
 //`#start body` -- edit after this line, do not edit this line
 
@@ -37,7 +38,7 @@ reg [1:0] State, NextState;
 reg Y2, RstCtr2;
 assign Y = Y2;
 assign RstCtr = RstCtr2;
-reg [3:0] ctr;
+reg [2:0] ctr;
 always @ (State or A or tc) begin
     case (State) 
 	    Wait: begin

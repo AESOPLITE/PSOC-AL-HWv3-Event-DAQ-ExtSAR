@@ -16,7 +16,7 @@
 // ========================================
 `include "cypress.v"
 //`#end` -- edit above this line, do not edit this line
-// Generated on 09/29/2020 at 22:26
+// Generated on 07/09/2022 at 18:10
 // Component: SignalPrep_v2
 module SignalPrep_v2 (
 	output  Y,
@@ -24,7 +24,7 @@ module SignalPrep_v2 (
 	input   Clk,
 	input   Reset
 );
-	parameter pulseWidth = 7;
+	parameter pulseWidth = 15;
 
 //`#start body` -- edit after this line, do not edit this line
 

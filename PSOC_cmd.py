@@ -378,15 +378,17 @@ def tkrSetCRCcheck(choice):
     ser.write(data1)
     print("tkrSetCRCcheck: will CRC checks be made on Tracker hit lists?: " + choice)
     
-def setSettlingWindow(count):
+def setSettlingWindow(chan, count):
     if count > 126:
         print("setSettlingWindow: input count of " + str(count) + " is too large. Must be < 127")
         return
-    cmdHeader = mkCmdHdr(1, 0x3A, addrEvnt)
+    cmdHeader = mkCmdHdr(2, 0x3A, addrEvnt)
     ser.write(cmdHeader)
-    data1 = mkDataByte(count, addrEvnt, 1)
+    data1 = mkDataByte(chan, addrEvnt, 1)
     ser.write(data1)
-    print("setSettlingWindow: setting the comparator settling time window to " + str(count) + " counts")
+    data2 = mkDataByte(count, addrEvnt, 2)
+    ser.write(data2)
+    print("setSettlingWindow: setting the comparator settling time window for channel " + str(chan) + " to " + str(count) + " counts")
     
 def setPeakDetResetWait(count):
     if count > 126:
@@ -2132,7 +2134,19 @@ def getRunCounters():
     print("                Number of tracker records with bad N-Data = " + str(bytes2int(dataBytes[17])))
     numTkrTimeOuts = bytes2int(dataBytes[18])*256 + bytes2int(dataBytes[19])
     print("                Number of tracker time-outs = " + str(numTkrTimeOuts))
-
+    nTkTrg1 = bytes2int(dataBytes[20])*16777216+bytes2int(dataBytes[21])*65536+bytes2int(dataBytes[22])*256+bytes2int(dataBytes[23])
+    nTkTrg2 = bytes2int(dataBytes[24])*16777216+bytes2int(dataBytes[25])*65536+bytes2int(dataBytes[26])*256+bytes2int(dataBytes[27])
+    nPMTonly = bytes2int(dataBytes[28])*16777216+bytes2int(dataBytes[29])*65536+bytes2int(dataBytes[30])*256+bytes2int(dataBytes[31])
+    nTkrOnly = bytes2int(dataBytes[32])*16777216+bytes2int(dataBytes[33])*65536+bytes2int(dataBytes[34])*256+bytes2int(dataBytes[35])
+    nAllTrg = bytes2int(dataBytes[36])*16777216+bytes2int(dataBytes[37])*65536+bytes2int(dataBytes[38])*256+bytes2int(dataBytes[39])
+    nNoCk = bytes2int(dataBytes[40])*16777216+bytes2int(dataBytes[41])*65536+bytes2int(dataBytes[42])*256+bytes2int(dataBytes[43])
+    print("                Number of events with tracker trigger 1 =  " + str(nTkTrg1))
+    print("                Number of events with tracker trigger 2 =  " + str(nTkTrg2))
+    print("                Number of events with only PMT triggers =  " + str(nPMTonly))
+    print("                Number of events with only TKR triggers =  " + str(nTkrOnly))
+    print("                Number of events with all 3 triggers =     " + str(nAllTrg))
+    print("                Number of events with no primary trigger = " + str(nNoCk))
+    
 def tkrGetCodeVersion(FPGA):
     address = addrEvnt
     cmdHeader = mkCmdHdr(3, 0x10, address)

@@ -57,6 +57,8 @@
  * V25.2:  Retry command to tracker if nothing at all comes back
  * V26.0:  Changed GO1 to be always enabled when GOlatch is low.  Livetime in housekeeping now resets each time.
  * V26.1:  Modified trigger mask on board I. Sync the 200 Hz clock to the bus clock.
+ * V26.2:  Make settling window adjustable per counter. Set ADC wait times to 25 counts.
+ *         Set coincidence window to 6 counts (0.5 us). Set the board-I mask back correct.
  * ========================================
  */
 #include "project.h"
@@ -66,7 +68,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 26
-#define MINOR_VERSION 1
+#define MINOR_VERSION 2
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -292,6 +294,10 @@ uint8 nTkrBadNdata;
 uint32 nTkrTimeOut, lastNTkrTimeOut;
 uint32 nChipsHit[MAX_TKR_BOARDS];
 uint32 nTkrTrg1, nTkrTrg2;
+uint32 nNoCK;
+uint32 nAllTrg;
+uint32 nPMTonly;
+uint32 nTkrOnly;
 uint16 nIgnoredCmd;
 volatile uint32 cntSeconds;
 uint8 houseKeepPeriod;
@@ -2178,12 +2184,14 @@ void dataLED(bool on) {
 }
 
 // Set the time delay following the signal edge detector, to prevent retriggering on noise
-void setSettlingWindow(uint8 dt) {
-    //TrigWindow_V1_1_Count7_1_WritePeriod(dt);
-    TrigWindow_V1_2_Count7_1_WritePeriod(dt);
-    TrigWindow_V1_3_Count7_1_WritePeriod(dt);
-    TrigWindow_V1_4_Count7_1_WritePeriod(dt);
-    TrigWindow_V1_5_Count7_1_WritePeriod(dt);
+void setSettlingWindow(uint8 chan, uint8 dt) {
+    switch (chan) {
+        case 0x01: break;    // Guard, not relevant
+        case 0x02: {TrigWindow_V1_2_Count7_1_WritePeriod(dt); break;} // T3
+        case 0x03: {TrigWindow_V1_3_Count7_1_WritePeriod(dt); break;} // T1
+        case 0x04: {TrigWindow_V1_4_Count7_1_WritePeriod(dt); break;} // T4
+        case 0x05: {TrigWindow_V1_5_Count7_1_WritePeriod(dt); break;} // T2
+    }
 }
 
 void makeEvent() {
@@ -2352,6 +2360,10 @@ void makeEvent() {
     
     if (trgStatus & 0x04) nTkrTrg1++;
     if (trgStatus & 0x08) nTkrTrg2++;
+    if ((trgStatus & 0x0F) == 0x01) nPMTonly++;
+    if (!(trgStatus & 0x01)) nNoCK++;
+    if ((trgStatus & 0x03) == 0x03 && (trgStatus & 0x0C)) nAllTrg++;
+    if (!(trgStatus & 0x03)) nTkrOnly++;
     
     // Start the event with a 4-byte header (spells ZERO) in ASCII
     dataOut[0] = 0x5A;
@@ -2836,7 +2848,7 @@ uint8 isAcommand(uint8 cmd) {
         0x4E, 0x4F, 0x51, 0x56, 0x5C, 0x5E, 0x5F, 0x5D, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x60, 0x61};
     static uint8 numData[NUM_COMMANDS] = {0xC2, 1, 0, 3, 1, 1, 0, 0xC3, 3, 3, 0xC5, 3, 1,
         0, 2, 0, 1, 1, 0, 1, 2, 1, 2, 1, 0, 0, 0, 0, 1, 2, 1, 0,
-        2, 1, 1, 0, 0, 4, 0, 1, 1, 0, 10, 0, 0, 1, 0, 0, 1, 1, 1,
+        2, 2, 1, 0, 0, 4, 0, 1, 1, 0, 10, 0, 0, 1, 0, 0, 1, 1, 1,
         1, 1, 0, 1, 1, 0, 0, 0, 2, 0, 8, 0, 1, 1, 0};
     for (int i=0; i<NUM_COMMANDS; ++i) {
         if (validCommands[i] == cmd) {
@@ -3330,7 +3342,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 break;
             case '\x3A':   // Set the settling time allowed for PMT signals
-                setSettlingWindow(cmdData[0]);
+                setSettlingWindow(cmdData[0], cmdData[1]);
                 break;
             case '\x3B':   // Enable or disable the trigger
                 if (cmdData[0] == 1) {
@@ -3412,7 +3424,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 nDataReady = 0;
                 break;
             case '\x50':  // Send counter information
-                nDataReady = 20;
+                nDataReady = 44;
                 dataOut[0] = byte16(cmdCountGLB, 0); 
                 dataOut[1] = byte16(cmdCountGLB, 1); 
                 dataOut[2] = byte16(cmdCount, 0);
@@ -3433,6 +3445,30 @@ void interpretCommand(uint8 tofConfig[]) {
                 dataOut[17] = nTkrBadNdata;
                 dataOut[18] = byte32(nTkrTimeOut, 2);
                 dataOut[19] = byte32(nTkrTimeOut, 3);
+                dataOut[20] = byte32(nTkrTrg1, 0);
+                dataOut[21] = byte32(nTkrTrg1, 1);
+                dataOut[22] = byte32(nTkrTrg1, 2);
+                dataOut[23] = byte32(nTkrTrg1, 3);
+                dataOut[24] = byte32(nTkrTrg2, 0);
+                dataOut[25] = byte32(nTkrTrg2, 1);
+                dataOut[26] = byte32(nTkrTrg2, 2);
+                dataOut[27] = byte32(nTkrTrg2, 3);
+                dataOut[28] = byte32(nPMTonly, 0);
+                dataOut[29] = byte32(nPMTonly, 1);
+                dataOut[30] = byte32(nPMTonly, 2);
+                dataOut[31] = byte32(nPMTonly, 3);
+                dataOut[32] = byte32(nTkrOnly, 0);
+                dataOut[33] = byte32(nTkrOnly, 1);
+                dataOut[34] = byte32(nTkrOnly, 2);
+                dataOut[35] = byte32(nTkrOnly, 3);
+                dataOut[36] = byte32(nAllTrg, 0);
+                dataOut[37] = byte32(nAllTrg, 1);
+                dataOut[38] = byte32(nAllTrg, 2);
+                dataOut[39] = byte32(nAllTrg, 3);
+                dataOut[40] = byte32(nNoCK, 0);
+                dataOut[41] = byte32(nNoCK, 1);
+                dataOut[42] = byte32(nNoCK, 2);
+                dataOut[43] = byte32(nNoCK, 3);
                 break;
             case '\x3C':  // Start a run
                 InterruptState = CyEnterCriticalSection();
@@ -3456,6 +3492,10 @@ void interpretCommand(uint8 tofConfig[]) {
                 for (int i=0; i<MAX_TKR_BOARDS; ++i) nChipsHit[i] = 0;
                 nTkrTrg1 = 0;
                 nTkrTrg2 = 0;
+                nPMTonly = 0;
+                nTkrOnly = 0;
+                nNoCK = 0;
+                nAllTrg = 0;
                 nTkrTimeOut = 0;
                 lastNTkrTimeOut = 0;
                 nTkrDatErr = 0;
@@ -3972,6 +4012,10 @@ int main(void)
     for (int i=0; i<MAX_TKR_BOARDS; ++i) nChipsHit[i] = 0;
     nTkrTrg1 = 0;
     nTkrTrg2 = 0;
+    nPMTonly = 0;
+    nTkrOnly = 0;
+    nNoCK = 0;
+    nAllTrg = 0;
     nTkrTimeOut = 0;
     lastNTkrTimeOut = 0;
     nTkrDatErr = 0;
@@ -4103,7 +4147,7 @@ int main(void)
     // The peak detector output takes about 2us to settle down after its upward swing, so at 24MHz this should be at least 48 ticks to set
     // the time to start digitizing. This also affects the time to wait for the digitizers to finish (about 1 us needed) and the length
     // of time to hold the peak detectors in reset.
-    setPeakDetResetWait(32);
+    setPeakDetResetWait(25);  // Value determined from board V3-A 7/9/2022.
 
     // TOF shift registers
     ShiftReg_A_Start();
@@ -4148,12 +4192,14 @@ int main(void)
     UART_CMD_Start();   // Snail-paced UART for receiving commands from the Main PSOC
 
     // Start counters buried inside of the edge detectors for the trigger inputs
-    //TrigWindow_V1_1_Count7_1_Start();
     TrigWindow_V1_2_Count7_1_Start();
     TrigWindow_V1_3_Count7_1_Start();
     TrigWindow_V1_4_Count7_1_Start();
     TrigWindow_V1_5_Count7_1_Start();
-    setSettlingWindow(24);
+    setSettlingWindow(2, 6);   // Values determined from the oscilloscope using board V3-A
+    setSettlingWindow(3, 12);
+    setSettlingWindow(4, 27);
+    setSettlingWindow(5, 30);
     
     // Start the internal real-time-clock component
     RTC_1_Start();
