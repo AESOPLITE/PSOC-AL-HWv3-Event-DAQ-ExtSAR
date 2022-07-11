@@ -60,6 +60,7 @@
  * V26.2:  Make settling window adjustable per counter. Set ADC wait times to 25 counts.
  *         Set coincidence window to 6 counts (0.5 us). Set the board-I mask back correct.
  * V26.3:  Store in the EOR record the number of bad commands seen by tracker boards
+ * V26.4:  Corrected the default tracker setup after swapping boards G and I
 * ========================================
  */
 #include "project.h"
@@ -69,7 +70,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 26
-#define MINOR_VERSION 3
+#define MINOR_VERSION 4
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -3971,9 +3972,9 @@ int main(void)
     boardMAP[3] = 0;   // A
     boardMAP[4] = 4;   // E
     boardMAP[5] = 5;   // F
-    boardMAP[6] = 8;   // I
+    boardMAP[6] = 6;   // G
     boardMAP[7] = 3;   // D
-    // The spare board is G
+    // The spare board is I
     readEEprom();
     
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  
