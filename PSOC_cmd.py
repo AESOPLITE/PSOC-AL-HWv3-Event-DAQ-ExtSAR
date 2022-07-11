@@ -1292,7 +1292,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         print("  Layer " + str(lyr) + ": number of reads with no trigger = " + str(bytes2int(byteList[28+9*lyr+5])))
         print("  Layer " + str(lyr) + ": error codes = " + str(byteList[28+9*lyr+6].hex()))
         print("  Layer " + str(lyr) + ": ASIC error codes = " + str(byteList[28+9*lyr+7].hex()))
-        print("  Layer " + str(lyr) + ": number of timeouts in event reading state machine = " + str(byteList[28+9*lyr+8].hex()))
+        print("  Layer " + str(lyr) + ": number of bad command addresses or codes received = " + str(byteList[28+9*lyr+8].hex()))
     if (cntGo+cntGo1 == 0):
         live = 0.
     else:

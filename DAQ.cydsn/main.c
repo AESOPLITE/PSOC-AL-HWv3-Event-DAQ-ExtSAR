@@ -59,7 +59,8 @@
  * V26.1:  Modified trigger mask on board I. Sync the 200 Hz clock to the bus clock.
  * V26.2:  Make settling window adjustable per counter. Set ADC wait times to 25 counts.
  *         Set coincidence window to 6 counts (0.5 us). Set the board-I mask back correct.
- * ========================================
+ * V26.3:  Store in the EOR record the number of bad commands seen by tracker boards
+* ========================================
  */
 #include "project.h"
 #include <stdlib.h>
@@ -68,7 +69,7 @@
 #include <stdbool.h>
 
 #define MAJOR_VERSION 26
-#define MINOR_VERSION 2
+#define MINOR_VERSION 3
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -1846,7 +1847,7 @@ int resetAllTrackerLogic() {
     // the configuration register read failed, or there are many recent time-outs or resets (stuck).
     uint32 allErrCodes[MAX_TKR_BOARDS];
     bool bad = getTkrASICerrors(doDiagnostics, allErrCodes, &rc);
-    if (bad || (nTkrTimeOut - lastNTkrTimeOut) > 12 || (numTkrResets - lastNumTkrResets) > 2) {   
+    if (bad || (nTkrTimeOut - lastNTkrTimeOut) > 12 || (numTkrResets - lastNumTkrResets) > 1) {   
         cmdData[0] = 0x1F;   // All chips selected
         if (rc != 0) {
             tkrCmdCode = 0x05;   // ASIC hard reset
@@ -3413,7 +3414,7 @@ void interpretCommand(uint8 tofConfig[]) {
                             ASICerrs = ASICerrs | ASICerr;
                         }
                         endData[offSet+nItems*i+7] = ASICerrs;
-                        cmdData[0] = 4;
+                        cmdData[0] = 9;
                         sendTrackerCmd(i, 0x77, 1, cmdData, TKR_HOUSE_DATA);
                         endData[offSet+nItems*i+8] = tkrHouseKeeping[0];
                     } else {
