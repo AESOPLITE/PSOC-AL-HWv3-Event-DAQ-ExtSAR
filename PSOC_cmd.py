@@ -895,6 +895,9 @@ def printHousekeeping(dataList, byteList):
     print("   Maximum number of TOF-B stops per event = " + str(dataList[75]))
     print("   Percent SPI busy = " + str(dataList[76]))
     print("   Percent live = " + str(dataList[77]))
+    numLiveSamples = dataList[78]*256 + dataList[79]
+    print("   Number of samples for the ADC state-machine live-time = " + str(numLiveSamples))
+    print("   ADC state-machine live-time = " + str(dataList[80]) + "%")
 
 def printTkrHousekeeping(dataList):
     run = dataList[4]*256 + dataList[5]
@@ -1175,7 +1178,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     # Tell the Event PSOC to stop the run
     cmdHeader = mkCmdHdr(0, 0x44, addrEvnt)
     ser.write(cmdHeader)
-    print("limitedRun: EOR expecting 92 bytes coming back.")
+    print("limitedRun: EOR expecting 141 bytes coming back.")
     cnt = 0
     byteList = []
     while True:
@@ -1234,7 +1237,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         ret = ser.read(1)
         if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
         byteList.append(ret)
-    ret = ser.read(1)   # padding byte
+    #ret = ser.read(1)   # padding byte
     ret = ser.read(3)
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))         
@@ -1293,6 +1296,11 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         print("  Layer " + str(lyr) + ": error codes = " + str(byteList[28+9*lyr+6].hex()))
         print("  Layer " + str(lyr) + ": ASIC error codes = " + str(byteList[28+9*lyr+7].hex()))
         print("  Layer " + str(lyr) + ": number of bad command addresses or codes received = " + str(byteList[28+9*lyr+8].hex()))
+    cntBytes = []
+    for i in range(46):
+        cntBytes.append(byteList[101+i])
+    #for item in cntBytes: print("  counter byte = " + str(item))
+    printRunCounters(cntBytes)
     if (cntGo+cntGo1 == 0):
         live = 0.
     else:
@@ -2111,11 +2119,7 @@ def getAvgReadoutTime():
     avgTime = 5.0*float(totalTime)/float(numReadouts)
     print("getAvgReadoutTime: for " + str(numReadouts) + " events, the average readout time is " + str(avgTime) + " ms")
 
-def getRunCounters():
-    cmdHeader = mkCmdHdr(0, 0x50, addrEvnt)
-    ser.write(cmdHeader)
-    time.sleep(0.1)
-    command,cmdDataBytes,dataBytes = getData(addrEvnt)
+def printRunCounters(dataBytes):
     print("getRunCounters: Global command count = " + str(bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])))
     print("                Command count = " + str(bytes2int(dataBytes[2])*256 + bytes2int(dataBytes[3])))
     print("                Number of command timeouts = " + str(bytes2int(dataBytes[4])))
@@ -2146,6 +2150,15 @@ def getRunCounters():
     print("                Number of events with only TKR triggers =  " + str(nTkrOnly))
     print("                Number of events with all 3 triggers =     " + str(nAllTrg))
     print("                Number of events with no primary trigger = " + str(nNoCk))
+    liveTime = (bytes2int(dataBytes[44])*256 + bytes2int(dataBytes[45]))/100.
+    print("                ADC control state machine live time = " + str(liveTime))
+    
+def getRunCounters():
+    cmdHeader = mkCmdHdr(0, 0x50, addrEvnt)
+    ser.write(cmdHeader)
+    time.sleep(0.1)
+    command,cmdDataBytes,dataBytes = getData(addrEvnt)
+    printRunCounters(dataBytes)
     
 def tkrGetCodeVersion(FPGA):
     address = addrEvnt

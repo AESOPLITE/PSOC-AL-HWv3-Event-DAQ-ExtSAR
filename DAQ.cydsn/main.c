@@ -61,6 +61,7 @@
  *         Set coincidence window to 6 counts (0.5 us). Set the board-I mask back correct.
  * V26.3:  Store in the EOR record the number of bad commands seen by tracker boards
  * V26.4:  Corrected the default tracker setup after swapping boards G and I
+ * V26.5:  Fixed missing bit 13 in error record.
 * ========================================
  */
 #include "project.h"
@@ -68,9 +69,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <math.h>
 
 #define MAJOR_VERSION 26
-#define MINOR_VERSION 4
+#define MINOR_VERSION 5
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -272,7 +274,7 @@ int numErrRec = 0;
 #define TKR_READ_TIMEOUT 31u    // Length of time to wait on the tracker before giving a time-out error
 
 // Some variables defined only for housekeeping information
-#define HOUSESIZE 78u
+#define HOUSESIZE 81u
 #define TKRHOUSESIZE 201u
 bool doHouseKeeping;           // Set true to send housekeeping packets out
 bool doTkrHouseKeeping;
@@ -311,6 +313,10 @@ uint32 nTOFAavgH = 0;
 uint32 nTOFBavgH = 0;
 uint8  nTOFAmaxH = 0;
 uint8  nTOFBmaxH = 0;
+
+// ADC live-time monitor
+uint32 cntLive, cntTrials, cntTrialsMax;
+float liveWeightedSum, sumWeights;
 
 int boardMAP[MAX_TKR_BOARDS];   // Map from tracker board FPGA address to hardware board number (alphabetical)
 struct TkrConfig {
@@ -392,7 +398,7 @@ const uint8 SSN_CH5  = 0x0C;
 uint8 outputMode;              // Data output mode (SPI or USB-UART)
 bool debugTOF;
 
-#define END_DATA_SIZE 97u
+#define END_DATA_SIZE 143u
 bool endingRun;                // Set true when the run is ending
 uint8 endData[END_DATA_SIZE];
 
@@ -1102,13 +1108,13 @@ void makeErrorRecord(uint32 *errCodes) {
             if (tkrHouseKeeping[0] > 0) errBytes = errBytes | (0x0001<<11);
             sendTrackerCmd(brd, 0x75, 0, cmdData, TKR_HOUSE_DATA);
             if (tkrHouseKeeping[0] > 0) errBytes = errBytes | (0x0001<<12);
-            errRecord[numErrRec].A[8+MAX_TKR_BOARDS+2*brd] = byte16(errBytes,0);
-            errRecord[numErrRec].A[8+MAX_TKR_BOARDS+2*brd+1] = byte16(errBytes,1);
             sendTrackerCmd(brd, 0x68, 0, cmdData, TKR_HOUSE_DATA);
             uint16 nTrig= tkrHouseKeeping[0]*256 + tkrHouseKeeping[1];
             sendTrackerCmd(brd, 0x6B, 0, cmdData, TKR_HOUSE_DATA);
             uint16 nRead= tkrHouseKeeping[0]*256 + tkrHouseKeeping[1];
             if (nTrig != nRead) errBytes = errBytes | (0x0001<<13);
+            errRecord[numErrRec].A[8+MAX_TKR_BOARDS+2*brd] = byte16(errBytes,0);
+            errRecord[numErrRec].A[8+MAX_TKR_BOARDS+2*brd+1] = byte16(errBytes,1);
         }
     }
     int offset = 8 + 3*MAX_TKR_BOARDS;
@@ -1239,13 +1245,24 @@ void makeHouseKeeping() {
     dataOut[76] = (uint8)(100.*busyFraction);
     uint32 nEvents = cntGO - lastGOcnt;
     uint32 nMissed = cntGO1 - lastGO1cnt;
-    float liveFraction;
+    double liveFraction;
     if (nEvents + nMissed > 0) {
         liveFraction = ((float)(nEvents))/((float)(nEvents + nMissed));
     } else {
         liveFraction = 0.;
     }
     dataOut[77] = (uint8)(100.*liveFraction);
+    dataOut[78] = byte32(cntTrials,2);
+    dataOut[79] = byte32(cntTrials,3);
+    if (cntTrials > 0) {
+        liveFraction = ((float)(cntLive))/((float)(cntTrials));
+        float weight = sqrt((double)cntTrials);
+        liveWeightedSum += liveFraction*weight;
+        sumWeights += weight;
+    } else {
+        liveFraction = 0.;
+    }
+    dataOut[80] = (uint8)(100.*liveFraction);
     nEvtH = 0;
     nTOFAavgH = 0;
     nTOFBavgH = 0;
@@ -1255,6 +1272,9 @@ void makeHouseKeeping() {
     lastGO1cnt = cntGO1;
     lastNTkrTimeOut = nTkrTimeOut;
     lastNumTkrResets = numTkrResets;
+    cntLive = 0;
+    if (cntTrials > cntTrialsMax) cntTrialsMax = cntTrials;
+    cntTrials = 0;
     nDataReady = HOUSESIZE;
 }
 
@@ -2860,6 +2880,63 @@ uint8 isAcommand(uint8 cmd) {
     return 0xFF;
 }
 
+// Put together some counter information for end-of-run records and command 0x50
+uint8 loadCntResults(uint8 *dataOut) {
+    dataOut[0] = byte16(cmdCountGLB, 0); 
+    dataOut[1] = byte16(cmdCountGLB, 1); 
+    dataOut[2] = byte16(cmdCount, 0);
+    dataOut[3] = byte16(cmdCount, 1);
+    dataOut[4] = nCmdTimeOut;
+    dataOut[5] = (uint8)numTkrResets;
+    dataOut[6] = nASICerrorEvts;
+    dataOut[7] = nASICparityErr;
+    dataOut[8] = nBadASIChead;
+    dataOut[9] = nBadClust;
+    dataOut[10] = nBadCRC;
+    dataOut[11] = nBadCmd;
+    dataOut[12] = nBigClust;
+    dataOut[13] = nTkrOverFlow;
+    dataOut[14] = nTkrTagMismatch;
+    dataOut[15] = nEvtTooBig;
+    dataOut[16] = nTkrDatErr;
+    dataOut[17] = nTkrBadNdata;
+    dataOut[18] = byte32(nTkrTimeOut, 2);
+    dataOut[19] = byte32(nTkrTimeOut, 3);
+    dataOut[20] = byte32(nTkrTrg1, 0);
+    dataOut[21] = byte32(nTkrTrg1, 1);
+    dataOut[22] = byte32(nTkrTrg1, 2);
+    dataOut[23] = byte32(nTkrTrg1, 3);
+    dataOut[24] = byte32(nTkrTrg2, 0);
+    dataOut[25] = byte32(nTkrTrg2, 1);
+    dataOut[26] = byte32(nTkrTrg2, 2);
+    dataOut[27] = byte32(nTkrTrg2, 3);
+    dataOut[28] = byte32(nPMTonly, 0);
+    dataOut[29] = byte32(nPMTonly, 1);
+    dataOut[30] = byte32(nPMTonly, 2);
+    dataOut[31] = byte32(nPMTonly, 3);
+    dataOut[32] = byte32(nTkrOnly, 0);
+    dataOut[33] = byte32(nTkrOnly, 1);
+    dataOut[34] = byte32(nTkrOnly, 2);
+    dataOut[35] = byte32(nTkrOnly, 3);
+    dataOut[36] = byte32(nAllTrg, 0);
+    dataOut[37] = byte32(nAllTrg, 1);
+    dataOut[38] = byte32(nAllTrg, 2);
+    dataOut[39] = byte32(nAllTrg, 3);
+    dataOut[40] = byte32(nNoCK, 0);
+    dataOut[41] = byte32(nNoCK, 1);
+    dataOut[42] = byte32(nNoCK, 2);
+    dataOut[43] = byte32(nNoCK, 3);
+    if (sumWeights > 0.) {
+        uint16 liveTime = (uint16)(10000.*liveWeightedSum/sumWeights);
+        dataOut[44] = byte16(liveTime,0);
+        dataOut[45] = byte16(liveTime,1);
+    } else {
+        dataOut[44] = 0;
+        dataOut[45] = 0;
+    }
+    return 46;
+}
+
 // Interpret and act on commands received from USB-UART or the Main PSOC
 void interpretCommand(uint8 tofConfig[]) {
     uint16 DACsetting12;
@@ -3422,55 +3499,12 @@ void interpretCommand(uint8 tofConfig[]) {
                         for (int j=0; j<nItems; ++j) endData[offSet+nItems*i+j] = 0;
                     }
                 }
+                loadCntResults(&endData[offSet+nItems*MAX_TKR_BOARDS+1]);
                 nTkrHouseKeeping = 0;
                 nDataReady = 0;
                 break;
             case '\x50':  // Send counter information
-                nDataReady = 44;
-                dataOut[0] = byte16(cmdCountGLB, 0); 
-                dataOut[1] = byte16(cmdCountGLB, 1); 
-                dataOut[2] = byte16(cmdCount, 0);
-                dataOut[3] = byte16(cmdCount, 1);
-                dataOut[4] = nCmdTimeOut;
-                dataOut[5] = (uint8)numTkrResets;
-                dataOut[6] = nASICerrorEvts;
-                dataOut[7] = nASICparityErr;
-                dataOut[8] = nBadASIChead;
-                dataOut[9] = nBadClust;
-                dataOut[10] = nBadCRC;
-                dataOut[11] = nBadCmd;
-                dataOut[12] = nBigClust;
-                dataOut[13] = nTkrOverFlow;
-                dataOut[14] = nTkrTagMismatch;
-                dataOut[15] = nEvtTooBig;
-                dataOut[16] = nTkrDatErr;
-                dataOut[17] = nTkrBadNdata;
-                dataOut[18] = byte32(nTkrTimeOut, 2);
-                dataOut[19] = byte32(nTkrTimeOut, 3);
-                dataOut[20] = byte32(nTkrTrg1, 0);
-                dataOut[21] = byte32(nTkrTrg1, 1);
-                dataOut[22] = byte32(nTkrTrg1, 2);
-                dataOut[23] = byte32(nTkrTrg1, 3);
-                dataOut[24] = byte32(nTkrTrg2, 0);
-                dataOut[25] = byte32(nTkrTrg2, 1);
-                dataOut[26] = byte32(nTkrTrg2, 2);
-                dataOut[27] = byte32(nTkrTrg2, 3);
-                dataOut[28] = byte32(nPMTonly, 0);
-                dataOut[29] = byte32(nPMTonly, 1);
-                dataOut[30] = byte32(nPMTonly, 2);
-                dataOut[31] = byte32(nPMTonly, 3);
-                dataOut[32] = byte32(nTkrOnly, 0);
-                dataOut[33] = byte32(nTkrOnly, 1);
-                dataOut[34] = byte32(nTkrOnly, 2);
-                dataOut[35] = byte32(nTkrOnly, 3);
-                dataOut[36] = byte32(nAllTrg, 0);
-                dataOut[37] = byte32(nAllTrg, 1);
-                dataOut[38] = byte32(nAllTrg, 2);
-                dataOut[39] = byte32(nAllTrg, 3);
-                dataOut[40] = byte32(nNoCK, 0);
-                dataOut[41] = byte32(nNoCK, 1);
-                dataOut[42] = byte32(nNoCK, 2);
-                dataOut[43] = byte32(nNoCK, 3);
+                nDataReady = loadCntResults(dataOut);
                 break;
             case '\x3C':  // Start a run
                 InterruptState = CyEnterCriticalSection();
@@ -3535,6 +3569,11 @@ void interpretCommand(uint8 tofConfig[]) {
                 lastNumTkrResets = 0;
                 nASICerrorEvts = 0;
                 nASICparityErr = 0;
+                cntLive = 0;
+                cntTrials = 0;
+                cntTrialsMax = 0;
+                liveWeightedSum = 0.;
+                sumWeights = 0.;
                 // Reset Tracker counters and enable the tracker trigger
                 for (int brd=0; brd<numTkrBrds; ++brd) {
                     sendSimpleTrackerCmd(brd, 0x04);
@@ -4034,6 +4073,11 @@ int main(void)
     cntGO1 = 0;
     lastGOcnt = 0;
     lastGO1cnt = 0;
+    cntLive = 0;
+    cntTrials = 0;
+    cntTrialsMax = 0;
+    liveWeightedSum = 0.;
+    sumWeights = 0.;
     
     uint8 *buffer;        // Buffer for incoming commands
     uint8 USBUART_buf[BUFFER_LEN];
@@ -4399,6 +4443,19 @@ int main(void)
                 if (tkrHouseKeepingDue) {
                     makeTkrHouseKeeping();
                     tkrHouseKeepingDue = false;
+                }
+            }
+            
+            // Random monitoring of the GO-enable status, to measure the live time of the ADC state machine while the trigger is enabled
+            // Note that the GO1 count monitors the deadtime during which the trigger is disabled
+            if (isTriggerEnabled()) {
+                if (Status_Reg_DeadTime_Read()) {
+                    cntLive++;
+                } 
+                cntTrials++;
+                if (cntTrials == 0xFFFFFFFF) {
+                    cntLive = 0;
+                    cntTrials = 0;
                 }
             }
         } else {
