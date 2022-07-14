@@ -66,6 +66,7 @@
  *         trigger status register, adding T1,T2,T3,T4 and removing G
  * V26.7:  Added a begin-of-run record that records all of the run parameters. Improved EOR record.
  * V26.8:  Increased all settling times to 36 counts for T1->T4. 
+ * V26.9:  Increment the busy count for GO1 as well as for GO, if busy.
  * ========================================
  */
 #include "project.h"
@@ -76,7 +77,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 26
-#define MINOR_VERSION 8
+#define MINOR_VERSION 9
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -1248,7 +1249,7 @@ void makeHouseKeeping() {
     }
     dataOut[74] = nTOFAmaxH;
     dataOut[75] = nTOFBmaxH;
-    float busyFraction = ((float)cntBusy)/((float)cntGO);
+    float busyFraction = ((float)cntBusy)/((float)(cntGO+cntGO1));
     dataOut[76] = (uint8)(100.*busyFraction);
     uint32 nEvents = cntGO - lastGOcnt;
     uint32 nMissed = cntGO1 - lastGO1cnt;
@@ -2273,7 +2274,8 @@ CY_ISR(isrGO) {
 
 // Interrupt to count triggers that occur when the trigger is disabled
 CY_ISR(isrGO1) {
-    cntGO1++;     
+    cntGO1++;
+    if (Pin_Busy_Read()) cntBusy++;
 }
 
 // External signal to force a software reset of this PSOC
