@@ -91,9 +91,8 @@ def mkDataByte(dataByte, address, byteID):
    end2 = LF.to_bytes(1,'big')   # LF
    return cmd1 + cmd1 + cmd1 + end1 + end2
 
-def getData(address): 
+def getData(address, debug = False): 
     ret = b''
-    debug = False
     if debug: print("Entering getData for PSOC address " + str(address))
     success = False
     while not success:
@@ -971,6 +970,56 @@ def printTkrHousekeeping(dataList):
         shuntCurrent = shuntVoltage*1000./R
         print("      Analog 3.3V shunt current reading = " + str(shuntCurrent) + " milliamps")
         offset = offset + 24
+
+# Print out the BOR record
+def printBOR(dataBytes):
+    print("printBOR: begin-of-run record:")
+    dataList = []
+    for item in dataBytes: dataList.append(bytes2int(item))
+    runNumber = dataList[4]*256 + dataList[5]
+    print("  Run number " + str(runNumber))
+    timeDate = dataList[6]*16777216 + dataList[7]*65536 + dataList[8]*256 + dataList[9]
+    year = ((timeDate & 0x7C000000) >> 26) + 2000
+    month = (timeDate & 0x03C00000) >> 22
+    day = (timeDate & 0x003E0000) >> 17
+    hour = (timeDate & 0x0001F000) >> 12
+    minute = (timeDate & 0x00000FC0) >> 6
+    second = (timeDate & 0x0000003F)    
+    print("  Time = " + str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year))
+    print("  Event PSOC code version = " + str(dataList[10]) + "." + str(dataList[11]))
+    print("  DAC settings: ")
+    print("        G: " + str(dataList[12]))
+    print("       T3: " + str(dataList[13]))
+    print("       T1: " + str(dataList[14]))
+    print("       T4: " + str(dataList[15]))
+    print("       T2: " + str(dataList[16]*256 + dataList[17]))
+    print("     TOFA: " + str(dataList[18]*256 + dataList[19]))
+    print("     TOFB: " + str(dataList[20]*256 + dataList[21]))
+    print("   TOFA-control shift register delay period = " + str(dataList[22]))
+    print("   TOFB-control shift register delay period = " + str(dataList[23]))
+    print("   ADC-control state machine delay = " + str(dataList[24]))
+    print("   T3 comparator settling time period = " + str(dataList[25]))
+    print("   T1 comparator settling time period = " + str(dataList[26]))
+    print("   T4 comparator settling time period = " + str(dataList[27]))
+    print("   T2 comparator settling time period = " + str(dataList[28]))
+    print("   PMT-trigger tracker trigger delay time = " + str(dataList[29]))
+    print("   PMT secondary trigger prescale value = " + str(dataList[30]))
+    print("   Tracker trigger prescale value = " + str(dataList[31]))
+    print("   Primary trigger mask = " + str(dataList[32]))
+    print("   Secondary trigger mask = " + str(dataList[33]))
+    print("   Tracker threshold forced offsets:")
+    for lyr in range(8):
+        print("       Layer " + str(lyr) + " = " + str(dataList[34+lyr]))
+    print("   Tracker master trigger delay = " + str(dataList[42]))
+    print("   Number of tracker readout layers = " + str(dataList[43]))
+    print("   Tracker Master trigger source setting = " + str(dataList[44]))
+    for lyr in range(8):
+        print("   Tracker settings for board " + str(lyr))
+        print("       Tracker firmware code version = " + str(dataList[45+lyr*5]))
+        print("       Tracker firmware configuration register = " + str(dataBytes[45+lyr*5+1].hex()))
+        print("       Trigger source = " + str(dataList[45+lyr*5+2]))
+        print("       Trigger output length = " + str(dataList[45+lyr*5+3]))
+        print("       Trigger output delay = " + str(dataList[45+lyr*5+4]))
            
 # Execute a run for a specified number of events to be acquired
 def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, debugTOF = False):
@@ -979,7 +1028,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     data1 = mkDataByte(runNumber>>8, addrEvnt, 1)
     ser.write(data1)
     data2 = mkDataByte(runNumber & 0x00FF, addrEvnt, 2)
-    ser.write(data2)
+    ser.write(data2)   
     doTkr = 0
     if readTracker: doTkr = 1
     data3 = mkDataByte(doTkr, addrEvnt, 3)
@@ -988,6 +1037,14 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     if debugTOF: doDebug = 1
     data4 = mkDataByte(doDebug, addrEvnt, 4)
     ser.write(data4)
+
+    time.sleep(1)
+    # Catch the BOR record
+    cmd,cmdData,dataBytes = getData(addrEvnt)
+    #for i in range(84):
+    #    ret = dataBytes[i]
+    #    print("   Byte " + str(i) + ":" + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex  = " + str(ret))  
+    printBOR(dataBytes)
     
     nToPlot = 0
     verbose = True
@@ -1260,27 +1317,57 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         ret = ser.read(1)
         if verbose: print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
         byteList.append(ret)
-    #ret = ser.read(1)   # padding byte
+    ret = ser.read(1)   # padding byte
     ret = ser.read(3)
     if ret != b'\xFF\x00\xFF':
         print("limitedRun: invalid trailer returned: " + str(ret))         
-    go0 = bytes2int(byteList[3])
-    go1 = bytes2int(byteList[4])
-    go2 = bytes2int(byteList[5])
-    go3 = bytes2int(byteList[6])
+    go0 = bytes2int(byteList[5])
+    go1 = bytes2int(byteList[6])
+    go2 = bytes2int(byteList[7])
+    go3 = bytes2int(byteList[8])
     cntGo1 = go0*16777216 + go1*65536 + go2*256 + go3
 
-    go0 = bytes2int(byteList[7])
-    go1 = bytes2int(byteList[8])
-    go2 = bytes2int(byteList[9])
-    go3 = bytes2int(byteList[10])
+    go0 = bytes2int(byteList[9])
+    go1 = bytes2int(byteList[10])
+    go2 = bytes2int(byteList[11])
+    go3 = bytes2int(byteList[12])
     cntGo = go0*16777216 + go1*65536 + go2*256 + go3
     
-    nBadCRC = bytes2int(byteList[11])
+    nBadCRC = bytes2int(byteList[13])
     
-    nTkrReadReady = bytes2int(byteList[12])*16777216 + bytes2int(byteList[13])*65536 + bytes2int(byteList[14])*256 + bytes2int(byteList[15])
-    nTkrReadNotReady = bytes2int(byteList[16])*256 + bytes2int(byteList[17])
+    nTkrReadReady = bytes2int(byteList[14])*16777216 + bytes2int(byteList[15])*65536 + bytes2int(byteList[16])*256 + bytes2int(byteList[17])
+    nTkrReadNotReady = bytes2int(byteList[18])*256 + bytes2int(byteList[19])
     
+    print("Run number = " + str(bytes2int(byteList[3])*256 + bytes2int(byteList[4])))
+    print("Number of triggers generated = " + str(cntGo1+cntGo))
+    print("Number of triggers accepted = " + str(cntGo))
+    print("Number of bad Tracker CRC = " + str(nBadCRC))
+    print("Number of tracker reads when status is ready = " + str(nTkrReadReady))
+    print("Number of tracker reads when status is not ready = " + str(nTkrReadNotReady))
+    print("Average number of TOF-A stops per event = " + str(bytes2int(byteList[20])))
+    print("Average number of TOF-B stops per event = " + str(bytes2int(byteList[21])))
+    print("Maximum number of TOF-A stops in an event = " + str(bytes2int(byteList[22])))
+    print("Maximum number of TOF-B stops in an event = " + str(bytes2int(byteList[23])))
+    nBusy = bytes2int(byteList[24])*16777216 + bytes2int(byteList[25])*65536 + bytes2int(byteList[26])*256 + bytes2int(byteList[27])
+    print("Number of events created when the SPI link is BUSY = " + str(nBusy))
+    nTkrMasterGo = bytes2int(byteList[28])*256 + bytes2int(byteList[29])
+    print("Number of GO signals received by the Tracker master = " + str(nTkrMasterGo))
+    for lyr in range(8):
+        nTrigs = bytes2int(byteList[30+9*lyr])*256 + bytes2int(byteList[30+9*lyr+1])
+        print("  Layer " + str(lyr) + ": number of triggers received = " + str(nTrigs))
+        nReads = bytes2int(byteList[30+9*lyr+2])*256 + bytes2int(byteList[30+9*lyr+3])
+        print("  Layer " + str(lyr) + ": number of read commands received = " + str(nReads))
+        print("  Layer " + str(lyr) + ": number of missed triggers = " + str(bytes2int(byteList[30+9*lyr+4])))
+        print("  Layer " + str(lyr) + ": number of reads with no trigger = " + str(bytes2int(byteList[30+9*lyr+5])))
+        print("  Layer " + str(lyr) + ": error codes = " + str(byteList[30+9*lyr+6].hex()))
+        print("  Layer " + str(lyr) + ": ASIC error codes = " + str(byteList[30+9*lyr+7].hex()))
+        print("  Layer " + str(lyr) + ": number of bad command addresses or codes received = " + str(byteList[30+9*lyr+8].hex()))
+    cntBytes = []
+    for i in range(46):
+        cntBytes.append(byteList[102+i])
+    #for item in cntBytes: print("  counter byte = " + str(item))
+    printRunCounters(cntBytes)
+	
     Sigma = [0.,0.,0.,0.,0.,0.]
     TOFavg = TOFavg/float(numEvnts)
     TOFavg2 = TOFavg2/float(numEvnts)
@@ -1296,34 +1383,6 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             Sigma[ch] = 0.
     f.close()
     if outputEvents: f2.close()
-    print("Number of triggers generated = " + str(cntGo1+cntGo))
-    print("Number of triggers accepted = " + str(cntGo))
-    print("Number of bad Tracker CRC = " + str(nBadCRC))
-    print("Number of tracker reads when status is ready = " + str(nTkrReadReady))
-    print("Number of tracker reads when status is not ready = " + str(nTkrReadNotReady))
-    print("Average number of TOF-A stops per event = " + str(bytes2int(byteList[18])))
-    print("Average number of TOF-B stops per event = " + str(bytes2int(byteList[19])))
-    print("Maximum number of TOF-A stops in an event = " + str(bytes2int(byteList[20])))
-    print("Maximum number of TOF-B stops in an event = " + str(bytes2int(byteList[21])))
-    nBusy = bytes2int(byteList[22])*16777216 + bytes2int(byteList[23])*65536 + bytes2int(byteList[24])*256 + bytes2int(byteList[25])
-    print("Number of events created when the SPI link is BUSY = " + str(nBusy))
-    nTkrMasterGo = bytes2int(byteList[26])*256 + bytes2int(byteList[27])
-    print("Number of GO signals received by the Tracker master = " + str(nTkrMasterGo))
-    for lyr in range(8):
-        nTrigs = bytes2int(byteList[28+9*lyr])*256 + bytes2int(byteList[28+9*lyr+1])
-        print("  Layer " + str(lyr) + ": number of triggers received = " + str(nTrigs))
-        nReads = bytes2int(byteList[28+9*lyr+2])*256 + bytes2int(byteList[28+9*lyr+3])
-        print("  Layer " + str(lyr) + ": number of read commands received = " + str(nReads))
-        print("  Layer " + str(lyr) + ": number of missed triggers = " + str(bytes2int(byteList[28+9*lyr+4])))
-        print("  Layer " + str(lyr) + ": number of reads with no trigger = " + str(bytes2int(byteList[28+9*lyr+5])))
-        print("  Layer " + str(lyr) + ": error codes = " + str(byteList[28+9*lyr+6].hex()))
-        print("  Layer " + str(lyr) + ": ASIC error codes = " + str(byteList[28+9*lyr+7].hex()))
-        print("  Layer " + str(lyr) + ": number of bad command addresses or codes received = " + str(byteList[28+9*lyr+8].hex()))
-    cntBytes = []
-    for i in range(46):
-        cntBytes.append(byteList[101+i])
-    #for item in cntBytes: print("  counter byte = " + str(item))
-    printRunCounters(cntBytes)
     if (cntGo+cntGo1 == 0):
         live = 0.
     else:

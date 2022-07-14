@@ -14,6 +14,7 @@
 #define `$INSTANCE_NAME`_Result_Reg  `$INSTANCE_NAME`_Cntr8_A0_REG
     
 void `$INSTANCE_NAME`_WritePeriod(uint8 period);
+uint8 `$INSTANCE_NAME`_ReadPeriod();
 uint8 `$INSTANCE_NAME`_ReadCount();
     
 #endif

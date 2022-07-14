@@ -64,6 +64,7 @@
  * V26.5:  Fixed missing bit 13 in error record. Added ADC live time to housekeeping.
  * V26.6:  Fixed dimension of endData. Changed command 5B to modify thresholds per layer. Use all 8 bits of the
  *         trigger status register, adding T1,T2,T3,T4 and removing G
+ * V26.7:  Added a begin-of-run record that records all of the run parameters. Improved EOR record.
  * ========================================
  */
 #include "project.h"
@@ -278,6 +279,8 @@ int numErrRec = 0;
 // Some variables defined only for housekeeping information
 #define HOUSESIZE 81u
 #define TKRHOUSESIZE 201u
+#define BOR_LENGTH 85u
+uint8 dataBOR[BOR_LENGTH];
 bool doHouseKeeping;           // Set true to send housekeeping packets out
 bool doTkrHouseKeeping;
 int nHouseKeepMade;            // Number of housekeeping packets assembled
@@ -327,6 +330,7 @@ struct TkrConfig {
     uint8 threshDAC;
 } tkrConfig[MAX_TKR_BOARDS][MAX_TKR_ASIC];
 uint8 tkrConfigReg[3];
+uint8 tkrThrBump[MAX_TKR_BOARDS];
 
 uint8 nDataReady;                 // Number of bytes of data ready to send out to the Main PSOC or PC
 uint8 dataOut[MAX_DATA_OUT];      // Buffer for output data
@@ -400,7 +404,7 @@ const uint8 SSN_CH5  = 0x0C;
 uint8 outputMode;              // Data output mode (SPI or USB-UART)
 bool debugTOF;
 
-#define END_DATA_SIZE 144u
+#define END_DATA_SIZE 145u
 bool endingRun;                // Set true when the run is ending
 uint8 endData[END_DATA_SIZE];
 
@@ -1851,6 +1855,85 @@ bool getTkrASICerrors(bool getAll, uint32 *allErrCodes, int *rc) {
     return bad;
 }
 
+// Create the beginning-of-run record
+int makeBOR() {
+    dataBOR[0] = 0x42;  //"B"
+    dataBOR[1] = 0x4F;  //"O"
+    dataBOR[2] = 0x46;  //"F"
+    dataBOR[3] = 0x52;  //"R"
+    dataBOR[4] = byte16(runNumber, 0);
+    dataBOR[5] = byte16(runNumber, 1);
+    timeDate = RTC_1_ReadTime();
+    uint32 timeWord = packTime();
+    dataBOR[6] = byte32(timeWord, 0); // Time and date
+    dataBOR[7] = byte32(timeWord, 1);
+    dataBOR[8] = byte32(timeWord, 2);
+    dataBOR[9] = byte32(timeWord, 3);
+    dataBOR[10] = MAJOR_VERSION;
+    dataBOR[11] = MINOR_VERSION;
+    for (int i=0; i<4; ++i) dataBOR[12+i] = thrDACsettings[i];
+    uint16 DACsetting12;
+    int rc = readDAC(I2C_Address_DAC_Ch5, &DACsetting12);
+    if (rc != 0) {
+        DACsetting12 = 0;
+        addError(ERR_DAC_READ, rc, I2C_Address_DAC_Ch5);
+    }
+    dataBOR[16] = byte16(DACsetting12, 0);
+    dataBOR[17] = byte16(DACsetting12, 1);
+    rc = readDAC(I2C_Address_TOF_DAC1, &DACsetting12);
+    if (rc != 0) {
+        DACsetting12 = 0;
+        addError(ERR_TOF_DAC_READ, rc, I2C_Address_TOF_DAC1);                                         
+    }
+    dataBOR[18] = byte16(DACsetting12, 0);
+    dataBOR[19] = byte16(DACsetting12, 1);
+    rc = readDAC(I2C_Address_TOF_DAC2, &DACsetting12);
+    if (rc != 0) {
+        DACsetting12 = 0;
+        addError(ERR_TOF_DAC_READ, rc, I2C_Address_TOF_DAC2);                                         
+    }
+    dataBOR[20] = byte16(DACsetting12, 0);
+    dataBOR[21] = byte16(DACsetting12, 1);
+    dataBOR[22] = Count7_1_ReadPeriod();
+    dataBOR[23] = Count7_2_ReadPeriod();
+    dataBOR[24] = Count7_3_ReadPeriod();
+    dataBOR[25] = TrigWindow_V1_2_Count7_1_ReadPeriod();
+    dataBOR[26] = TrigWindow_V1_3_Count7_1_ReadPeriod();
+    dataBOR[27] = TrigWindow_V1_4_Count7_1_ReadPeriod();
+    dataBOR[28] = TrigWindow_V1_5_Count7_1_ReadPeriod();
+    dataBOR[29] = Count7_Trg_ReadPeriod();
+    dataBOR[30] = Cntr8_V1_PMT_ReadPeriod();
+    dataBOR[31] = Cntr8_V1_TKR_ReadPeriod();
+    dataBOR[32] = getTriggerMask('e');
+    dataBOR[33] = getTriggerMask('p');
+    for (int i=0; i<MAX_TKR_BOARDS; ++i) dataBOR[34+i] = tkrThrBump[i];
+    sendTrackerCmd(0, 0x07, 0, cmdData, TKR_HOUSE_DATA);
+    dataBOR[42] = tkrHouseKeeping[0];
+    sendTrackerCmd(0, 0x1F, 0, cmdData, TKR_HOUSE_DATA);
+    dataBOR[43] = tkrHouseKeeping[0];
+    sendTrackerCmd(0, 0x74, 0, cmdData, TKR_HOUSE_DATA);
+    dataBOR[44] = tkrHouseKeeping[0];
+    const int offset = 45;
+    const int nItems = 5;
+    for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
+        if (lyr < numTkrBrds) {
+            sendTrackerCmd(lyr, 0x0A, 0, cmdData, TKR_HOUSE_DATA);
+            dataBOR[offset+lyr*nItems] = tkrHouseKeeping[0];
+            sendTrackerCmd(lyr, 0x0B, 0, cmdData, TKR_HOUSE_DATA);
+            dataBOR[offset+lyr*nItems+1] = tkrHouseKeeping[0];
+            sendTrackerCmd(lyr, 0x74, 0, cmdData, TKR_HOUSE_DATA);
+            dataBOR[offset+lyr*nItems+2] = tkrHouseKeeping[0];
+            sendTrackerCmd(lyr, 0x71, 0, cmdData, TKR_HOUSE_DATA);
+            dataBOR[offset+lyr*nItems+3] = tkrHouseKeeping[0];
+            dataBOR[offset+lyr*nItems+4] = tkrHouseKeeping[1];
+        } else {
+            for (int i=0; i<5; ++i) dataBOR[offset+lyr*nItems+i] = 0;
+        }
+    }
+    nTkrHouseKeeping = 0;
+    return BOR_LENGTH;
+}
+
 // Reset all of the Tracker board FPGAs (soft reset) and the ASICs (soft reset)
 // Unfortunately, the ASIC reset destroys the configuration, so the ASICs have to be reconfigured.
 int resetAllTrackerLogic() {
@@ -2833,10 +2916,18 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
             }
             eventDataReady = false;
         }
-        if (cmdInputComplete) {  // The command is completely finished once the echo and data have gone out
+        if (cmdInputComplete) {  // The command is completely finished once the echo or data have gone out
             nDataBytes = 0;
             awaitingCommand = true;
             cmdInputComplete = false;
+            // Enable the trigger now if the command was start-of-run
+            if (command == 0x3C) {
+                sendSimpleTrackerCmd(0x00, 0x65);  // Tracker trigger enable
+                triggerEnable(true);
+                isr_GO1_ClearPending();
+                isr_GO1_Enable();
+                TOFenable(true);
+            }
         }
         dataLED(false);
     } else {            // Don't send an echo if the command doesn't result in data. Command is finished.
@@ -2873,7 +2964,7 @@ uint8 isAcommand(uint8 cmd) {
     static uint8 numData[NUM_COMMANDS] = {0xC2, 1, 0, 3, 1, 1, 0, 0xC3, 3, 3, 0xC5, 3, 1,
         0, 2, 0, 1, 1, 0, 1, 2, 1, 2, 1, 0, 0, 0, 0, 1, 2, 1, 0,
         2, 2, 1, 0, 0, 4, 0, 1, 1, 0, 10, 0, 0, 1, 0, 0, 1, 1, 1,
-        1, 1, 0, 1, 1, 0, 0, 0, 2, 0, 8, 0, 1, 1, 0};
+        1, 1, 0, 1, 1, 0, 0, 0, 2, 0, 8, 0, 0xC1, 1, 0};
     for (int i=0; i<NUM_COMMANDS; ++i) {
         if (validCommands[i] == cmd) {
             return numData[i];
@@ -2987,7 +3078,7 @@ void interpretCommand(uint8 tofConfig[]) {
                     rc = readDAC(I2C_Address_DAC_Ch5, &DACsetting12);
                     if (rc != 0) {
                         DACsetting12 = 0;
-                        addError(ERR_DAC_READ, rc, DACaddress);
+                        addError(ERR_DAC_READ, rc, I2C_Address_DAC_Ch5);
                     }
                     dataOut[0] = (uint8)((DACsetting12 & 0xFF00)>>8);
                     dataOut[1] = (uint8)(DACsetting12 & 0x00FF);
@@ -3439,37 +3530,39 @@ void interpretCommand(uint8 tofConfig[]) {
                 triggerEnable(false);
                 sendSimpleTrackerCmd(0x00, 0x66);  // Disable the Tracker trigger
                 endingRun = true;
+                endData[0] = byte16(runNumber, 0);
+                endData[1] = byte16(runNumber, 1);
                 runNumber = 0;
-                endData[0] = byte32(cntGO1, 0);
-                endData[1] = byte32(cntGO1, 1);
-                endData[2] = byte32(cntGO1, 2);
-                endData[3] = byte32(cntGO1, 3);
-                endData[4] = byte32(cntGO, 0);
-                endData[5] = byte32(cntGO, 1);
-                endData[6] = byte32(cntGO, 2);
-                endData[7] = byte32(cntGO, 3);
-                endData[8] = nBadCRC;
-                endData[9] = byte32(nTkrReadReady, 0);
-                endData[10] = byte32(nTkrReadReady, 1);
-                endData[11] = byte32(nTkrReadReady, 2);
-                endData[12] = byte32(nTkrReadReady, 3);
-                endData[13] = byte16(nTkrReadNotReady, 0);
-                endData[14] = byte16(nTkrReadNotReady, 1);
+                endData[2] = byte32(cntGO1, 0);
+                endData[3] = byte32(cntGO1, 1);
+                endData[4] = byte32(cntGO1, 2);
+                endData[5] = byte32(cntGO1, 3);
+                endData[6] = byte32(cntGO, 0);
+                endData[7] = byte32(cntGO, 1);
+                endData[8] = byte32(cntGO, 2);
+                endData[9] = byte32(cntGO, 3);
+                endData[10] = nBadCRC;
+                endData[11] = byte32(nTkrReadReady, 0);
+                endData[12] = byte32(nTkrReadReady, 1);
+                endData[13] = byte32(nTkrReadReady, 2);
+                endData[14] = byte32(nTkrReadReady, 3);
+                endData[15] = byte16(nTkrReadNotReady, 0);
+                endData[16] = byte16(nTkrReadNotReady, 1);
                 uint8 nTOF_A_average = nTOF_A_avg/cntGO;
                 uint8 nTOF_B_average = nTOF_B_avg/cntGO;
-                endData[15] = nTOF_A_average;
-                endData[16] = nTOF_B_average;
-                endData[17] = nTOF_A_max;
-                endData[18] = nTOF_B_max;
-                endData[19] = byte32(cntBusy, 0);
-                endData[20] = byte32(cntBusy, 1);
-                endData[21] = byte32(cntBusy, 2);
-                endData[22] = byte32(cntBusy, 3);
+                endData[17] = nTOF_A_average;
+                endData[18] = nTOF_B_average;
+                endData[19] = nTOF_A_max;
+                endData[20] = nTOF_B_max;
+                endData[21] = byte32(cntBusy, 0);
+                endData[22] = byte32(cntBusy, 1);
+                endData[23] = byte32(cntBusy, 2);
+                endData[24] = byte32(cntBusy, 3);
                 sendTrackerCmd(0, 0x69, 0, cmdData, TKR_HOUSE_DATA);
-                endData[23] = tkrHouseKeeping[0];
-                endData[24] = tkrHouseKeeping[1];
+                endData[25] = tkrHouseKeeping[0];
+                endData[26] = tkrHouseKeeping[1];
                 const int nItems = 9;
-                const int offSet = 25;
+                const int offSet = 27;
                 for (int i=0; i<MAX_TKR_BOARDS; ++i) {
                     if (i < numTkrBrds) {
                         sendTrackerCmd(i, 0x68, 0, cmdData, TKR_HOUSE_DATA);
@@ -3501,7 +3594,7 @@ void interpretCommand(uint8 tofConfig[]) {
                         for (int j=0; j<nItems; ++j) endData[offSet+nItems*i+j] = 0;
                     }
                 }
-                loadCntResults(&endData[offSet+nItems*MAX_TKR_BOARDS+1]);
+                loadCntResults(&endData[offSet+nItems*MAX_TKR_BOARDS]);
                 nTkrHouseKeeping = 0;
                 nDataReady = 0;
                 break;
@@ -3580,16 +3673,9 @@ void interpretCommand(uint8 tofConfig[]) {
                 for (int brd=0; brd<numTkrBrds; ++brd) {
                     sendSimpleTrackerCmd(brd, 0x04);
                 }
-                sendSimpleTrackerCmd(0x00, 0x65);
-                triggerEnable(true);
-                isr_GO1_ClearPending();
-                isr_GO1_Enable();
-                TOFenable(true);
-                nDataReady = 0;  // Don't send the tracker echo back to the UART
-                nDataBytes = 0;  // Also, avoid sending an echo from this command
-                awaitingCommand = true;
-                cmdInputComplete = false;
                 endingRun = false;
+                nDataReady = makeBOR();  // Put together the BOR record to be sent out
+                for (int i=0; i<nDataReady; ++i) dataOut[i] = dataBOR[i];
                 break;
             case '\x3D':  // Return trigger enable status
                 nDataReady =1;
@@ -3912,6 +3998,7 @@ void interpretCommand(uint8 tofConfig[]) {
                     } else {
                         deltaThr = cmdData[0];
                     }
+                    tkrThrBump[lyr] = deltaThr;
                     int brd = boardMAP[lyr];
                     for (int chip=0; chip<MAX_TKR_ASIC; ++chip) {
                         tkrConfig[lyr][chip].threshDAC = EEPROM_1_ReadByte(base + brd*SIZEOF_EEPROM_ROW + chip) + deltaThr;
@@ -4022,6 +4109,7 @@ int main(void)
     boardMAP[7] = 3;   // D
     // The spare board is I
     readEEprom();
+    for (int i=0; i<MAX_TKR_BOARDS; ++i) tkrThrBump[i] = 0;
     
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  
     doDiagnostics = true;
