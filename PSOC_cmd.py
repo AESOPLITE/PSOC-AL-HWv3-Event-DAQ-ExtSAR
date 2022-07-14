@@ -376,6 +376,16 @@ def tkrSetCRCcheck(choice):
     data1 = mkDataByte(ch, addrEvnt, 1)
     ser.write(data1)
     print("tkrSetCRCcheck: will CRC checks be made on Tracker hit lists?: " + choice)
+
+def setSettlingWindowAll(count):
+    if count > 126:
+        print("setSettlingWindow: input count of " + str(count) + " is too large. Must be < 127")
+        return
+    cmdHeader = mkCmdHdr(1, 0x3A, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(count, addrEvnt, 1)
+    ser.write(data1)
+    print("setSettlingWindow: setting the comparator settling time window for all channels to " + str(count) + " counts")
     
 def setSettlingWindow(chan, count):
     if count > 126:

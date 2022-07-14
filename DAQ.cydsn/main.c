@@ -65,6 +65,7 @@
  * V26.6:  Fixed dimension of endData. Changed command 5B to modify thresholds per layer. Use all 8 bits of the
  *         trigger status register, adding T1,T2,T3,T4 and removing G
  * V26.7:  Added a begin-of-run record that records all of the run parameters. Improved EOR record.
+ * V26.8:  Increased all settling times to 36 counts for T1->T4. 
  * ========================================
  */
 #include "project.h"
@@ -75,7 +76,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 26
-#define MINOR_VERSION 6
+#define MINOR_VERSION 8
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -2963,7 +2964,7 @@ uint8 isAcommand(uint8 cmd) {
         0x4E, 0x4F, 0x51, 0x56, 0x5C, 0x5E, 0x5F, 0x5D, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x60, 0x61};
     static uint8 numData[NUM_COMMANDS] = {0xC2, 1, 0, 3, 1, 1, 0, 0xC3, 3, 3, 0xC5, 3, 1,
         0, 2, 0, 1, 1, 0, 1, 2, 1, 2, 1, 0, 0, 0, 0, 1, 2, 1, 0,
-        2, 2, 1, 0, 0, 4, 0, 1, 1, 0, 10, 0, 0, 1, 0, 0, 1, 1, 1,
+        2, 0xC1, 1, 0, 0, 4, 0, 1, 1, 0, 10, 0, 0, 1, 0, 0, 1, 1, 1,
         1, 1, 0, 1, 1, 0, 0, 0, 2, 0, 8, 0, 0xC1, 1, 0};
     for (int i=0; i<NUM_COMMANDS; ++i) {
         if (validCommands[i] == cmd) {
@@ -3514,7 +3515,14 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 break;
             case '\x3A':   // Set the settling time allowed for PMT signals
-                setSettlingWindow(cmdData[0], cmdData[1]);
+                if (nDataBytes > 1) {
+                    setSettlingWindow(cmdData[0], cmdData[1]);
+                } else {
+                    setSettlingWindow(2, cmdData[0]);
+                    setSettlingWindow(3, cmdData[0]);
+                    setSettlingWindow(4, cmdData[0]);
+                    setSettlingWindow(5, cmdData[0]);
+                }
                 break;
             case '\x3B':   // Enable or disable the trigger
                 if (cmdData[0] == 1) {
@@ -4337,10 +4345,10 @@ int main(void)
     TrigWindow_V1_3_Count7_1_Start();
     TrigWindow_V1_4_Count7_1_Start();
     TrigWindow_V1_5_Count7_1_Start();
-    setSettlingWindow(2, 6);   // Values determined from the oscilloscope using board V3-A
-    setSettlingWindow(3, 12);
-    setSettlingWindow(4, 27);
-    setSettlingWindow(5, 30);
+    setSettlingWindow(2, 36);   // Safe values determined from the oscilloscope using board V3-A
+    setSettlingWindow(3, 36);
+    setSettlingWindow(4, 36);
+    setSettlingWindow(5, 36);
     
     // Start the internal real-time-clock component
     RTC_1_Start();
