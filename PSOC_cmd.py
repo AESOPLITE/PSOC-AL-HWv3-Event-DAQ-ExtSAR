@@ -116,7 +116,7 @@ def getData(address, debug = False):
         ret = ser.read(1)
         dataLength = bytes2int(ret)
         command = ser.read(1)
-        if command == b'\xDE' or command == b'\xDF' or command == b'\xDB' or command == b'\xDD' or command == b'\xde' or command == b'\xdf' or command == b'\xdb' or command == b'\xdd':
+        if command == b'\xDE' or command == b'\xDF' or command == b'\xDB' or command == b'\xDD' or command == b'\xDA' or command == b'\xde' or command == b'\xdf' or command == b'\xdb' or command == b'\xdd' or command == b'\xda':
             nCmdData = bytes2int(ser.read(1))
             if nCmdData != 0: print("getData: # command bytes " + str(nCmdData) + " != 0 for packet " + str(command))
             dataList = []
@@ -141,9 +141,14 @@ def getData(address, debug = False):
                 print("getData: tracker housekeeping packet received with " + str(dataLength) + " bytes")
                 printTkrHousekeeping(dataList)
             elif command == b'\xDB' or command == b'\xdb':
-                print("getData: TOF debug event data packet received with " + str(dataLength) + " bytes")   
+                print("getData: TOF debug event data packet received with " + str(dataLength) + " bytes") 
             elif command == b'\xDD' or command == b'\xdd':  # data packet
                 print("getData: event data packet received with " + str(dataLength) + " bytes")
+            elif command == b'\xDA' or command == b'\xda':  # error record
+                print("getData: error record received with " + str(dataLength) + " bytes")
+                for i in range(dataLength):
+                    ret = byteList[i]
+                    print("   Packet " + str(i) + ", byte 2 = " + str(bytes2int(ret)) + " decimal, " + str(ret.hex()) + " hex")
         else: 
             success = True
             #print("getData: received data for command " + str(command))
@@ -1021,15 +1026,14 @@ def printBOR(dataBytes):
     for lyr in range(8):
         print("       Layer " + str(lyr) + " = " + str(dataList[34+lyr]))
     print("   Tracker master trigger delay = " + str(dataList[42]))
-    print("   Number of tracker readout layers = " + str(dataList[43]))
-    print("   Tracker Master trigger source setting = " + str(dataList[44]))
+    print("   Tracker Master trigger source setting = " + str(dataList[43]))
     for lyr in range(8):
         print("   Tracker settings for board " + str(lyr))
-        print("       Tracker firmware code version = " + str(dataList[45+lyr*5]))
-        print("       Tracker firmware configuration register = " + str(dataBytes[45+lyr*5+1].hex()))
-        print("       Trigger source = " + str(dataList[45+lyr*5+2]))
-        print("       Trigger output length = " + str(dataList[45+lyr*5+3]))
-        print("       Trigger output delay = " + str(dataList[45+lyr*5+4]))
+        print("       Tracker firmware code version = " + str(dataList[44+lyr*5]))
+        print("       Tracker firmware configuration register = " + str(dataBytes[44+lyr*5+1].hex()))
+        print("       Number of readout layers = " + str(dataList[44+lyr*5+2]))
+        print("       Trigger output length = " + str(dataList[44+lyr*5+3]))
+        print("       Trigger output delay = " + str(dataList[44+lyr*5+4]))
            
 # Execute a run for a specified number of events to be acquired
 def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, debugTOF = False):
@@ -1268,11 +1272,12 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     # Tell the Event PSOC to stop the run
     cmdHeader = mkCmdHdr(0, 0x44, addrEvnt)
     ser.write(cmdHeader)
-    print("limitedRun: EOR expecting 141 bytes coming back.")
+    print("limitedRun: expecting an EOR record.")
     cnt = 0
     byteList = []
     while True:
-        if cnt > 10:
+        if cnt > 20:
+            print("Cannot find an EOR record. Print accumulated errors instead")
             readErrors(addrEvnt)
             break
         ret = ser.read(1)
@@ -1377,7 +1382,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         cntBytes.append(byteList[102+i])
     #for item in cntBytes: print("  counter byte = " + str(item))
     printRunCounters(cntBytes)
-	
+    
     Sigma = [0.,0.,0.,0.,0.,0.]
     TOFavg = TOFavg/float(numEvnts)
     TOFavg2 = TOFavg2/float(numEvnts)

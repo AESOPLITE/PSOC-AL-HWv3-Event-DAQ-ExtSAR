@@ -67,6 +67,7 @@
  * V26.7:  Added a begin-of-run record that records all of the run parameters. Improved EOR record.
  * V26.8:  Increased all settling times to 36 counts for T1->T4. 
  * V26.9:  Increment the busy count for GO1 as well as for GO, if busy.
+ * V26.10: Removed one redundant item from BOR record. Improved sending of EOR record. Turn off diagnostics.
  * ========================================
  */
 #include "project.h"
@@ -77,7 +78,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 26
-#define MINOR_VERSION 9
+#define MINOR_VERSION 10
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -281,7 +282,7 @@ int numErrRec = 0;
 // Some variables defined only for housekeeping information
 #define HOUSESIZE 81u
 #define TKRHOUSESIZE 201u
-#define BOR_LENGTH 85u
+#define BOR_LENGTH 84u
 uint8 dataBOR[BOR_LENGTH];
 bool doHouseKeeping;           // Set true to send housekeeping packets out
 bool doTkrHouseKeeping;
@@ -1911,19 +1912,17 @@ int makeBOR() {
     for (int i=0; i<MAX_TKR_BOARDS; ++i) dataBOR[34+i] = tkrThrBump[i];
     sendTrackerCmd(0, 0x07, 0, cmdData, TKR_HOUSE_DATA);
     dataBOR[42] = tkrHouseKeeping[0];
-    sendTrackerCmd(0, 0x1F, 0, cmdData, TKR_HOUSE_DATA);
-    dataBOR[43] = tkrHouseKeeping[0];
     sendTrackerCmd(0, 0x74, 0, cmdData, TKR_HOUSE_DATA);
-    dataBOR[44] = tkrHouseKeeping[0];
-    const int offset = 45;
-    const int nItems = 5;
+    dataBOR[43] = tkrHouseKeeping[0];
+    const int offset = 44;
+    const int nItems = 4;
     for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
         if (lyr < numTkrBrds) {
             sendTrackerCmd(lyr, 0x0A, 0, cmdData, TKR_HOUSE_DATA);
             dataBOR[offset+lyr*nItems] = tkrHouseKeeping[0];
             sendTrackerCmd(lyr, 0x0B, 0, cmdData, TKR_HOUSE_DATA);
             dataBOR[offset+lyr*nItems+1] = tkrHouseKeeping[0];
-            sendTrackerCmd(lyr, 0x74, 0, cmdData, TKR_HOUSE_DATA);
+            sendTrackerCmd(lyr, 0x1F, 0, cmdData, TKR_HOUSE_DATA);
             dataBOR[offset+lyr*nItems+2] = tkrHouseKeeping[0];
             sendTrackerCmd(lyr, 0x71, 0, cmdData, TKR_HOUSE_DATA);
             dataBOR[offset+lyr*nItems+3] = tkrHouseKeeping[0];
@@ -2817,7 +2816,7 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
     if (nDataReady > 0) {    // Send out a command echo only if there are also data to send
         dataLED(true);
         uint16 nPadding;
-        if (!cmdInputComplete) { // Output is event data, housekeeping, or EOR, not a command response
+        if (!cmdInputComplete) { // Output is event data, housekeeping, error, not a command response
             if (dataOut[0] == 0x5A && dataOut[1] == 0x45 && dataOut[2] == 0x52 && dataOut[3] == 0x4F) {  // Event data
                 if (debugTOF) dataPacket[4] = 0xDB;
                 else dataPacket[4] = 0xDD;
@@ -2828,7 +2827,11 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
                     if (dataOut[0] == 0x54 && dataOut[1] == 0x52 && dataOut[2] == 0x41 && dataOut[3] == 0x4B) {  // Tracker housekeeping
                         dataPacket[4] = 0xDF;
                     } else {
-                        dataPacket[4] = 0x44;    // end of run packet
+                        if (dataOut[0] == 0x45 && dataOut[1] == 0x52 && dataOut[2] == 0x52) {
+                            dataPacket[4] = 0xDA;    // Error record
+                        } else {
+                            dataPacket[4] = 0x3F;    // ?
+                        }
                     }
                 }
             }
@@ -3606,7 +3609,13 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 loadCntResults(&endData[offSet+nItems*MAX_TKR_BOARDS]);
                 nTkrHouseKeeping = 0;
-                nDataReady = 0;
+                nDataReady = END_DATA_SIZE + 3;
+                dataOut[0] = 0x45;
+                dataOut[1] = 0x4F;
+                dataOut[2] = 0x52;
+                for (uint i=0; i<END_DATA_SIZE; ++i) {
+                    dataOut[3+i] = endData[i];
+                }
                 break;
             case '\x50':  // Send counter information
                 nDataReady = loadCntResults(dataOut);
@@ -4122,7 +4131,7 @@ int main(void)
     for (int i=0; i<MAX_TKR_BOARDS; ++i) tkrThrBump[i] = 0;
     
     outputMode = SPI_OUTPUT;  // Default mode for sending out data  
-    doDiagnostics = true;
+    doDiagnostics = false;
     triggered = false;
     tkrData.nTkrBoards = 0;
     tofA.ptr = 0;
@@ -4520,18 +4529,8 @@ int main(void)
                     numErrRec--;
                 }
             }
-            
-            // Send out the end-of-run info if the run is ending. However, check nDataReady,
-            // to be sure to send out the last event packet first.
-            if (!triggered && endingRun && nDataReady == 0) {
-                endingRun = false;
-                nDataReady = END_DATA_SIZE + 3;
-                dataOut[0] = 0x45;
-                dataOut[1] = 0x4F;
-                dataOut[2] = 0x52;
-                for (uint i=0; i<END_DATA_SIZE; ++i) {
-                    dataOut[3+i] = endData[i];
-                }
+            if (endingRun) {
+                if (numErrRec == 0) endingRun = false;
             }
             
             // Send housekeeping packets. Check nDataReady to avoid overwriting an event.
