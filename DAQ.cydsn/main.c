@@ -68,6 +68,7 @@
  * V26.8:  Increased all settling times to 36 counts for T1->T4. 
  * V26.9:  Increment the busy count for GO1 as well as for GO, if busy.
  * V26.10: Removed one redundant item from BOR record. Improved sending of EOR record. Turn off diagnostics.
+ * V27.0:  Fixed error in trigger capture for T2,T3,T4.
  * ========================================
  */
 #include "project.h"
@@ -77,8 +78,8 @@
 #include <stdbool.h>
 #include <math.h>
 
-#define MAJOR_VERSION 26
-#define MINOR_VERSION 10
+#define MAJOR_VERSION 27
+#define MINOR_VERSION 0
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -407,7 +408,7 @@ const uint8 SSN_CH5  = 0x0C;
 uint8 outputMode;              // Data output mode (SPI or USB-UART)
 bool debugTOF;
 
-#define END_DATA_SIZE 145u
+#define END_DATA_SIZE 144u
 bool endingRun;                // Set true when the run is ending
 uint8 endData[END_DATA_SIZE];
 
@@ -2991,49 +2992,48 @@ uint8 loadCntResults(uint8 *toOutput) {
     toOutput[7] = nASICparityErr;
     toOutput[8] = nBadASIChead;
     toOutput[9] = nBadClust;
-    toOutput[10] = nBadCRC;
-    toOutput[11] = nBadCmd;
-    toOutput[12] = nBigClust;
-    toOutput[13] = nTkrOverFlow;
-    toOutput[14] = nTkrTagMismatch;
-    toOutput[15] = nEvtTooBig;
-    toOutput[16] = nTkrDatErr;
-    toOutput[17] = nTkrBadNdata;
-    toOutput[18] = byte32(nTkrTimeOut, 2);
-    toOutput[19] = byte32(nTkrTimeOut, 3);
-    toOutput[20] = byte32(nTkrTrg1, 0);
-    toOutput[21] = byte32(nTkrTrg1, 1);
-    toOutput[22] = byte32(nTkrTrg1, 2);
-    toOutput[23] = byte32(nTkrTrg1, 3);
-    toOutput[24] = byte32(nTkrTrg2, 0);
-    toOutput[25] = byte32(nTkrTrg2, 1);
-    toOutput[26] = byte32(nTkrTrg2, 2);
-    toOutput[27] = byte32(nTkrTrg2, 3);
-    toOutput[28] = byte32(nPMTonly, 0);
-    toOutput[29] = byte32(nPMTonly, 1);
-    toOutput[30] = byte32(nPMTonly, 2);
-    toOutput[31] = byte32(nPMTonly, 3);
-    toOutput[32] = byte32(nTkrOnly, 0);
-    toOutput[33] = byte32(nTkrOnly, 1);
-    toOutput[34] = byte32(nTkrOnly, 2);
-    toOutput[35] = byte32(nTkrOnly, 3);
-    toOutput[36] = byte32(nAllTrg, 0);
-    toOutput[37] = byte32(nAllTrg, 1);
-    toOutput[38] = byte32(nAllTrg, 2);
-    toOutput[39] = byte32(nAllTrg, 3);
-    toOutput[40] = byte32(nNoCK, 0);
-    toOutput[41] = byte32(nNoCK, 1);
-    toOutput[42] = byte32(nNoCK, 2);
-    toOutput[43] = byte32(nNoCK, 3);
+    toOutput[10] = nBadCmd;
+    toOutput[11] = nBigClust;
+    toOutput[12] = nTkrOverFlow;
+    toOutput[13] = nTkrTagMismatch;
+    toOutput[14] = nEvtTooBig;
+    toOutput[15] = nTkrDatErr;
+    toOutput[16] = nTkrBadNdata;
+    toOutput[17] = byte32(nTkrTimeOut, 2);
+    toOutput[18] = byte32(nTkrTimeOut, 3);
+    toOutput[19] = byte32(nTkrTrg1, 0);
+    toOutput[20] = byte32(nTkrTrg1, 1);
+    toOutput[21] = byte32(nTkrTrg1, 2);
+    toOutput[22] = byte32(nTkrTrg1, 3);
+    toOutput[23] = byte32(nTkrTrg2, 0);
+    toOutput[24] = byte32(nTkrTrg2, 1);
+    toOutput[25] = byte32(nTkrTrg2, 2);
+    toOutput[26] = byte32(nTkrTrg2, 3);
+    toOutput[27] = byte32(nPMTonly, 0);
+    toOutput[28] = byte32(nPMTonly, 1);
+    toOutput[29] = byte32(nPMTonly, 2);
+    toOutput[30] = byte32(nPMTonly, 3);
+    toOutput[31] = byte32(nTkrOnly, 0);
+    toOutput[32] = byte32(nTkrOnly, 1);
+    toOutput[33] = byte32(nTkrOnly, 2);
+    toOutput[34] = byte32(nTkrOnly, 3);
+    toOutput[35] = byte32(nAllTrg, 0);
+    toOutput[36] = byte32(nAllTrg, 1);
+    toOutput[37] = byte32(nAllTrg, 2);
+    toOutput[38] = byte32(nAllTrg, 3);
+    toOutput[39] = byte32(nNoCK, 0);
+    toOutput[40] = byte32(nNoCK, 1);
+    toOutput[41] = byte32(nNoCK, 2);
+    toOutput[42] = byte32(nNoCK, 3);
     if (sumWeights > 0.) {
         uint16 liveTime = (uint16)(10000.*liveWeightedSum/sumWeights);
-        toOutput[44] = byte16(liveTime,0);
-        toOutput[45] = byte16(liveTime,1);
+        toOutput[43] = byte16(liveTime,0);
+        toOutput[44] = byte16(liveTime,1);
     } else {
+        toOutput[43] = 0;
         toOutput[44] = 0;
-        toOutput[45] = 0;
     }
-    return 46;
+    return 45;
 }
 
 // Interpret and act on commands received from USB-UART or the Main PSOC
