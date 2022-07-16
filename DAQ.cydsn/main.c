@@ -70,6 +70,7 @@
  * V26.10: Removed one redundant item from BOR record. Improved sending of EOR record. Turn off diagnostics.
  * V27.0:  Fixed error in trigger capture for T2,T3,T4.
  * V27.1:  Greatly increased command timeout time, and made it proportional to nDataBytes.
+ * V27.2:  Increased command timeout to minimum 1 hour
  * ========================================
  */
 #include "project.h"
@@ -80,7 +81,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 27
-#define MINOR_VERSION 1
+#define MINOR_VERSION 2
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -160,7 +161,7 @@
 #define THRDEF (5u)
 
 /* Timeout in 5 millisecond units when waiting for command completion */
-#define TIMEOUT 20000u 
+#define TIMEOUT 360000u 
 
 /* Packet IDs */
 #define FIX_HEAD ('\xDB')  // This one is no longer used, because the command echo was added to the data return
