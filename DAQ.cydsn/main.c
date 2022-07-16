@@ -69,6 +69,7 @@
  * V26.9:  Increment the busy count for GO1 as well as for GO, if busy.
  * V26.10: Removed one redundant item from BOR record. Improved sending of EOR record. Turn off diagnostics.
  * V27.0:  Fixed error in trigger capture for T2,T3,T4.
+ * V27.1:  Greatly increased command timeout time, and made it proportional to nDataBytes.
  * ========================================
  */
 #include "project.h"
@@ -79,7 +80,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 27
-#define MINOR_VERSION 0
+#define MINOR_VERSION 1
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -159,7 +160,7 @@
 #define THRDEF (5u)
 
 /* Timeout in 5 millisecond units when waiting for command completion */
-#define TIMEOUT 2000u 
+#define TIMEOUT 20000u 
 
 /* Packet IDs */
 #define FIX_HEAD ('\xDB')  // This one is no longer used, because the command echo was added to the data return
@@ -4566,7 +4567,7 @@ int main(void)
             // Time-out protection in case the expected data for a command are never sent.
             // The command buffers are completely flushed, hoping for a fresh start
             // Note that this could be operator error (i.e. not sending the required command data bytes)
-            if (!cmdInputComplete && (time() - cmdStartTime > TIMEOUT)) {
+            if (!cmdInputComplete && (time() - cmdStartTime > (TIMEOUT*(1+nDataBytes)))) {
                 int InterruptState = CyEnterCriticalSection();
                 awaitingCommand = true;
                 cmdInputComplete = false;
