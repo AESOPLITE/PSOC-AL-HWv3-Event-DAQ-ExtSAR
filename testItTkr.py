@@ -62,11 +62,12 @@ readTofConfig()
 
 readErrors(address)
 tkrSetCRCcheck("yes")
-
-setTKRlayers(0, 3, 4, 5, 6, 8, 7, 2)
+#
+#GDEF
+setTKRlayers(5, 3, 4, 1, 6, 7, 2, 8)
 getTKRlayers()
 
-boards = [0]
+boards = [0,1,2,3,4,5,6]
 nBoards = len(boards)
 if nBoards > 0:
     tkrFPGAreset(0x00)
@@ -74,7 +75,7 @@ if nBoards > 0:
     readErrors(address)
     #sys.exit("abort")
 
-    tkrConfigReset(0x00)
+    for board in boards: tkrConfigReset(board)
 
     tkrAsicPowerOn()
     #time.sleep(1)
@@ -83,7 +84,7 @@ if nBoards > 0:
 
     #tkrSetNumLyrs(1)
     print("The number of tracker readout layers is set to " + str(bytes2int(tkrGetNumLyrs(0))))
-    bumpTKRthreshold(6,0,0,0,0,0,0,0)
+    bumpTKRthreshold(6,6,6,6,6,6,6,6)
     configureTkrASICs(nBoards)
     readErrors(address) 
     for brd in boards:
@@ -91,10 +92,15 @@ if nBoards > 0:
         readErrors(address) 
         print("The tracker FPGA firmware code version is " + str(tkrGetCodeVersion(0)) + " for board " + str(brd))
  
-    #calibrateAllFPGAinputTiming()
- 
-    tkrTrigEndStat(0, 1)
-    tkrSetDualTrig(0, 0)
+    tkrTrigEndStat(3, 1)
+    tkrTrigEndStat(6, 1)
+    tkrSetTrgMask(0,1)
+    tkrSetTrgMask(1,1)
+    tkrSetTrgMask(2,1)
+    tkrSetTrgMask(3,1)
+    tkrSetTrgMask(4,1)
+    tkrSetTrgMask(5,1)
+    tkrSetTrgMask(6,1)
 
     tkrSetTriggerSource(0)    # We want the external trigger
     trgsrc = bytes2int(tkrGetTriggerSource(0))
@@ -110,49 +116,38 @@ if nBoards > 0:
     trigWindow = 1
     ioCurrent = 3
     maxClust = 10
-    chips = [0,1,2,3,4,5,6,7,8,9,10,11]
+    chips = [6]
     for brd in boards:
-        tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
+        #tkrLoadASICconfig(brd, 31, oneShot, gain, shaping, bufSpeed, trigDelay, trigWindow, ioCurrent, maxClust)
         for chip in chips: tkrGetASICconfig(brd, chip)
     readErrors(address)
 
     for brd in boards:
-        tkrGetTemperature(brd)
-        tkrGetBusVoltage(brd, "flash18")
-        tkrGetBusVoltage(brd, "fpga12")
-        tkrGetBusVoltage(brd, "digi25")
-        tkrGetBusVoltage(brd, "i2c33")
-        tkrGetBusVoltage(brd, "analog21")
-        tkrGetBusVoltage(brd, "analog33")
-        tkrGetShuntCurrent(brd, "flash18")
-        tkrGetShuntCurrent(brd, "fpga12")
-        tkrGetShuntCurrent(brd, "digi25")
-        tkrGetShuntCurrent(brd, "i2c33")
-        tkrGetShuntCurrent(brd, "analog21")
-        tkrGetShuntCurrent(brd, "analog33")
+        #tkrGetTemperature(brd)
+        #tkrGetBusVoltage(brd, "flash18")
+        #tkrGetBusVoltage(brd, "fpga12")
+        #tkrGetBusVoltage(brd, "digi25")
+        #tkrGetBusVoltage(brd, "i2c33")
+        #tkrGetBusVoltage(brd, "analog21")
+        #tkrGetBusVoltage(brd, "analog33")
+        #tkrGetShuntCurrent(brd, "flash18")
+        #tkrGetShuntCurrent(brd, "fpga12")
+        #tkrGetShuntCurrent(brd, "digi25")
+        #tkrGetShuntCurrent(brd, "i2c33")
+        #tkrGetShuntCurrent(brd, "analog21")
+        #tkrGetShuntCurrent(brd, "analog33")
         tkrGetShuntCurrent(brd, "bias100")
+
+    rates = getLyrTrgCnt(boards)
+    for brd, rate in zip(boards, rates):
+        print("Trigger rate in board " + str(brd) + " = " + str(rate))
+
 
     # Test setting of the calibration mask
     hitList = []
     #newChan = random.randint(0,5)
     #newSize = random.randint(1,6)
-    hit = [2, 7]
-    hitList.append(hit)
-    #newChan = random.randint(12,16)
-    #newSize = random.randint(1,6)
-    hit = [3,15]
-    hitList.append(hit)
-    #newChan = random.randint(23,28)
-    #newSize = random.randint(1,6)
-    hit = [1,23]
-    hitList.append(hit)
-    #newChan = random.randint(35,44)
-    #newSize = random.randint(1,6)
-    hit = [4,50]
-    hitList.append(hit)
-    #newChan = random.randint(51,57)
-    #newSize = random.randint(1,6)
-    hit = [2,61]
+    hit = [1, 53]
     hitList.append(hit)
 
     for brd in boards:
@@ -174,7 +169,7 @@ if nBoards > 0:
         #time.sleep(0.1)
         #for chip in chips: tkrGetDataMask(brd, chip)
 
-        #tkrSetTriggerMask(brd, 31, "mask", hitList)
+        #tkrSetTriggerMask(brd, 31, "unmask", hitList)
         #time.sleep(0.1)
         for chip in chips: tkrGetTriggerMask(brd, chip)
 
@@ -191,31 +186,19 @@ if nBoards > 0:
         tkrSetCalMask(brd, 31, hitList)
         time.sleep(0.1)
         for chip in chips: mask1 = tkrGetCalMask(brd, chip, True)
+        
+        print("Board " + str(brd) + " layer trigger-OR count = " + str(rate) + " Hz")
+        delay = 0
+        length = 3
+        #setTkrTrigOutputTiming(brd, delay, length)
         getTkrTrigOutputTiming(brd)
-
-    if len(boards) == 1:
-        triggerDelay = 18    # 6 if asic trig delay is 1?
-        triggerTag = 0
-        sendTkrCalStrobe(0, triggerDelay, triggerTag, True)
-
-        time.sleep(0.01)
-        readCalEvent(triggerTag, True)
-
-        #tkrGetASICconfig(0, 4)
-        #tkrGetASICconfig(0, 5)
-        readErrors(address)
-
-    # Measure the trigger noise count
-    rates = getLyrTrgCnt(boards)
-    for brd, rate in zip(boards, rates):
-        print("Trigger rate in board " + str(brd) + " = " + str(rate))
 
 #for i in range(1):
 #    print("send reset pulse")
 #    logicReset(addrEvnt)
 #    time.sleep(0.3)
 
-sys.exit("abort")
+#sys.exit("abort")
 
 TOFselectDAQ(address,"DMA")
 
@@ -247,37 +230,41 @@ for brd in boards:
 
 #getLyrTrgCnt(0)
 
-mask = 0x0D    # T3
+NOOP()
+
+mask = 0x01    # T1&T2&T3
 print("Setting the first trigger mask to " + str(mask))
 setTriggerMask(1, mask)
-print("The first trigger mask is set to  " + str(hex(getTriggerMask(1))))
-print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
-
-prescale = 4
-print("Setting the PMT trigger prescale to " + str(prescale))
-setTriggerPrescale("PMT", prescale)
-
-setSettlingWindow(3, 16)
-setPeakDetResetWait(28)
-
-mask = 0x00    # T1, T3 prescaled
+mask = 0x05    # T1 & T3 prescaled
 print("Setting the second trigger mask to " + str(mask))
 setTriggerMask(2, mask)
 print("The first trigger mask is set to  " + str(hex(getTriggerMask(1))))
 print("The second trigger mask is set to " + str(hex(getTriggerMask(2))))
+
+prescale = 2
+print("Setting the PMT trigger prescale to " + str(prescale))
+setTriggerPrescale("PMT", prescale)
+print("The PMT trigger prescale is set to " + str(getTriggerPrescale("PMT")))
+print("Setting the TKR trigger prescale to " + str(prescale))
+setTriggerPrescale("Tracker",prescale)
+print("The Tracker trigger prescale is set to " + str(getTriggerPrescale("Tracker")))
+#sys.exit("abort")
+setSettlingWindowAll(16)
+setPeakDetResetWait(28)
+
 tkrSetPMTtrgDly(12)
 
 print("Count on channel 2 = " + str(getChannelCount(2)))
 print("Before run, trigger enable status is " + str(triggerEnableStatus()))
 
-#setTkrRatesMuliplier(2)
-#startHouseKeeping(4, 1)
+setTkrRatesMuliplier(2)
+startHouseKeeping(4, 1)
 #startTkrHouseKeeping(1)
 
 readErrors(address)
 
 #response = input("Enter something")
-ADC, Sigma, TOF, sigmaTOF = limitedRun(86, 50, True, False, True)
+ADC, Sigma, TOF, sigmaTOF = limitedRun(89, 100, True, True, True)
 readErrors(address)
 
 getRunCounters()

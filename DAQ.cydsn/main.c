@@ -71,6 +71,8 @@
  * V27.0:  Fixed error in trigger capture for T2,T3,T4.
  * V27.1:  Greatly increased command timeout time, and made it proportional to nDataBytes.
  * V27.2:  Increased command timeout to minimum 1 hour
+ * V27.3:  Added command 0x62 and fixed the Cntr8_V1_ReadPeriod() function. Fixed bug in BOR.
+ * V27.4:  Add NOOP command 0x7A. Check number of data bytes for max as well as min.
  * ========================================
  */
 #include "project.h"
@@ -81,7 +83,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 27
-#define MINOR_VERSION 2
+#define MINOR_VERSION 4
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -355,6 +357,7 @@ uint32 nReadAvg = 0;
 uint32 lastNumTkrResets = 0;
 uint8 nASICparityErr = 0;
 uint8 nASICerrorEvts = 0;
+uint16 nNOOP = 0;
 
 // Register pointers for the power monitoring chips
 const uint8 INA226_Config_Reg = 0x00;
@@ -410,7 +413,7 @@ const uint8 SSN_CH5  = 0x0C;
 uint8 outputMode;              // Data output mode (SPI or USB-UART)
 bool debugTOF;
 
-#define END_DATA_SIZE 144u
+#define END_DATA_SIZE 146u
 bool endingRun;                // Set true when the run is ending
 uint8 endData[END_DATA_SIZE];
 
@@ -1918,7 +1921,7 @@ int makeBOR() {
     sendTrackerCmd(0, 0x74, 0, cmdData, TKR_HOUSE_DATA);
     dataBOR[43] = tkrHouseKeeping[0];
     const int offset = 44;
-    const int nItems = 4;
+    const int nItems = 5;
     for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
         if (lyr < numTkrBrds) {
             sendTrackerCmd(lyr, 0x0A, 0, cmdData, TKR_HOUSE_DATA);
@@ -2964,16 +2967,16 @@ void readEEprom() {
 
 // Check whether a byte represents a valid command and return the number of expected data bytes
 // Bits 6 and 7 of the number of data bytes are set if the number is a lower limit (variable data)
-#define NUM_COMMANDS 66
+#define NUM_COMMANDS 68
 uint8 isAcommand(uint8 cmd) {
     static uint8 validCommands[NUM_COMMANDS] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x10, 0x54, 0x55, 0x41, 0x42, 0x43,
-        0x0C, 0x0D, 0x0E, 0x20, 0x21, 0x22, 0x23, 0x24, 0x26, 0x27, 0x30, 0x31, 0x32, 0x3F, 0x34, 0x35, 0x36, 0x37, 0x38,
+        0x7A, 0x0C, 0x0D, 0x0E, 0x20, 0x21, 0x22, 0x23, 0x24, 0x26, 0x27, 0x30, 0x31, 0x32, 0x3F, 0x34, 0x35, 0x36, 0x37, 0x38,
         0x39, 0x3A, 0x3B, 0x44, 0x50, 0x3C, 0x3D, 0x3E, 0x33, 0x40, 0x45, 0x46, 0x47, 0x48, 0x49, 0x53, 0x4B, 0x4C, 0x4D,
-        0x4E, 0x4F, 0x51, 0x56, 0x5C, 0x5E, 0x5F, 0x5D, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x60, 0x61};
-    static uint8 numData[NUM_COMMANDS] = {0xC2, 1, 0, 3, 1, 1, 0, 0xC3, 3, 3, 0xC5, 3, 1,
-        0, 2, 0, 1, 1, 0, 1, 2, 1, 2, 1, 0, 0, 0, 0, 1, 2, 1, 0,
-        2, 0xC1, 1, 0, 0, 4, 0, 1, 1, 0, 10, 0, 0, 1, 0, 0, 1, 1, 1,
-        1, 1, 0, 1, 1, 0, 0, 0, 2, 0, 8, 0, 0xC1, 1, 0};
+        0x4E, 0x4F, 0x51, 0x56, 0x5C, 0x5E, 0x5F, 0x5D, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x60, 0x61, 0x62};
+    static uint8 numData[NUM_COMMANDS] = {0x32, 0x11, 0, 0x33, 0x11, 0x11, 0, 0xE3, 0x33, 0x33, 0xF5, 0x33, 0x11,
+        0, 0, 0x22, 0, 0x11, 0x11, 0, 0x11, 0x22, 0x11, 0x22, 0x11, 0, 0, 0, 0, 0x11, 0x22, 0x11, 0,
+        0x22, 0x21, 0x11, 0, 0, 0x44, 0, 0x11, 0x11, 0, 0xAA, 0, 0, 0x11, 0, 0, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0, 0x11, 0x11, 0, 0, 0, 0x22, 0, 0x88, 0, 0x81, 0x11, 0, 0x11};
     for (int i=0; i<NUM_COMMANDS; ++i) {
         if (validCommands[i] == cmd) {
             return numData[i];
@@ -3035,7 +3038,9 @@ uint8 loadCntResults(uint8 *toOutput) {
         toOutput[43] = 0;
         toOutput[44] = 0;
     }
-    return 45;
+    toOutput[45] = byte16(nNOOP,0);
+    toOutput[46] = byte16(nNOOP,1);
+    return 47;
 }
 
 // Interpret and act on commands received from USB-UART or the Main PSOC
@@ -3160,6 +3165,9 @@ void interpretCommand(uint8 tofConfig[]) {
                 // Ignore commands that are supposed to be internal to the tracker,
                 // to avoid confusing the tracker logic.
                 if (tkrCmdCode == 0x52 || tkrCmdCode == 0x53) break;
+                if (tkrCmdCode == 0x61) {
+                    nDataReady = 0;
+                }
                 sendTrackerCmd(cmdData[0], tkrCmdCode, cmdData[2], &cmdData[3], tkrCmdType(tkrCmdCode));
                 break;
             case '\x54':        // Load the ASIC configuration registers
@@ -3521,6 +3529,14 @@ void interpretCommand(uint8 tofConfig[]) {
                     Cntr8_V1_PMT_WritePeriod(cmdData[1]);
                 }
                 break;
+            case '\x62':   // Get trigger prescales
+                nDataReady = 1;
+                if (cmdData[0] == 1) {
+                    dataOut[0] = Cntr8_V1_TKR_ReadPeriod();
+                } else if (cmdData[0] == 2) {
+                    dataOut[0] = Cntr8_V1_PMT_ReadPeriod();
+                }
+                break;
             case '\x3A':   // Set the settling time allowed for PMT signals
                 if (nDataBytes > 1) {
                     setSettlingWindow(cmdData[0], cmdData[1]);
@@ -3652,8 +3668,6 @@ void interpretCommand(uint8 tofConfig[]) {
                 lastNTkrTimeOut = 0;
                 nTkrDatErr = 0;
                 nTkrBadNdata = 0;
-                nIgnoredCmd = 0;
-                nBadCmd = 0;
                 nEvtTooBig = 0;
                 nBadCRC = 0;
                 nBigClust = 0;
@@ -3670,7 +3684,6 @@ void interpretCommand(uint8 tofConfig[]) {
                     pmtCntInit[cntr] = getChCount(cntr);
                 }
                 waitingPmtRateCnt = true;
-                CyExitCriticalSection(InterruptState);
                 runNumber = cmdData[0];
                 runNumber = (runNumber<<8) | cmdData[1];
                 readTracker = (cmdData[2] == 1);
@@ -3690,9 +3703,10 @@ void interpretCommand(uint8 tofConfig[]) {
                 cntTrialsMax = 0;
                 liveWeightedSum = 0.;
                 sumWeights = 0.;
-                // Reset Tracker counters and enable the tracker trigger
+                CyExitCriticalSection(InterruptState);
+                // Reset Tracker counters
                 for (int brd=0; brd<numTkrBrds; ++brd) {
-                    sendSimpleTrackerCmd(brd, 0x04);
+                    sendSimpleTrackerCmd(brd, 0x04);  //Reset FPGA state machines & counters
                 }
                 endingRun = false;
                 nDataReady = makeBOR();  // Put together the BOR record to be sent out
@@ -3937,7 +3951,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 sendTrackerCmd(0x00, tkrCmdCode, 0, cmdData, TKR_ECHO_DATA);     // Turn on the ASIC power
                 CyDelay(100);
                 configureASICs();
-                for (int brd=0; brd<numTkrBrds; ++brd) sendSimpleTrackerCmd(brd, 0x04);
+                for (int brd=0; brd<numTkrBrds; ++brd) sendSimpleTrackerCmd(brd, 0x04);  // State machine reset
                 break;
             case '\x5C': // Start sending tracker monitoring packets
                 tkrHouseKeepPeriod = cmdData[0];
@@ -4040,6 +4054,9 @@ void interpretCommand(uint8 tofConfig[]) {
                     dataOut[3*brd+2] = byte32(allErrCodes[brd],3);
                 }
                 nDataReady = 24;
+                break;
+            case '\x7A': // NOOP
+                nNOOP++;
                 break;
         } // End of command switch
     } else { // Log an error if the user is sending spurious commands while the trigger is enabled
@@ -4194,6 +4211,7 @@ int main(void)
     cntTrialsMax = 0;
     liveWeightedSum = 0.;
     sumWeights = 0.;
+    nNOOP = 0;
     
     uint8 *buffer;        // Buffer for incoming commands
     uint8 USBUART_buf[BUFFER_LEN];
@@ -4697,12 +4715,10 @@ int main(void)
                             nDataBytes = ((addressByte & '\xC0') >> 4) | (addressByte & '\x03');
                             command = dataByte;
                             uint8 stuff = isAcommand(command);  // Check whether the right number of data bytes was supplied
-                            uint8 nDataExpected = stuff & 0x0F;
-                            bool lowerLimit = (stuff & 0xC0) == 0xC0;
-                            if (nDataExpected != nDataBytes) {
-                                if (!lowerLimit || (nDataBytes < nDataExpected)) {
-                                    addError(ERR_WRONG_NUM_BYTES, command, nDataBytes);
-                                }
+                            uint8 minDataExpected = stuff & 0x0F;
+                            uint8 maxDataExpected = (stuff & 0xF0)>>4;
+                            if (nDataBytes < minDataExpected || nDataBytes > maxDataExpected) {
+                                addError(ERR_WRONG_NUM_BYTES, command, nDataBytes);
                             }
                             if (nDataBytes == 0) cmdInputComplete = true;
                         } else {                       // Receiving data from a command in progress
@@ -4721,9 +4737,9 @@ int main(void)
                             }
                             if (badDataByte) {  // Try to interpret this byte as a new command
                                 uint8 stuff = isAcommand(dataByte);
-                                uint8 nDataExpected = stuff & 0x0F;
-                                bool lowerLimit = (stuff & 0xC000) == 0xC0;
-                                if (nDataExpected == byteCnt || (lowerLimit && (byteCnt >= nDataExpected))) {
+                                uint8 minDataExpected = stuff & 0x0F;
+                                uint8 maxDataExpected = (stuff & 0xF0)>>4;
+                                if (nDataBytes >= minDataExpected && nDataBytes <= maxDataExpected) {
                                     awaitingCommand = false;
                                     cmdStartTime = time();
                                     cmdCount++;

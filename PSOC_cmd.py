@@ -290,28 +290,30 @@ def getTkrLyrRates():
         print("getTkrLyerRates: layer " + str(lyr+1) + ": rate = " + str(byte2*256 + byte1) + " Hz")
         
 def getLyrTrgCnt(FPGA):
-    print("getLyrTrgCnt: getting the trigger count from tracker layer " + str(FPGA))
     cmdHeader = mkCmdHdr(3, 0x10, addrEvnt)
     ser.write(cmdHeader)
-    data1 = mkDataByte(FPGA, addrEvnt, 1)
+    data1 = mkDataByte(0, addrEvnt, 1)
     ser.write(data1)
     data2 = mkDataByte(0x6C, addrEvnt, 2)
     ser.write(data2)
     data3 = mkDataByte(0, addrEvnt, 3)
     ser.write(data3)
-    time.sleep(1.5)
-    cmdHeader = mkCmdHdr(3, 0x10, addrEvnt)
-    ser.write(cmdHeader)
-    data1 = mkDataByte(FPGA, addrEvnt, 1)
-    ser.write(data1)
-    data2 = mkDataByte(0x6D, addrEvnt, 2)
-    ser.write(data2)
-    data3 = mkDataByte(0, addrEvnt, 3)
-    ser.write(data3)
-    time.sleep(0.1)
-    dataReturned = getTkrHousekeeping()
-    rate = bytes2int(dataReturned[7])*256 + bytes2int(dataReturned[8])
-    print("getLyrTrgCnt: the trigger rate for layer " + str(FPGA) + " is " + str(rate) + " Hz")
+    time.sleep(1.2)
+    rate = []
+    for brd in FPGA:
+        if brd < 0 or brd > 7: continue
+        cmdHeader = mkCmdHdr(3, 0x10, addrEvnt)
+        ser.write(cmdHeader)
+        data1 = mkDataByte(brd, addrEvnt, 1)
+        ser.write(data1)
+        data2 = mkDataByte(0x6D, addrEvnt, 2)
+        ser.write(data2)
+        data3 = mkDataByte(0, addrEvnt, 3)
+        ser.write(data3)
+        time.sleep(0.1)
+        dataReturned = getTkrHousekeeping()
+        rate.append(bytes2int(dataReturned[7])*256 + bytes2int(dataReturned[8]))
+    return rate
 
 def loadEventPSOCrtc():
     print("Loading the RTC setting from the main PSOC to the event PSOC")
@@ -370,7 +372,22 @@ def setTriggerPrescale(whichOne, count):
     ser.write(data1)
     data2 = mkDataByte(count, addrEvnt, 2)
     ser.write(data2)
-
+    
+def getTriggerPrescale(whichOne):
+    if (whichOne == "Tracker"):
+        ID = 1
+    elif (whichOne == "PMT"):
+        ID = 2
+    else:
+        print("getTriggerPrescale: unrecognized trigger type " + whichOne)
+        return 0
+    cmdHeader = mkCmdHdr(1, 0x62, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(ID, addrEvnt, 1)
+    ser.write(data1)
+    cmd,cmdData,dataBytes = getData(addrEvnt)
+    return bytes2int(dataBytes[0])
+        
 def tkrSetCRCcheck(choice):
     if choice == "yes":
         ch=1
@@ -875,6 +892,8 @@ def getTkrASICerrors():
         print("   Layer " + str(lyr) + " chips 4-7: " + str(byteList[3*lyr+1]))
         print("   Layer " + str(lyr) + " chips 8-11: " + str(byteList[3*lyr+2]))
 
+
+
 def printHousekeeping(dataList, byteList):
     run = dataList[4]*256 + dataList[5]
     print("Housekeeping packet for run " + str(run))
@@ -1378,7 +1397,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
         print("  Layer " + str(lyr) + ": ASIC error codes = " + str(byteList[30+9*lyr+7].hex()))
         print("  Layer " + str(lyr) + ": number of bad command addresses or codes received = " + str(byteList[30+9*lyr+8].hex()))
     cntBytes = []
-    for i in range(46):
+    for i in range(47):
         cntBytes.append(byteList[102+i])
     #for item in cntBytes: print("  counter byte = " + str(item))
     printRunCounters(cntBytes)
@@ -2050,7 +2069,7 @@ def tkrSetASICmask(FPGA, maskUp, maskDn):
     address = addrEvnt
     print("Setting the ASIC mask of Tracker FPGA " + str(FPGA) + " to " 
                                   + str(maskUp) + str(maskDn))
-    cmdHeader = mkCmdHdr(6, 0x10, address)
+    cmdHeader = mkCmdHdr(5, 0x10, address)
     ser.write(cmdHeader)
     data1 = mkDataByte(FPGA, address, 1)
     ser.write(data1)
@@ -2063,6 +2082,40 @@ def tkrSetASICmask(FPGA, maskUp, maskDn):
     data5 = mkDataByte(maskDn, address, 5)
     ser.write(data5)
 
+def setTkrTrigOutputTiming(FPGA, delay, length):
+    print("setTkrTrigOutputTiming: for board " + str(FPGA) + " setting the delay to " + str(delay) + " and the length to " + str(length))
+    cmdHeader = mkCmdHdr(5, 0x10, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(FPGA, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0x61, addrEvnt, 2)
+    ser.write(data2)
+    data3 = mkDataByte(2, addrEvnt, 3)
+    ser.write(data3)
+    data4 = mkDataByte(length, addrEvnt, 4)
+    ser.write(data4)
+    data5 = mkDataByte(delay, addrEvnt, 5)
+    ser.write(data5)
+    
+    
+def NOOP():
+    print("NOOP: sending a NOOP command to the event PSOC")
+    cmdHeader= mkCmdHdr(0, 0x7A, addrEvnt)
+    ser.write(cmdHeader)
+    
+def getTkrTrigOutputTiming(FPGA):
+    cmdHeader = mkCmdHdr(3, 0x10, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(FPGA, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0x71, addrEvnt, 2)
+    ser.write(data2)
+    data3 = mkDataByte(0, addrEvnt, 3)
+    ser.write(data3)
+    time.sleep(0.1)
+    byteList = getTkrHousekeeping()
+    print("getTkrTrigOutputTiming: for board " + str(FPGA) + " the delay setting is " + str(bytes2int(byteList[8])) + " and the length is " + str(bytes2int(byteList[7])))
+    
 # Dump all the bytes accumulated in the Tracker output RAM buffer (for debugging)
 def dmpTkrRAMbuffer():
     cmdHeader = mkCmdHdr(2, 0x10, addrEvnt)
@@ -2248,6 +2301,8 @@ def printRunCounters(dataBytes):
     print("                Number of events with no primary trigger = " + str(nNoCk))
     liveTime = (bytes2int(dataBytes[43])*256 + bytes2int(dataBytes[44]))/100.
     print("                ADC control state machine live time = " + str(liveTime))
+    nNOOP = bytes2int(dataBytes[45])*256 + bytes2int(dataBytes[46])
+    print("                Number of NOOP commands received = " + str(nNOOP))
     
 def getRunCounters():
     cmdHeader = mkCmdHdr(0, 0x50, addrEvnt)

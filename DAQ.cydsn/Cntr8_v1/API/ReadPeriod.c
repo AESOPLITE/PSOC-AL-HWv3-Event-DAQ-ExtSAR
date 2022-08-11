@@ -15,6 +15,6 @@
 #include "`$INSTANCE_NAME`_Cntr8.h"
 
 uint8 `$INSTANCE_NAME`_ReadPeriod() {
-    return `$INSTANCE_NAME`_Period_Reg;
+    return 255 - `$INSTANCE_NAME`_Period_Reg;
     }
 /* [] END OF FILE */

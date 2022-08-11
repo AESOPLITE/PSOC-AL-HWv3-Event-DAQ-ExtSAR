@@ -1475,6 +1475,7 @@
       <Data key="ac40ea88-89f8-458d-bc1b-9e80225f2c21" value="Pin_20" />
       <Data key="ad49e56d-fa60-49d3-adf5-ce7683c929ca" value="Pin_24" />
       <Data key="ae9a5a1b-b35d-4bdb-9886-224852945c14" value="Pin_LED1" />
+      <Data key="b2fd84f1-f3ac-493e-963a-21dc6f27866f" value="Pin_db1" />
       <Data key="b06fa9e7-90a5-4f3d-a509-2004dc5b197b/16a808f6-2e13-45b9-bce0-b001c8655113" value="ADC_SAR_2_Bypass" />
       <Data key="b38c8d68-d88d-4d84-8d53-db623ef2a3eb" value="Pin_ADCclk" />
       <Data key="b69fad26-66df-420a-8622-d1fc2af8952f" value="Pin_T1pre" />
@@ -5002,6 +5003,11 @@
     <Group key="ae9a5a1b-b35d-4bdb-9886-224852945c14">
       <Group key="0">
         <Data key="Port Format" value="3,7" />
+      </Group>
+    </Group>
+    <Group key="b2fd84f1-f3ac-493e-963a-21dc6f27866f">
+      <Group key="0">
+        <Data key="Port Format" value="4,0" />
       </Group>
     </Group>
     <Group key="b38c8d68-d88d-4d84-8d53-db623ef2a3eb">
