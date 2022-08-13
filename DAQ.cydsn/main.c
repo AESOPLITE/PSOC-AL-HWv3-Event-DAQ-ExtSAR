@@ -73,6 +73,7 @@
  * V27.2:  Increased command timeout to minimum 1 hour
  * V27.3:  Added command 0x62 and fixed the Cntr8_V1_ReadPeriod() function. Fixed bug in BOR.
  * V27.4:  Add NOOP command 0x7A. Check number of data bytes for max as well as min.
+ * V27.5:  Added ability to choose AND or OR of the two Tracker triggers.
  * ========================================
  */
 #include "project.h"
@@ -83,7 +84,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 27
-#define MINOR_VERSION 4
+#define MINOR_VERSION 5
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -198,6 +199,8 @@
 #define TKR_DATA_NOT_READY 0x4E
 #define NUM_CMDS_IN_RUN 11
 #define MAX_CMD_TRY 3
+#define TKR_TRG_OR 1
+#define TKR_TRG_AND 0
 
 // Error codes
 #define ERR_DAC_LOAD 1u
@@ -287,7 +290,7 @@ int numErrRec = 0;
 // Some variables defined only for housekeeping information
 #define HOUSESIZE 81u
 #define TKRHOUSESIZE 201u
-#define BOR_LENGTH 84u
+#define BOR_LENGTH 85u
 uint8 dataBOR[BOR_LENGTH];
 bool doHouseKeeping;           // Set true to send housekeeping packets out
 bool doTkrHouseKeeping;
@@ -719,7 +722,7 @@ void getASICdata() {
 // Check whether the trigger is enabled
 bool isTriggerEnabled() {
     uint8 regValue = Control_Reg_Trg_Read();
-    bool enabled = regValue==0x01;
+    bool enabled = (regValue & 0x01);
     return enabled;
 }
 
@@ -1314,15 +1317,33 @@ uint16 tkrGetShuntVoltage(uint8 FPGA, uint8 i2cAddress) {
 // active. The control register should ensure that when isr_GO is enabled there will not be any pending triggers. It is crucial that
 // any trigger that goes to the ISR must also be seen by the tracker.
 void triggerEnable(bool enable) {
+    uint8 status = Control_Reg_Trg_Read();
     if (enable) {
         Control_Reg_Pls_Write(PULSE_TRIG_SET);
         isr_GO_Enable();
-        Control_Reg_Trg_Write(1);
+        status = status | 0x01;
+        Control_Reg_Trg_Write(status);
     } else {
         // Disable the master trigger 
-        Control_Reg_Trg_Write(0);
+        status = status & 0x02;
+        Control_Reg_Trg_Write(status);
         isr_GO_Disable();
     }
+}
+
+void setTkrLogic(int choice) {
+    uint8 status = Control_Reg_Trg_Read();
+    if (choice) {
+        status = status | 0x02;
+    } else {
+        status = status & 0x01;
+    }
+    Control_Reg_Trg_Write(status);
+}
+
+int getTkrLogic() {
+    uint8 status = Control_Reg_Trg_Read();
+    return status & 0x02;
 }
 
 void makeTkrHouseKeeping() {
@@ -1920,7 +1941,8 @@ int makeBOR() {
     dataBOR[42] = tkrHouseKeeping[0];
     sendTrackerCmd(0, 0x74, 0, cmdData, TKR_HOUSE_DATA);
     dataBOR[43] = tkrHouseKeeping[0];
-    const int offset = 44;
+    dataBOR[44] = getTkrLogic();
+    const int offset = 45;
     const int nItems = 5;
     for (int lyr=0; lyr<MAX_TKR_BOARDS; ++lyr) {
         if (lyr < numTkrBrds) {
@@ -2967,16 +2989,16 @@ void readEEprom() {
 
 // Check whether a byte represents a valid command and return the number of expected data bytes
 // Bits 6 and 7 of the number of data bytes are set if the number is a lower limit (variable data)
-#define NUM_COMMANDS 68
+#define NUM_COMMANDS 70
 uint8 isAcommand(uint8 cmd) {
     static uint8 validCommands[NUM_COMMANDS] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x10, 0x54, 0x55, 0x41, 0x42, 0x43,
         0x7A, 0x0C, 0x0D, 0x0E, 0x20, 0x21, 0x22, 0x23, 0x24, 0x26, 0x27, 0x30, 0x31, 0x32, 0x3F, 0x34, 0x35, 0x36, 0x37, 0x38,
         0x39, 0x3A, 0x3B, 0x44, 0x50, 0x3C, 0x3D, 0x3E, 0x33, 0x40, 0x45, 0x46, 0x47, 0x48, 0x49, 0x53, 0x4B, 0x4C, 0x4D,
-        0x4E, 0x4F, 0x51, 0x56, 0x5C, 0x5E, 0x5F, 0x5D, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x60, 0x61, 0x62};
+        0x4E, 0x4F, 0x51, 0x56, 0x5C, 0x5E, 0x5F, 0x5D, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x60, 0x61, 0x62, 0x63, 0x64};
     static uint8 numData[NUM_COMMANDS] = {0x32, 0x11, 0, 0x33, 0x11, 0x11, 0, 0xE3, 0x33, 0x33, 0xF5, 0x33, 0x11,
         0, 0, 0x22, 0, 0x11, 0x11, 0, 0x11, 0x22, 0x11, 0x22, 0x11, 0, 0, 0, 0, 0x11, 0x22, 0x11, 0,
         0x22, 0x21, 0x11, 0, 0, 0x44, 0, 0x11, 0x11, 0, 0xAA, 0, 0, 0x11, 0, 0, 0x11, 0x11, 0x11,
-        0x11, 0x11, 0, 0x11, 0x11, 0, 0, 0, 0x22, 0, 0x88, 0, 0x81, 0x11, 0, 0x11};
+        0x11, 0x11, 0, 0x11, 0x11, 0, 0, 0, 0x22, 0, 0x88, 0, 0x81, 0x11, 0, 0x11, 0x11, 0};
     for (int i=0; i<NUM_COMMANDS; ++i) {
         if (validCommands[i] == cmd) {
             return numData[i];
@@ -4055,6 +4077,17 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 nDataReady = 24;
                 break;
+            case '\x63': // Set the logic for the tracker trigger to AND or OR
+                if (cmdData[0] == 0) {
+                    setTkrLogic(TKR_TRG_AND);
+                } else {
+                    setTkrLogic(TKR_TRG_OR);
+                }
+                break;
+            case '\x64': // Get the tracker logic setting
+                nDataReady = 1;
+                dataOut[0] = getTkrLogic();
+                break;
             case '\x7A': // NOOP
                 nNOOP++;
                 break;
@@ -4497,6 +4530,7 @@ int main(void)
     uint32 cmdStartTime = time();
     set_SPI_SSN(0, true);   // Deselect all SPI slaves
     triggerEnable(false);
+    setTkrLogic(TKR_TRG_OR);  // Default is an OR of the two Tracker triggers
     endingRun = false;
     runNumber = 0;
 

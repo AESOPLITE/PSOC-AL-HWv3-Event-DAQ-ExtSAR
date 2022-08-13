@@ -96,9 +96,9 @@ if nBoards > 0:
     tkrTrigEndStat(6, 1)
     tkrSetTrgMask(0,1)
     tkrSetTrgMask(1,1)
-    tkrSetTrgMask(2,1)
-    tkrSetTrgMask(3,1)
-    tkrSetTrgMask(4,1)
+    tkrSetTrgMask(2,0)
+    tkrSetTrgMask(3,0)
+    tkrSetTrgMask(4,0)
     tkrSetTrgMask(5,1)
     tkrSetTrgMask(6,1)
 
@@ -261,7 +261,10 @@ setTkrRatesMuliplier(2)
 startHouseKeeping(4, 1)
 #startTkrHouseKeeping(1)
 
-readErrors(address)
+setTkrLogic("AND")
+getTkrLogic()
+
+#readErrors(address)
 
 #response = input("Enter something")
 ADC, Sigma, TOF, sigmaTOF = limitedRun(89, 100, True, True, True)

@@ -1046,13 +1046,14 @@ def printBOR(dataBytes):
         print("       Layer " + str(lyr) + " = " + str(dataList[34+lyr]))
     print("   Tracker master trigger delay = " + str(dataList[42]))
     print("   Tracker Master trigger source setting = " + str(dataList[43]))
+    print("   Tracker logic setting = " + str(dataList[44]))
     for lyr in range(8):
         print("   Tracker settings for board " + str(lyr))
-        print("       Tracker firmware code version = " + str(dataList[44+lyr*5]))
-        print("       Tracker firmware configuration register = " + str(dataBytes[44+lyr*5+1].hex()))
-        print("       Number of readout layers = " + str(dataList[44+lyr*5+2]))
-        print("       Trigger output length = " + str(dataList[44+lyr*5+3]))
-        print("       Trigger output delay = " + str(dataList[44+lyr*5+4]))
+        print("       Tracker firmware code version = " + str(dataList[45+lyr*5]))
+        print("       Tracker firmware configuration register = " + str(dataBytes[45+lyr*5+1].hex()))
+        print("       Number of readout layers = " + str(dataList[45+lyr*5+2]))
+        print("       Trigger output length = " + str(dataList[45+lyr*5+3]))
+        print("       Trigger output delay = " + str(dataList[45+lyr*5+4]))
            
 # Execute a run for a specified number of events to be acquired
 def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, debugTOF = False):
@@ -1556,6 +1557,7 @@ def readPmtDAC(channel, address):
     ser.write(cmdHeader)
     data1 = mkDataByte(channel, address, 1)
     ser.write(data1)
+    time.sleep(0.1)
     cmd,cmdData,dataBytes = getData(address)
     if (channel == 5):
         value = bytes2int(dataBytes[0])*256 + bytes2int(dataBytes[1])
@@ -1568,6 +1570,30 @@ def triggerEnableStatus():
     ser.write(cmdHeader)
     cmd,cmdData,dataBytes = getData(addrEvnt)
     return bytes2int(dataBytes[0])        
+
+def setTkrLogic(type):
+    setting = 1
+    if type == "AND": setting = 0
+    elif type == "OR": setting = 1
+    else:
+        print("setTkrLogic: unrecognized setting " + type)
+        return
+    cmdHeader = mkCmdHdr(1, 0x63, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(setting, addrEvnt, 1)
+    ser.write(data1)
+    print("setTkrLogic: tracker logic set to type " + type + " code " + str(setting))
+    
+def getTkrLogic():
+    cmdHeader = mkCmdHdr(0, 0x64, addrEvnt)
+    ser.write(cmdHeader)
+    time.sleep(0.1)
+    cmd,cmdData,dataBytes = getData(addrEvnt)   
+    if dataBytes[0] == 0:
+        type = "AND"
+    else: 
+        type = "OR" 
+    print("getTkrLogic: tracker logic is set to type " + type)
 
 # Load a 12-bit DAC for the TOF threshold
 def setTofDAC(channel, value, address):
