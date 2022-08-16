@@ -2123,6 +2123,20 @@ def setTkrTrigOutputTiming(FPGA, delay, length):
     data5 = mkDataByte(delay, addrEvnt, 5)
     ser.write(data5)
     
+def setTkrTriggerDelay(delay):
+    print("setTkrTriggerDelay: setting the master trigger delay to " + str(delay))
+    cmdHeader = mkCmdHdr(5, 0x10, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(0, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0x06, addrEvnt, 2)
+    ser.write(data2)
+    data3 = mkDataByte(2, addrEvnt, 3)
+    ser.write(data3)
+    data4 = mkDataByte(delay, addrEvnt, 4)
+    ser.write(data4)
+    data5 = mkDataByte(0, addrEvnt, 5)
+    ser.write(data5)
     
 def NOOP():
     print("NOOP: sending a NOOP command to the event PSOC")

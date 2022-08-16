@@ -106,6 +106,9 @@ if nBoards > 0:
     trgsrc = bytes2int(tkrGetTriggerSource(0))
     print("The tracker trigger source is set to " + str(trgsrc))
 
+    delay = 3
+    setTkrTriggerDelay(delay)
+
     readErrors(address)
 
     oneShot = 0
