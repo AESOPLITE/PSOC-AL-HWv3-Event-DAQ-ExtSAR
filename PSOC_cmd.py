@@ -1853,7 +1853,10 @@ def readErrors(address):
     if nData == 3 and bytes2int(dataBytes[0])==0:
         print("readErrors for PSOC address " + str(address) + ": no errors encountered.")
         return
-    print("readErrors for PSOC address " + str(address) + ": number of data bytes = " + str(nData))           
+    print("readErrors for PSOC address " + str(address) + ": number of data bytes = " + str(nData))
+    if nData%3 != 0:
+        print("readErrors: bad nData; abort")
+        return
     nPackets = int((nData-1)/3) + 1;
     for packet in range(nPackets):
         ret = dataBytes[packet*3]
@@ -2114,7 +2117,8 @@ def setTkrTrigOutputTiming(FPGA, delay, length):
     ser.write(cmdHeader)
     data1 = mkDataByte(FPGA, addrEvnt, 1)
     ser.write(data1)
-    data2 = mkDataByte(0x61, addrEvnt, 2)
+    cmdCode = 0x61
+    data2 = mkDataByte(cmdCode, addrEvnt, 2)
     ser.write(data2)
     data3 = mkDataByte(2, addrEvnt, 3)
     ser.write(data3)
@@ -2122,6 +2126,10 @@ def setTkrTrigOutputTiming(FPGA, delay, length):
     ser.write(data4)
     data5 = mkDataByte(delay, addrEvnt, 5)
     ser.write(data5)
+    time.sleep(0.1)
+    echo = getTkrEcho()
+    if (bytes2int(echo) != cmdCode):
+        print("setTkrTrigOutputTiming: incorrect Tracker echo received (" + str(binascii.hexlify(echo)) + "), should be " + str(cmdCode))
     
 def setTkrTriggerDelay(delay):
     print("setTkrTriggerDelay: setting the master trigger delay to " + str(delay))
@@ -2129,7 +2137,8 @@ def setTkrTriggerDelay(delay):
     ser.write(cmdHeader)
     data1 = mkDataByte(0, addrEvnt, 1)
     ser.write(data1)
-    data2 = mkDataByte(0x06, addrEvnt, 2)
+    cmdCode = 0x06
+    data2 = mkDataByte(cmdCode, addrEvnt, 2)
     ser.write(data2)
     data3 = mkDataByte(2, addrEvnt, 3)
     ser.write(data3)
@@ -2137,6 +2146,10 @@ def setTkrTriggerDelay(delay):
     ser.write(data4)
     data5 = mkDataByte(0, addrEvnt, 5)
     ser.write(data5)
+    time.sleep(0.1)
+    echo = getTkrEcho()
+    if (bytes2int(echo) != cmdCode):
+        print("setTkrTriggerDelay: incorrect Tracker echo received (" + str(binascii.hexlify(echo)) + "), should be " + str(cmdCode))
     
 def NOOP():
     print("NOOP: sending a NOOP command to the event PSOC")
