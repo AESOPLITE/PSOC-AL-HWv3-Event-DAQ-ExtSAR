@@ -74,6 +74,7 @@
  * V27.3:  Added command 0x62 and fixed the Cntr8_V1_ReadPeriod() function. Fixed bug in BOR.
  * V27.4:  Add NOOP command 0x7A. Check number of data bytes for max as well as min.
  * V27.5:  Added ability to choose AND or OR of the two Tracker triggers.
+ * V27.5:  Allow number of tracker boards = 0, for testing and debugging
  * ========================================
  */
 #include "project.h"
@@ -702,8 +703,14 @@ void makeDummyTkrEvent(uint8 trgCnt, uint8 cmdCnt, uint8 trgPtr, uint8 code) {
     tkrData.cmdCount = cmdCnt;
     tkrData.trgPattern = trgPtr;
     tkrData.nTkrBoards = numTkrBrds;
-    for (int brd=0; brd<numTkrBrds; ++brd) {  // Make a default empty ASIC hit list
-        makeDummyHitList(brd, code);
+    if (numTkrBrds > 0) {
+        for (int brd=0; brd<numTkrBrds; ++brd) {  // Make a default empty ASIC hit list
+            makeDummyHitList(brd, code);
+        }
+    } else {
+        for (int brd=0; brd<MAX_TKR_BOARDS; ++brd) {  // Make a default empty ASIC hit list
+            makeDummyHitList(brd, code);
+        }
     }
 }
 
@@ -3709,6 +3716,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 runNumber = cmdData[0];
                 runNumber = (runNumber<<8) | cmdData[1];
                 readTracker = (cmdData[2] == 1);
+                if (numTkrBrds == 0) readTracker = false;
                 debugTOF = (cmdData[3] == 1);
                 cntGO = 0;
                 lastGOcnt = 0;
@@ -3882,6 +3890,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 dataOut[9] = year%256;
                 break;
             case '\x47': // Reset the tracker state machines and Tracker ASICs
+                if (numTkrBrds == 0) break;
                 resetAllTrackerLogic();
                 break;
             case '\x48': // Calibrate the input timing on one or every Tracker FPGA board
@@ -3892,6 +3901,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 }
                 break;
             case '\x49': // Read accumulated tracker layer rates
+                if (numTkrBrds == 0) break;
                 dataOut[0] = 0x6D;
                 dataOut[1] = numTkrBrds;                                
                 for (int brd=0; brd<numTkrBrds; ++brd) {
@@ -3963,6 +3973,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 dataOut[7] = byte32(nReadAvg, 3);
                 break;
             case '\x56': // Set up the Tracker ASIC configuration. Set up the # of layers and power on the ASICs first!
+                if (numTkrBrds == 0) break;
                 if (cmdData[0] > 8 || cmdData[0] == 0) {
                     addError(ERR_TKR_NUM_BOARDS, cmdData[0], 0x77);
                     break;
@@ -4011,7 +4022,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 CyExitCriticalSection(InterruptState);
                 monitorPmtRates = true;
                 waitingPmtRateCnt = true;
-                if (cmdData[1] > 0) {  // This allows tracker rate monitoring to be disabled, in case it is problematic
+                if (cmdData[1] > 0 && numTkrBrds > 0) {  // This allows tracker rate monitoring to be disabled, in case it is problematic
                     tkrMonitorInterval = tkrRatesMult*houseKeepPeriod;  // Number of seconds between TKR monitoring events
                     if (tkrMonitorInterval < 2) tkrMonitorInterval = 2;
                     for (int brd=0; brd<numTkrBrds; ++brd) {
