@@ -75,7 +75,9 @@
  * V27.4:  Add NOOP command 0x7A. Check number of data bytes for max as well as min.
  * V27.5:  Added ability to choose AND or OR of the two Tracker triggers.
  * V27.5:  Allow number of tracker boards = 0, for testing and debugging
- * ========================================
+ * V27.6:  Added check that termination of the TOF DMA TD chains actually happened before calling copyTOF_DMA. 
+ *         Changed test for ref clock rollover from 60001 to 60000.
+ * =========================================
  */
 #include "project.h"
 #include <stdlib.h>
@@ -85,7 +87,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 27
-#define MINOR_VERSION 5
+#define MINOR_VERSION 6
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -264,6 +266,7 @@
 #define ERR_TKR_BAD_CLUST 58u
 #define ERR_TKR_LIST_OVERFLOW 59u
 #define ERR_CMD_INCOMPLETE 60u
+#define ERR_TD_CHAIN_NOT_TERM 61u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -2341,11 +2344,8 @@ void setSettlingWindow(uint8 chan, uint8 dt) {
 void makeEvent() {
 
     // Stop acquiring TOF hits until the trigger is re-enabled.
+    // This will terminate the TD chains disable the TOF DMA channels.
     TOFenable(false);
-    if (TOF_DMA) {  
-        // Copy the TOF information from where the DMA dumped it 
-        copyTOF_DMA('t', true);
-    } 
     
     timeDate = RTC_1_ReadTime();
     triggered = false;
@@ -2437,6 +2437,23 @@ void makeEvent() {
         makeDummyTkrEvent(0, 0, 0, 6);
     }
 
+    // Check that the TOF DMA TD chain terminations happened. Should be plenty of time passed by now, so it is
+    // unlikely that the loop below ever makes more than one iteration.
+    if (TOF_DMA) {
+        cystatus statA = 0;
+        cystatus statB = 0;
+        for (int nTry = 0; nTry<100; ++nTry) {
+            statA = CyDmaChGetRequest(DMA_TOFA_Chan);
+            statB = CyDmaChGetRequest(DMA_TOFB_Chan);
+            if (!statA && !statB) break;
+        }
+        if (statA || statB) {
+            addError(ERR_TD_CHAIN_NOT_TERM, statA, statB);
+        }
+        // Copy any remaining TOF data from the DMA buffers to the TOF data buffers
+        copyTOF_DMA('t', true);
+    } 
+    
     // Search for nearly coincident TOF data. Note that each TOF chip channel operates asynchronously w.r.t. the
     // instrument trigger, so we have to correlate the two channels with each other and with the event
     // by looking at the course timing information.
@@ -2479,11 +2496,12 @@ void makeEvent() {
             uint16 stopA = (uint16)(AT & 0x0000FFFF);       // Stop time for channel A
             uint16 refA = (uint16)((AT & 0xFFFF0000)>>16);  // Reference clock for channel A
             int32 timei = refA*8333 + stopA;                  // Full time for channel A in 10 picosecond units
-            // Here we try to handle cases in which a reference clock rolled over
+            // Here we try to handle cases in which one reference clock is reset to zero but not the other
+            // The reset happens every 5 ms. A count of 60001 is just less than 5 ms.  60002 is just greater.
             int16 dt;
-            if (refA >= 60001 && refB == 0) {
+            if (refA >= 60000 && refB == 0) {
                 dt = (int16)((timej + 500000000) - timei);
-            } else if (refB >= 60001 && refA == 0) {
+            } else if (refB >= 60000 && refA == 0) {
                 dt = (int16)(timej - (timei + 500000000)); 
             } else {
                 dt = (int16)(timej - timei);
