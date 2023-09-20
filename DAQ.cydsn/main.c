@@ -77,6 +77,8 @@
  * V27.5:  Allow number of tracker boards = 0, for testing and debugging
  * V27.6:  Added check that termination of the TOF DMA TD chains actually happened before calling copyTOF_DMA. 
  *         Changed test for ref clock rollover from 60001 to 60000.
+ * V27.7:  Change default tracker trigger logic to AND
+*  V27.8:  Routed the 24 MHz bus clock to the tracker clock pin P6[3]. Up to now the tracker firmware has not used this external clock.
  * =========================================
  */
 #include "project.h"
@@ -87,7 +89,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 27
-#define MINOR_VERSION 6
+#define MINOR_VERSION 8
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -4559,7 +4561,7 @@ int main(void)
     uint32 cmdStartTime = time();
     set_SPI_SSN(0, true);   // Deselect all SPI slaves
     triggerEnable(false);
-    setTkrLogic(TKR_TRG_OR);  // Default is an OR of the two Tracker triggers
+    setTkrLogic(TKR_TRG_AND);  // Default is an AND of the two Tracker triggers
     endingRun = false;
     runNumber = 0;
 
