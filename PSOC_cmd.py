@@ -2593,10 +2593,18 @@ def tkrRandomCalMask(FPGA, chip):
     ser.write(data11)
     data12 = mkDataByte(random.randint(0,255), address, 12)
     ser.write(data12)
+    outword = data12<<8 | data11
+    outword = outword<<8 | data10
+    outword = outword<<8 | data9
+    outword = outword<<8 | data8
+    outword = outword<<8 | data7
+    outword = outword<<8 | data6
+    outword = outword<<8 | data5
     time.sleep(0.1)
     echo = getTkrEcho()
     if (str(binascii.hexlify(echo)) != "b'15'"):
         print("tkrRandomCalMask: incorrect Tracker echo received (" + str(binascii.hexlify(echo)) + "), should be b'15'")
+    return outword
 
 def tkrGetCalMask(FPGA, chip, verbose = True):
     if chip > 11: 
