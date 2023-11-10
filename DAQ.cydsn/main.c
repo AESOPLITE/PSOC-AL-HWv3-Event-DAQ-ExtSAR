@@ -85,6 +85,7 @@
  *         to fill before getting the bytes out, and protected code in tkr_getByte(). Added some clearpending calls to reset points.
  *         Protected command UART pointers from interrupt while calculating amount of data in buffer. Changed some addError calls to
  *         addErrorOnce().
+ * V27.9:  Tied Tracker clock to logic low, since it is not going to be used.
  * =========================================
  */
 #include "project.h"
@@ -95,7 +96,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 27
-#define MINOR_VERSION 8
+#define MINOR_VERSION 9
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
