@@ -86,6 +86,7 @@
  *         Protected command UART pointers from interrupt while calculating amount of data in buffer. Changed some addError calls to
  *         addErrorOnce().
  * V27.9:  Tied Tracker clock to logic low, since it is not going to be used.
+ * V27.10: Fixed the problem with reading the AD5602 DACs more than once.
  * =========================================
  */
 #include "project.h"
@@ -96,7 +97,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 27
-#define MINOR_VERSION 9
+#define MINOR_VERSION 10
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -281,6 +282,7 @@
 #define ERR_TKR_DATA_IN_TIMEOUT 64u
 #define ERR_TKR_UART_STOP 65u
 #define ERR_TKR_UART_BREAK 66u
+#define ERR_NO_SUCH_DAC 67u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -411,6 +413,16 @@ const uint8 I2C_Address_TKR_A21 = '\x44';
 const uint8 I2C_Address_TKR_A33 = '\x43';
 const uint8 I2C_Address_TKR_bias = '\x46';
 
+// Save AD5602 or AD5622 settings read back from the DAC.
+// This is needed because the DAC setting can only be read back once after setting it.
+#define NUMDACs 3u
+struct DACsetting {
+    uint8 address;
+    uint16 setting;
+} DAC5602[NUMDACs];
+
+// These are settings saved for the 4 8-bit DACs in the PSOC.
+// This is needed because those DACs do not have a function for reading back their setting.
 uint8 thrDACsettings[] = {THRDEF, THRDEF, THRDEF, THRDEF};
 
 // Bit locations for setting up the trigger, in the Control_Reg_Trg1/2. Not actually used in this code.
@@ -1569,6 +1581,19 @@ uint8 loadDAC(uint8 I2C_Address, uint16 voltage) {
     
     uint8 rc;
     
+    bool foundIt = false;
+    for (uint i=0; i<NUMDACs; ++i) {
+        if (DAC5602[i].address == I2C_Address) {
+            foundIt = true;
+            DAC5602[i].setting = 0xFFFF;   // DAC setting not yet read back
+            break;
+        }
+    }
+    if (!foundIt) {
+        addError(ERR_NO_SUCH_DAC, I2C_Address, 99);
+        return 99;
+    }
+    
     rc = I2C_2_MasterSendStart(I2C_Address,I2C_WRITE);
     if (rc != I2C_2_MSTR_NO_ERROR) return rc;
     
@@ -1591,8 +1616,28 @@ uint8 loadDAC(uint8 I2C_Address, uint16 voltage) {
 } // end of loadDAC
 
 // Read back over the i2c bus the setting from the AD5622 DAC and return it
+// Note that per the datasheet, a second read without an interving write will return 0
 uint8 readDAC(uint8 I2C_Address, uint16* rvalue) {
            
+    bool foundIt = false;
+    uint idx;
+    for (uint i=0; i<NUMDACs; ++i) {
+        if (DAC5602[i].address == I2C_Address) {
+            foundIt = true;
+            idx = i;
+            if (DAC5602[i].setting != 0xFFFF) {  // The DAC has already been read
+                *rvalue = DAC5602[i].setting;
+                return 0;
+            }
+            break;
+        }
+    }
+    if (!foundIt) {
+        addError(ERR_NO_SUCH_DAC, I2C_Address, 98);
+        *rvalue = 0;
+        return 98;
+    }
+    
     uint8 bytes[2];
     //I2C_2_MasterClearReadBuf();
     //uint8 rc = I2C_2_MasterReadBuf(I2C_Address, bytes, 2, I2C_2_MODE_COMPLETE_XFER);
@@ -1612,6 +1657,9 @@ uint8 readDAC(uint8 I2C_Address, uint16* rvalue) {
     if (rc != I2C_2_MSTAT_CLEAR) {
         while(I2C_2_MasterStatus() == I2C_2_MSTAT_XFER_INP) CyDelay(100);
     } 
+    
+    DAC5602[idx].setting = *rvalue;
+    
     return 0;
 }
 
@@ -4482,9 +4530,18 @@ int main(void)
     VDAC8_Ch4_Start();
     VDAC8_Ch4_SetValue(THRDEF);
 
+    // 12-bit AD5602 or 5622 DACs
+    DAC5602[0].address = I2C_Address_DAC_Ch5;
+    DAC5602[0].setting = 0xFFFF;
+    DAC5602[1].address = I2C_Address_TOF_DAC1;
+    DAC5602[1].setting = 0xFFFF;
+    DAC5602[2].address = I2C_Address_TOF_DAC2;
+    DAC5602[2].setting = 0xFFFF;
+    
+    // Load the 12-bit DACs with some default values
     loadDAC(I2C_Address_DAC_Ch5, 0x000F);
-    loadDAC(I2C_Address_TOF_DAC1, 0x00FF);
-    loadDAC(I2C_Address_TOF_DAC2, 0x00FF);
+    loadDAC(I2C_Address_TOF_DAC1, 0x0010);
+    loadDAC(I2C_Address_TOF_DAC2, 0x0010);
  
     UART_TKR_Start();   // UART for communication with the tracker
     UART_CMD_Start();   // Snail-paced UART for receiving commands from the Main PSOC

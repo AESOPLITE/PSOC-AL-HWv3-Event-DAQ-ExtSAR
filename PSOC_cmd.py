@@ -302,6 +302,7 @@ def getLyrTrgCnt(FPGA):
     rate = []
     for brd in FPGA:
         if brd < 0 or brd > 7: continue
+        print("Getting the tracker layer trigger count for board " + str(brd))
         cmdHeader = mkCmdHdr(3, 0x10, addrEvnt)
         ser.write(cmdHeader)
         data1 = mkDataByte(brd, addrEvnt, 1)
@@ -313,6 +314,8 @@ def getLyrTrgCnt(FPGA):
         time.sleep(0.1)
         dataReturned = getTkrHousekeeping()
         rate.append(bytes2int(dataReturned[7])*256 + bytes2int(dataReturned[8]))
+    #for value in rate:
+    #   print("Tracker layer trigger count = " + str(value))
     return rate
 
 def loadEventPSOCrtc():
@@ -604,6 +607,8 @@ def ParseASIChitList(bitString, verbose):
     numberOfChips = int(FPGAheader[8:12],2)
     if verbose: print("          Event tag= " + str(int(FPGAheader[0:7],2)) + " Error flag= " + FPGAheader[7] + " Number of chips= " + str(numberOfChips))
     nHits = 0
+    firstStripList = []
+    clustWidthList = []
     if (numberOfChips != 0):
       for chip in range(numberOfChips):
         if len(bitString) < pointer + 12: continue
@@ -616,7 +621,7 @@ def ParseASIChitList(bitString, verbose):
             print("    Error: Chip number " + str(chipNum) + " > 12")
         if verbose:
             print("          Chip {:d}: {:d} clusters, Overflow={:s}, Error={:s}, Parity error={:s}".format(chipNum,numberOfClusters,asicHead["overflowBit"],asicHead["errorBit"],asicHead["parityErrorBit"]))
-        firstStripList = printChipClusters(bitString[pointer:(pointer+12+numberOfClusters*12)], verbose)
+        firstStripList, clustWidthList = printChipClusters(bitString[pointer:(pointer+12+numberOfClusters*12)], verbose)
         if firstStripList == []: rc = rc + 1
         for item in firstStripList:
             firstStripChip.append(64*(chipNum+1) - item)                 #append all the first strip hit, for each cluster, for each chip 
@@ -631,10 +636,11 @@ def ParseASIChitList(bitString, verbose):
     if bitString[pointer+6:pointer+8] != "11": 
       rc = rc + 1
       print("    Error: the trailing '11' bits are missing")
-    return [rc,FPGAaddress,firstStripChip]
+    return [rc,FPGAaddress,firstStripChip,clustWidthList]
 
 def printChipClusters(bitString, verbose): # takes a chip header and following clusters
   firstStripList = []                        #list of all the first strip hit list, to be appended over each cluster and each chip hit
+  clustWidthList = []
   if bitString == "":
     if verbose: print("    Error:      Empty cluster list. . .")
     return firstStripList
@@ -646,11 +652,13 @@ def printChipClusters(bitString, verbose): # takes a chip header and following c
   for cluster in range(nclust):
     firstStrip = getChipFirstStrip(bitString[(pointer):(pointer+12)])
     ClusterWidth = getChipClusterWidth(bitString[pointer:pointer+12])
-    clusterLoc = firstStrip + 0.5 + (ClusterWidth-1.0)/2.
+    clusterLoc = firstStrip - 0.5 - (ClusterWidth-1.0)/2.
     if verbose: print("              Cluster width={:d}   First strip={:d}".format(ClusterWidth,firstStrip))
-    firstStripList.append(clusterLoc)
+    #firstStripList.append(clusterLoc)
+    firstStripList.append(firstStrip)
+    clustWidthList.append(ClusterWidth)
     pointer = 12 + pointer
-  return  firstStripList
+  return  [firstStripList, clustWidthList]
 
 def getChipClusterWidth(bitString): #
   return int(bitString[0:6],2) + 1
@@ -1108,6 +1116,13 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     timeSum = 0
     numHits = 0
     nPlotted = 0
+    occ = []
+    for lyr in range(8):
+        hits = []
+        for strip in range(768):
+            hits.append(0)
+        occ.append(hits)
+        
     for event in range(numEvnts):
         # Wait for an event to show up
         cnt = 0
@@ -1229,6 +1244,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
             if verbose:             
                 FPGAs = []
                 stripHits = []
+                hitWidths = []
                 for brd in range(nTkrLyrs):
                     ##brdNum = dataList[iPtr]
                     ##iPtr = iPtr + 1
@@ -1240,12 +1256,13 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
                         hitList.append(byteList[iPtr])
                         iPtr = iPtr + 1
                     #print("           Hit list= " + getBinaryString(hitList))
-                    rc, FPGA, strips = ParseASIChitList(getBinaryString(hitList),True)
+                    rc, FPGA, strips, widths = ParseASIChitList(getBinaryString(hitList),True)
                     if rc != 0: nBadTkr = nBadTkr + 1
                     numHitEvt = len(strips)
                     numHits = numHits + numHitEvt
                     FPGAs.append(FPGA)
                     stripHits.append(strips)
+                    hitWidths.append(widths)
                 if nPlotted < nToPlot: 
                     plotTkrEvnt(run, trigger, FPGAs, stripHits)
                     nPlotted = nPlotted + 1
@@ -1271,16 +1288,24 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
                 ADCavg2[3] = ADCavg2[3] + T4*T4
                 ADCavg2[4] = ADCavg2[4] + G*G
             # Output all of the data to an ASCII file
-            if outputEvents:
+            if outputEvents and verbose:
                 timeStr = str(hour) + ":" + str(minute) + ":" + str(second) + " on " + months[month] + " " + str(day) + ", " + str(year)
                 f2.write("Event {:d}: {} {:s}   rc={}\n".format(trigger, timeStamp, timeStr, rc))
                 f2.write("  ADC: {}, {}, {}, {}, {}\n".format(T1, T2, T3, T4, G))
                 f2.write("  TOF: {}  nA={}  nB={}  refA={}  refB={}  clkA={}  clkB={} \n".format(dtmin, nTOFA, nTOFB, tofA, tofB, clkA, clkB))
-                for lyr, hits in zip(FPGAs,stripHits):
+                for lyr, hits, widths in zip(FPGAs,stripHits,hitWidths):
                     f2.write("    Lyr {}:".format(lyr))
-                    for strip in hits:
-                        f2.write(" {} ".format(strip))
+                    for strip, width in zip(hits, widths):
+                        f2.write(" {} ".format(strip + (width/2)))
                     f2.write("\n")
+            if verbose:
+                for FPGA, hits, widths in zip(FPGAs,stripHits,hitWidths):
+                    lyr = FPGA
+                    if FPGA == 8: lyr = 0;
+                    for hit, width in zip(hits, widths):
+                        for j in range(width):
+                            strip = hit - j
+                            occ[lyr][strip] = occ[lyr][strip] + 1
 
     endTime = time.time()
     runTime = endTime - startTime
@@ -1288,6 +1313,9 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     if numEvnts > 1: timeSum = timeSum/float(numEvnts - 1)
     timeSumSec = timeSum*(1./200.)
     print("Average time between event time stamps = " + str(timeSum) + " counts = " + str(timeSumSec) + " seconds")
+  
+    print("Strip hit occupancy of layer 0:")
+    print(occ[0])
     
     # Tell the Event PSOC to stop the run
     cmdHeader = mkCmdHdr(0, 0x44, addrEvnt)
