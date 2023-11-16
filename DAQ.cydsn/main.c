@@ -87,6 +87,9 @@
  *         addErrorOnce().
  * V27.9:  Tied Tracker clock to logic low, since it is not going to be used.
  * V27.10: Fixed the problem with reading the AD5602 DACs more than once.
+ * V27.11: Log stop rates of TOFa/b for full duration between events instead of 5ms window.
+ * V28.1:  Stretched trigger to tracker by one clock cycle. Modified makeEvent() such that it sends a dummy 
+ *         empty event in case the tracker has no event ready after 5 tries.
  * =========================================
  */
 #include "project.h"
@@ -96,8 +99,8 @@
 #include <stdbool.h>
 #include <math.h>
 
-#define MAJOR_VERSION 27
-#define MINOR_VERSION 10
+#define MAJOR_VERSION 28
+#define MINOR_VERSION 01
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -283,6 +286,7 @@
 #define ERR_TKR_UART_STOP 65u
 #define ERR_TKR_UART_BREAK 66u
 #define ERR_NO_SUCH_DAC 67u
+#define ERR_TKR_MISSED_TRIGGER 68u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -306,7 +310,7 @@ int numErrRec = 0;
 #define TKR_ECHO_DATA 0xF1
 #define TKR_NO_ECHO 0x01
 
-#define TKR_READ_TIMEOUT 5u    // Length of time to wait on the tracker before giving a time-out error
+#define TKR_READ_TIMEOUT 1u    // Length of time to wait on the tracker before giving a time-out error
 #define TKR_WRITE_TIMEOUT 10u  // Length of time to wait for a tracker UART write to terminate
 #define TKR_BAUD_RATE 115200u  // Baud rate setting for the Tracker UART (set in the PSOC component and TKR Verilog!)
 uint TKR_timePerByte;          // Time in microseconds to transmit a single byte
@@ -534,6 +538,8 @@ volatile uint32 tofA_sampleArray[TOF_DMA_MAX_NO_OF_SAMPLES] __attribute__ ((alig
 volatile uint8 tofA_clkArray[TOF_DMA_MAX_NO_OF_SAMPLES];
 volatile uint32 tofB_sampleArray[TOF_DMA_MAX_NO_OF_SAMPLES] __attribute__ ((aligned(32))) = {0};
 volatile uint8 tofB_clkArray[TOF_DMA_MAX_NO_OF_SAMPLES];
+//volatile uint nTOFintA = 0;
+//volatile uint nTOFintB = 0;
 
 bool outputTOF;  // Controls a special debugging mode to send TOF data out immediately each time it comes in
 
@@ -544,6 +550,7 @@ uint8 tkrHouseKeepingCMD;
 uint8 tkrHouseKeeping[TKRHOUSE_LEN];
 
 volatile uint32 timeStamp;     // Internal event time stamp, in 5 millisecond units
+uint32 timeLastEvent = 0;      // Save the timestamp of the previous event
 volatile uint8 timeStamp8;     // Place to store the timestamp counter reading
 volatile uint32 cntGO1save;    // Word to save the trigger counter in each time there is an accepted trigger
 volatile uint8 trgStatus;      // Contents read from trigger status register
@@ -806,10 +813,10 @@ int getTrackerData(uint8 idExpected) {
     uint16 ret = tkr_getByte(startTime, 0x01);
     if ((ret & 0xFF00) != 0) return -1;
     uint8 len = (uint8)ret;
-    CyDelayUs(len*TKR_timePerByte);  // Delay long enough to register all the bytes in the record
     ret = tkr_getByte(startTime, 0x02);
     if ((ret & 0xFF00) != 0) return -2;
     uint8 IDcode = (uint8)ret;
+    CyDelayUs(len*TKR_timePerByte);  // Delay long enough to register all the bytes in the record
     if (IDcode != idExpected) {
         if (idExpected != 0) {
             addErrorOnce(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
@@ -847,16 +854,16 @@ int getTrackerData(uint8 idExpected) {
             return 55;
         }
         uint16 ret = tkr_getByte(startTime, 0x03);
-        if ((ret & 0xFF00) != 0) return -3;
+        if ((ret & 0xFF00) != 0) {return -3;}
         uint16 trgCnt = (ret & 0x00FF) << 8;      // Two-byte trigger count
         ret = tkr_getByte(startTime, 0x04);
-        if ((ret & 0xFF00) != 0) return -4;
+        if ((ret & 0xFF00) != 0) {return -4;}
         trgCnt = trgCnt | (ret & 0x00FF);
         ret = tkr_getByte(startTime, 0x05);
-        if ((ret & 0xFF00) != 0) return -5;
+        if ((ret & 0xFF00) != 0) {return -5;}
         uint8 cmdCnt = (uint8)ret;                // Two-byte command count
         ret = tkr_getByte(startTime, 0x06);
-        if ((ret & 0xFF00) != 0) return -6;
+        if ((ret & 0xFF00) != 0) {return -6;}
         uint8 nBoards = (uint8)ret;               // One-byte board count plus trigger pattern
         uint8 trgPtr = nBoards & 0xC0;
         nBoards = nBoards & 0x3F;
@@ -1805,6 +1812,7 @@ int getTrackerBoardTriggerData(uint8 FPGA) {
     }
     nDataReady = 9;   
     dataOut[0] = theByte;
+    CyDelayUs(nDataReady*TKR_timePerByte);
     // Read in the other 8 bytes
     for (int i=1; i<nDataReady; ++i) {
         dataOut[i] = tkr_getByte(startTime, 0x46);
@@ -2082,6 +2090,7 @@ int makeBOR() {
 // Reset all of the Tracker board FPGAs (soft reset) and the ASICs (soft reset)
 // Unfortunately, the ASIC reset destroys the configuration, so the ASICs have to be reconfigured.
 int resetAllTrackerLogic() {
+    //Pin_db2_Write(1u);
     bool trgStat = isTriggerEnabled();
     if (trgStat) {
         triggerEnable(false);
@@ -2092,7 +2101,10 @@ int resetAllTrackerLogic() {
     for (uint8 brd=0; brd<numTkrBrds; ++brd) {
         tkrCmdCode = 0x04;
         rc = sendSimpleTrackerCmd(brd, tkrCmdCode);   // Reset the FPGA state machines
-        if (rc != 0) return rc;
+        if (rc != 0) {
+            //Pin_db2_Write(0u);
+            return rc;
+        }
     }
     // Reset the ASICs only if there are non-parity errors flagged in the configuration register, or if
     // the configuration register read failed, or there are many recent time-outs or resets (stuck).
@@ -2114,6 +2126,7 @@ int resetAllTrackerLogic() {
         sendSimpleTrackerCmd(0x00, 0x65);
         triggerEnable(true);
     }
+    //Pin_db2_Write(0u);
     return rc;
 }
 
@@ -2244,9 +2257,11 @@ uint32 getChCount(int cntr) {
 // Move TOF data out of the DMA buffers each time the maximum number of DMA TDs is used up
 CY_ISR(isrTOFnrqA) {
     copyTOF_DMA('A', false);
+    //nTOFintA++;
 }
 CY_ISR(isrTOFnrqB) {
     copyTOF_DMA('B', false);
+    //nTOFintB++;
 }
 
 // Read out the shift register when a TOF stop event arrives for channel A
@@ -2532,28 +2547,35 @@ void makeEvent() {
             }
             nTry++;
             if (nTry > 5) {
-                addErrorOnce(ERR_TKR_BAD_STATUS, tkrDataReady, nTry+1);
                 break;
             }
-            CyDelayUs(5);  // A short delay before checking again
+            CyDelayUs(10);  // A short delay before checking again
         }        
-        if (tkrDataReady == TKR_DATA_READY) nTkrReadReady++;
-        else nTkrReadNotReady++;
-        
-        // Start the read of the Tracker data by sending a read-event command, ready or not. . .
-        cmdData[0] = 0x00;
-        rc = sendTrackerCmd(0x00, 0x01, 0x01, cmdData, TKR_EVT_DATA); 
-        if (rc != 0) {
-            addErrorOnce(ERR_GET_TKR_EVENT, rc, byte32(cntGO, 0));
-            UART_TKR_ClearTxBuffer();
-            UART_TKR_ClearRxBuffer(); 
-            int rc2 = resetAllTrackerLogic();
-            if (rc2 != 0) addError(ERR_NO_TRK_RESET, rc2, rc); 
-            makeDummyTkrEvent(0, 0, 0, 6);
-            numTkrResets++;
+        if (tkrDataReady == TKR_DATA_READY) {
+            nTkrReadReady++;
+            
+            // Start the read of the Tracker data by sending a read-event command
+            cmdData[0] = 0x00;
+            rc = sendTrackerCmd(0x00, 0x01, 0x01, cmdData, TKR_EVT_DATA); 
+            if (rc != 0) {
+                addErrorOnce(ERR_GET_TKR_EVENT, rc, byte32(cntGO, 0));
+                UART_TKR_ClearTxBuffer();
+                UART_TKR_ClearRxBuffer(); 
+                int rc2 = resetAllTrackerLogic();
+                if (rc2 != 0) addError(ERR_NO_TRK_RESET, rc2, rc); 
+                makeDummyTkrEvent(0, 0, 0, 3);
+                numTkrResets++;
+            }
+        } else {
+            nTkrReadNotReady++;
+            addErrorOnce(ERR_TKR_MISSED_TRIGGER, tkrDataReady, nTry+1);
+            
+            // The tracker must have missed the trigger. Who knows why? Send a dummy empty event.
+            makeDummyTkrEvent(0, 0, 0, 4);
         }
     } else {
-        makeDummyTkrEvent(0, 0, 0, 6);
+        nTkrReadReady++;
+        makeDummyTkrEvent(0, 0, 0, 5);
     }
 
     // Check that the TOF DMA TD chain terminations happened. Should be plenty of time passed by now, so it is
@@ -2580,12 +2602,14 @@ void makeEvent() {
     if (timeStamp8 == 0) timeStamp8m1 = 199;
     else timeStamp8m1 = timeStamp8 - 1; 
     
+    int nStopA = 0;
     int nI=0;
     uint8 idx[TOFMAX_EVT];
     for (int i=0; i<TOFMAX_EVT; ++i) {           // Make a list of TOF hits in channel A
         int iptr = tofA.ptr - i - 1;             // Work backwards in time, starting with the most recent measurement
         if (iptr < 0) iptr = iptr + TOFMAX_EVT;  // Wrap around the circular buffer
         if (!tofA.filled[iptr]) break;           // Use only entries filled since the previous readout
+        nStopA++;
         if (timeStamp8 == tofA.clkCnt[iptr] || timeStamp8 == tofA.clkCnt[iptr]+1) {
             idx[nI] = iptr;                      // Only look at entries within two 5ms clock periods of the event time stamp
             ++nI;
@@ -2596,11 +2620,13 @@ void makeEvent() {
     uint16 aTOF = 65535;
     uint16 bTOF = 65535;
     int16 dtmin = 32767;
+    int nStopB = 0;
     int nJ=0;
     for (int j=0; j<TOFMAX_EVT; ++j) {           // Loop over the TOF hits in channel B
         int jptr = tofB.ptr - j - 1;             // Work backwards in time, starting with the most recent measurement
         if (jptr < 0) jptr = jptr + TOFMAX_EVT;  // Wrap around the circular buffer
         if (!tofB.filled[jptr]) break;           // Use only entries filled since the previous readout
+        nStopB++;
         // Look only at entries filled within two 5 ms clock periods of the event time stamp
         if (!(tofB.clkCnt[jptr] == timeStamp8 || tofB.clkCnt[jptr] == timeStamp8m1)) continue;
         uint32 BT = tofB.shiftReg[jptr];
@@ -2709,17 +2735,27 @@ void makeEvent() {
         dataOut[39] = tkrData.nTkrBoards;
         nDataReady = 40;
     }
+    // Calculate the rate of TOF interrupts since the previous event
+    //uint32 deltaTime;
+    //if (timeStamp > timeLastEvent) deltaTime = timeStamp - timeLastEvent;
+    //else deltaTime = timeStamp + (0xFFFFFFFF - timeLastEvent);
+    //uint8 interruptRateA = (200*nTOFintA)/deltaTime;
+    //uint8 interruptRateB = (200*nTOFintB)/deltaTime;
     // Sums for EOR record
-    nTOF_A_avg += nI;
-    nTOF_B_avg += nJ;
-    if (nI > nTOF_A_max) nTOF_A_max = nI;
-    if (nJ > nTOF_B_max) nTOF_B_max = nJ;
+    //nTOF_A_avg += interruptRateA; 
+    //nTOF_B_avg += interruptRateB; 
+    //if (interruptRateA > nTOF_A_max) nTOF_A_max = interruptRateA;  
+    //if (interruptRateB > nTOF_B_max) nTOF_B_max = interruptRateB;  
+    nTOF_A_avg += nStopA; 
+    nTOF_B_avg += nStopB; 
+    if (nStopA > nTOF_A_max) nTOF_A_max = nStopA;  
+    if (nStopB > nTOF_B_max) nTOF_B_max = nStopB;  
     // Sums for housekeeping records
     nEvtH++;
-    nTOFAavgH += nI;
-    nTOFBavgH += nJ;
-    if (nI > nTOFAmaxH) nTOFAmaxH = nI;
-    if (nJ > nTOFBmaxH) nTOFBmaxH = nJ;
+    nTOFAavgH += nStopA;
+    nTOFBavgH += nStopB;
+    if (nStopA > nTOFAmaxH) nTOFAmaxH = nStopA;
+    if (nStopB > nTOFBmaxH) nTOFBmaxH = nStopB;
     if (doDiagnostics) {  // Check whether the hitslist CRCs match what the TKR calculated.
         for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
             if (!checkCRC(tkrData.boardHits[brd].nBytes, tkrData.boardHits[brd].hitList)) {
@@ -2873,6 +2909,9 @@ void makeEvent() {
     ch3CountSave = ch3Count;
     ch4CountSave = ch4Count;
     ch5CountSave = ch5Count;
+    timeLastEvent = timeStamp;
+    //nTOFintA = 0;
+    //nTOFintB = 0;
     if (Pin_Busy_Read()) cntBusy++;        // To track the BUSY fraction
 } // end of subroutine makeEvent
 
@@ -3062,7 +3101,7 @@ void sendAllData(uint8 dataPacket[], uint8 command, uint8 cmdData[]) {
 
         nDataReady = 0;
         if (eventDataReady) {   // re-enable the trigger after event data has been output
-            int readoutTime = time() - timeStamp;
+            int readoutTime = timeElapsed(timeStamp);
             readTimeAvg += readoutTime;
             nReadAvg++;
             if (!endingRun) {
@@ -3824,6 +3863,8 @@ void interpretCommand(uint8 tofConfig[]) {
                 nTOF_B_avg = 0;
                 nTOF_A_max = 0;
                 nTOF_B_max = 0;
+                //nTOFintA = 0;
+                //nTOFintB = 0;
                 pmtClkCntStart = time();
                 for (int cntr=0; cntr<MAX_PMT_CHANNELS; ++cntr) {
                     pmtCntInit[cntr] = getChCount(cntr);
@@ -3849,6 +3890,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 cntTrialsMax = 0;
                 liveWeightedSum = 0.;
                 sumWeights = 0.;
+                timeLastEvent = time();
                 CyExitCriticalSection(InterruptState);
                 // Reset Tracker counters
                 for (int brd=0; brd<numTkrBrds; ++brd) {
@@ -4376,7 +4418,7 @@ int main(void)
     sumWeights = 0.;
     nNOOP = 0;
     
-    TKR_timePerByte = 10000000/TKR_BAUD_RATE;
+    TKR_timePerByte = 12000000/TKR_BAUD_RATE; // In microseconds, assuming 12 bits transmitted per byte of data
     TKR_timeFirstByte = 2 * TKR_timePerByte;
     
     uint8 *buffer;        // Buffer for incoming commands

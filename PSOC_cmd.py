@@ -1406,7 +1406,7 @@ def limitedRun(runNumber, numEvnts, readTracker = True, outputEvents = False, de
     print("Number of triggers accepted = " + str(cntGo))
     print("Number of bad Tracker CRC = " + str(nBadCRC))
     print("Number of tracker reads when status is ready = " + str(nTkrReadReady))
-    print("Number of tracker reads when status is not ready = " + str(nTkrReadNotReady))
+    print("Number of tracker triggers missed (no event ready after 5 tries) = " + str(nTkrReadNotReady))
     print("Average number of TOF-A stops per event = " + str(bytes2int(byteList[20])))
     print("Average number of TOF-B stops per event = " + str(bytes2int(byteList[21])))
     print("Maximum number of TOF-A stops in an event = " + str(bytes2int(byteList[22])))
