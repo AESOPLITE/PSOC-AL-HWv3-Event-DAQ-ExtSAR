@@ -90,6 +90,7 @@
  * V27.11: Log stop rates of TOFa/b for full duration between events instead of 5ms window.
  * V28.1:  Stretched trigger to tracker by one clock cycle. Modified makeEvent() such that it sends a dummy 
  *         empty event in case the tracker has no event ready after 5 tries.
+ * V28.2:  Count errors for addErrorOnce()
  * =========================================
  */
 #include "project.h"
@@ -100,7 +101,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 28
-#define MINOR_VERSION 01
+#define MINOR_VERSION 02
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -704,14 +705,18 @@ void addError(uint8 code, uint8 val0, uint8 val1) {
     }
 }
 // Function used to log an internal error only if that error is not already logged
-void addErrorOnce(uint8 code, uint8 val0, uint8 val1) {
+// The second byte is used to count the number of occurances
+void addErrorOnce(uint8 code, uint8 val0) {
     for (int i=0; i<nErrors; ++i) {
-        if (errors[i].errorCode == code) return;
+        if (errors[i].errorCode == code) {
+            errors[i].value1++;
+            return;
+        }
     }
     if (nErrors < MXERR) {
         errors[nErrors].errorCode = code;
         errors[nErrors].value0 = val0;
-        errors[nErrors].value1 = val1;
+        errors[nErrors].value1 = 1;
         nErrors++;
     }
 }
@@ -819,7 +824,7 @@ int getTrackerData(uint8 idExpected) {
     CyDelayUs(len*TKR_timePerByte);  // Delay long enough to register all the bytes in the record
     if (IDcode != idExpected) {
         if (idExpected != 0) {
-            addErrorOnce(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
+            addError(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
             if (idExpected == TKR_EVT_DATA) {
                 makeDummyTkrEvent(0, 0, 0, 0);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
@@ -840,7 +845,7 @@ int getTrackerData(uint8 idExpected) {
             IDcode = idExpected;
         } else {
             if (IDcode == TKR_EVT_DATA) {
-                addErrorOnce(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
+                addError(ERR_TRK_WRONG_DATA_TYPE, IDcode, idExpected);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 return 53;
             }
@@ -848,7 +853,7 @@ int getTrackerData(uint8 idExpected) {
     }
     if (IDcode == TKR_EVT_DATA) { // Event data
         if (len != 5) {           // Formal check
-            addErrorOnce(ERR_TKR_BAD_LENGTH, IDcode, len);
+            addErrorOnce(ERR_TKR_BAD_LENGTH, IDcode);
             makeDummyTkrEvent(0, 0, 0, 1);  // Send back a packet that won't cause a crash down the road
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             return 55;
@@ -868,7 +873,7 @@ int getTrackerData(uint8 idExpected) {
         uint8 trgPtr = nBoards & 0xC0;
         nBoards = nBoards & 0x3F;
         if (nBoards != numTkrBrds) {
-            addErrorOnce(ERR_TKR_NUM_BOARDS, nBoards, tkrData.trgPattern);
+            addErrorOnce(ERR_TKR_NUM_BOARDS, nBoards);
             makeDummyTkrEvent(trgCnt, cmdCnt, trgPtr, 2);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             return 56;
@@ -886,7 +891,7 @@ int getTrackerData(uint8 idExpected) {
             }
             uint8 nBrdBytes = (uint8)ret;
             if (nBrdBytes < 4) {
-                addErrorOnce(ERR_TKR_BOARD_SHORT, nBrdBytes, brd);
+                addError(ERR_TKR_BOARD_SHORT, nBrdBytes, brd);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 makeDummyHitList(brd, 4);
                 rc = 57;
@@ -900,7 +905,7 @@ int getTrackerData(uint8 idExpected) {
             }
             uint8 IDbyte = (uint8)ret;
             if (IDbyte != 0xE7) {
-                addErrorOnce(ERR_TKR_BAD_BOARD_ID, IDbyte, brd);
+                addError(ERR_TKR_BAD_BOARD_ID, IDbyte, brd);
                 makeDummyHitList(brd, 5);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 rc = 58;
@@ -913,20 +918,20 @@ int getTrackerData(uint8 idExpected) {
             }
             uint8 byte2 = (uint8)ret;
             if (byte2 > 8) {   // Formal check. Note that 8 denotes the master board, which really is layer 0
-                addErrorOnce(ERR_TKR_BAD_FPGA, byte2, brd);
+                addError(ERR_TKR_BAD_FPGA, byte2, brd);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 rc = 59;
             }
             uint8 lyr = 0x7 & byte2;  // Get rid of the master bit, leaving just the layer number
             // Require the boards to be set up to read out in order:
             if (lyr != brd) {
-                addErrorOnce(ERR_TKR_LYR_ORDER, lyr, brd);
+                addError(ERR_TKR_LYR_ORDER, lyr, brd);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
                 lyr = brd;
             }
             if (nBrdBytes > MAX_TKR_BOARD_BYTES) {    // This really should never happen, due to ASIC 10-hit limit
                 tkrData.boardHits[lyr].nBytes = MAX_TKR_BOARD_BYTES;
-                addErrorOnce(ERR_TKR_TOO_BIG, nBrdBytes, lyr);
+                addError(ERR_TKR_TOO_BIG, nBrdBytes, lyr);
                 if (nTkrDatErr < 0xFF) nTkrDatErr++;
             } else {
                 tkrData.boardHits[lyr].nBytes = nBrdBytes;
@@ -948,11 +953,11 @@ int getTrackerData(uint8 idExpected) {
         uint8 nData = tkr_getByte(startTime, 0x0B);
         uint8 nDataExpected = tkrNumDataBytes(tkrCmdCode);
         if (nData != nDataExpected) {
-            addErrorOnce(ERR_WRONG_NUM_TKR_DATA, tkrCmdCode, nData);
+            addError(ERR_WRONG_NUM_TKR_DATA, tkrCmdCode, nData);
             nData = nDataExpected;
         }
         if (len != nData+6) {   // Formal check
-            addErrorOnce(ERR_TKR_BAD_NDATA, len, nData);
+            addErrorOnce(ERR_TKR_BAD_NDATA, nData);
             if (nTkrBadNdata < 0xFF) nTkrBadNdata++;
             len = nData + 6;
         }
@@ -960,12 +965,12 @@ int getTrackerData(uint8 idExpected) {
         tkrCmdCount = (tkrCmdCount & 0xFF00) | (uint16)tkr_getByte(startTime, 0x0D);
         tkrHouseKeepingFPGA = tkr_getByte(startTime, 0x0E);
         if (tkrHouseKeepingFPGA > 8) {   // Formal check
-            addErrorOnce(ERR_TKR_BAD_FPGA, tkrCmdCode, tkrHouseKeepingFPGA);
+            addError(ERR_TKR_BAD_FPGA, tkrCmdCode, tkrHouseKeepingFPGA);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
         }
         uint8 tkrHouseKeepingCMD = tkr_getByte(startTime, 0x0F);
         if (tkrHouseKeepingCMD != tkrCmdCode) {   // Formal check
-            addErrorOnce(ERR_TKR_BAD_ECHO, tkrHouseKeepingCMD, tkrCmdCode);
+            addError(ERR_TKR_BAD_ECHO, tkrHouseKeepingCMD, tkrCmdCode);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
         }
         nTkrHouseKeeping = 0;      // Overwrite any old data, even if it was never sent out.
@@ -977,13 +982,13 @@ int getTrackerData(uint8 idExpected) {
             }
         }
         if (tkrHouseKeeping[nTkrHouseKeeping-1] != 0x0F) {    // Formal check
-            addErrorOnce(ERR_TKR_BAD_TRAILER, tkrCmdCode, tkrHouseKeeping[nTkrHouseKeeping-1]); 
+            addError(ERR_TKR_BAD_TRAILER, tkrCmdCode, tkrHouseKeeping[nTkrHouseKeeping-1]); 
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             tkrHouseKeeping[nTkrHouseKeeping-1] = 0x0F;
         }
     } else if (IDcode == TKR_ECHO_DATA) {  // Command Echo
         if (len != 4) {           // Formal check
-            addErrorOnce(ERR_TKR_BAD_LENGTH, IDcode, len);
+            addErrorOnce(ERR_TKR_BAD_LENGTH, IDcode);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
         }
         nDataReady = 3;
@@ -994,14 +999,14 @@ int getTrackerData(uint8 idExpected) {
         uint8 tkrCmdCodeEcho = tkr_getByte(startTime, 0x13);
         dataOut[2] = tkrCmdCodeEcho;
         if (tkrCmdCode != tkrCmdCodeEcho) {
-            addErrorOnce(ERR_TKR_BAD_ECHO, tkrCmdCodeEcho, tkrCmdCode);
+            addError(ERR_TKR_BAD_ECHO, tkrCmdCodeEcho, tkrCmdCode);
             if (nTkrDatErr < 0xFF) nTkrDatErr++;
             rc = 1;
         }
     } else {  // WTF?!?   Not sure what to do with this situation, besides flag it.
         if (nTkrDatErr < 0xFF) nTkrDatErr++;
         if (nErrors < MXERR) {
-            addErrorOnce(ERR_TKR_BAD_ID, IDcode, len);
+            addErrorOnce(ERR_TKR_BAD_ID, IDcode);
         }
         // Wait a short time on the UART and then empty the Tracker buffer
         // and send out whatever crap came in, hoping for the best. . .
@@ -1050,7 +1055,7 @@ int sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rt
     tkrCmdCode = code;
     clearTkrFIFO();
     while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x2F);
+        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode);
         UART_TKR_ClearTxBuffer();
     }
     if (tkrCmdCode == 0x45 && cmdData[0] == 0x48) {
@@ -1074,7 +1079,7 @@ int sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rt
     uint32 tStart = time();
     while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {                                           
         if (timeElapsed(tStart) > TKR_WRITE_TIMEOUT) {
-            addErrorOnce(ERR_TX_FAILED, tkrCmdCode, 0);
+            addErrorOnce(ERR_TX_FAILED, tkrCmdCode);
             tkrLED(false);
             break;
         }
@@ -1111,7 +1116,7 @@ int sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
     tkrCmdCode = code;
     clearTkrFIFO();
     while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x1F);
+        addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode);
         UART_TKR_ClearTxBuffer();
     }
     UART_TKR_WriteTxData(FPGA);           // FPGA address
@@ -1122,7 +1127,7 @@ int sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
     uint32 tStart = time();
     while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {                                           
         if (timeElapsed(tStart) > 200) {
-            addErrorOnce(ERR_TX_FAILED, code, 0xFF);
+            addErrorOnce(ERR_TX_FAILED, code);
             tkrLED(false);
             return -1;
         }
@@ -1132,7 +1137,7 @@ int sendSimpleTrackerCmd(uint8 FPGA, uint8 code) {
     if (tkrCmdType(tkrCmdCode) == TKR_ECHO_DATA) {
         rc = getTrackerData(TKR_ECHO_DATA);
         if (rc != 0) {
-            addErrorOnce(ERR_GET_TKR_DATA, rc, tkrCmdCode);
+            addError(ERR_GET_TKR_DATA, rc, tkrCmdCode);
         }
     }
     nDataReady = 0;  // Suppress the echo from being sent out to the world
@@ -1323,7 +1328,7 @@ void makeHouseKeeping() {
     int16 dieTemp;
     cystatus ret = DieTemp_1_GetTemp(&dieTemp);
     if (ret != CYRET_SUCCESS) {
-        addErrorOnce(BAD_DIE_TEMP, ret, 0);
+        addErrorOnce(BAD_DIE_TEMP, ret);
     }
     dataOut[66] = byte16(dieTemp, 0);
     dataOut[67] = byte16(dieTemp, 1);
@@ -1830,7 +1835,7 @@ uint8 CRC6(int nBits, uint8 theBytes[]) {
     // First, expand the bytes of the hitlist into a bitstring.
     uint8* A = (uint8*) malloc(nBits);
     if (A == NULL) {
-        addErrorOnce(ERR_HEAP_NO_MEMORY, nBits, 0x55);
+        addErrorOnce(ERR_HEAP_NO_MEMORY, nBits);
         return 0x00;
     }
     A[0]=1;  // The CRC was calculated in the FPGA with the start bit, so we add it back here.
@@ -1977,7 +1982,7 @@ uint32 getTkrASICconfig(uint8 FPGA, uint8 chip) {
     uint8 rc = readASICconfig(FPGA, chip);
     if (rc != 0) return 0;
     if (dataOut[0] != 0x09) {
-        addErrorOnce(ASIC_CONFIG_WRONG_LEN,FPGA,chip);
+        addError(ASIC_CONFIG_WRONG_LEN, FPGA, chip);
     }
     uint32 word = dataOut[1];
     word = (word<<8) | dataOut[2];
@@ -2374,13 +2379,13 @@ CY_ISR(isrUART) {
         uint16 theByte = UART_CMD_GetByte();
         if ((theByte & 0xDF00) != 0) {
             uint8 code = (uint8)((theByte & 0xDF00)>>8);
-            addErrorOnce(ERR_UART_CMD, code, (uint8)theByte);
+            addError(ERR_UART_CMD, code, (uint8)theByte);
         }
         cmdFIFO[fifoWritePtr] = (uint8)theByte;
         fifoWritePtr = WRAPINC(fifoWritePtr, MX_FIFO);
         if (fifoWritePtr == fifoReadPtr) {
             fifoWritePtr = WRAPDEC(fifoWritePtr, MX_FIFO);  // The byte will get overwritten---we're screwed. . .
-            addErrorOnce(ERR_FIFO_OVERFLOW, fifoReadPtr, theByte);
+            addError(ERR_FIFO_OVERFLOW, fifoReadPtr, theByte);
         }
     }
 }
@@ -2391,13 +2396,13 @@ CY_ISR(isrTkrUART) {
     /*  Never saw these errors occur, so comment out to save CPI cycles here.
     uint8 rxStatus = UART_TKR_ReadRxStatus();
     if (rxStatus & UART_TKR_RX_STS_OVERRUN) {
-        addErrorOnce(ERR_TKR_Buf_Over, tkrReadPtr, tkrWritePtr);
+        addError(ERR_TKR_Buf_Over, tkrReadPtr, tkrWritePtr);
     }
     if (rxStatus & UART_TKR_RX_STS_STOP_ERROR) {
-        addErrorOnce(ERR_TKR_UART_STOP, tkrReadPtr, tkrWritePtr);
+        addError(ERR_TKR_UART_STOP, tkrReadPtr, tkrWritePtr);
     }
     if (rxStatus & UART_TKR_RX_STS_BREAK) {
-        addErrorOnce(ERR_TKR_UART_BREAK, tkrReadPtr, tkrWritePtr);
+        addError(ERR_TKR_UART_BREAK, tkrReadPtr, tkrWritePtr);
     }
     */
     while (UART_TKR_ReadRxStatus() & UART_TKR_RX_STS_FIFO_NOTEMPTY) {
@@ -2410,7 +2415,7 @@ CY_ISR(isrTkrUART) {
         tkrWritePtr = WRAPINC(tkrWritePtr, MAX_TKR);
         if (tkrWritePtr == tkrReadPtr) {   // FIFO overflow condition, very bad!
             tkrWritePtr = WRAPDEC(tkrWritePtr, MAX_TKR);  // The byte will get overwritten!
-            addErrorOnce(ERR_TKR_BUFFER_OVERFLOW, tkrReadPtr, theByte);
+            addError(ERR_TKR_BUFFER_OVERFLOW, tkrReadPtr, theByte);
         }
     }
     //Pin_db1_Write(0u);
@@ -2543,7 +2548,7 @@ void makeEvent() {
                     addError(ERR_TKR_BAD_STATUS, tkrHouseKeeping[0], nTry);
                 }
             } else {
-                addErrorOnce(ERR_TKR_BAD_STATUS, tkrDataReady, nTry);
+                addErrorOnce(ERR_TKR_BAD_STATUS, tkrDataReady);
             }
             nTry++;
             if (nTry > 5) {
@@ -2558,7 +2563,7 @@ void makeEvent() {
             cmdData[0] = 0x00;
             rc = sendTrackerCmd(0x00, 0x01, 0x01, cmdData, TKR_EVT_DATA); 
             if (rc != 0) {
-                addErrorOnce(ERR_GET_TKR_EVENT, rc, byte32(cntGO, 0));
+                addErrorOnce(ERR_GET_TKR_EVENT, rc);
                 UART_TKR_ClearTxBuffer();
                 UART_TKR_ClearRxBuffer(); 
                 int rc2 = resetAllTrackerLogic();
@@ -2568,7 +2573,7 @@ void makeEvent() {
             }
         } else {
             nTkrReadNotReady++;
-            addErrorOnce(ERR_TKR_MISSED_TRIGGER, tkrDataReady, nTry+1);
+            addError(ERR_TKR_MISSED_TRIGGER, tkrDataReady, nTry+1);
             
             // The tracker must have missed the trigger. Who knows why? Send a dummy empty event.
             makeDummyTkrEvent(0, 0, 0, 4);
@@ -2589,7 +2594,7 @@ void makeEvent() {
             if (!statA && !statB) break;
         }
         if (statA || statB) {
-            addErrorOnce(ERR_TD_CHAIN_NOT_TERM, statA, statB);
+            addError(ERR_TD_CHAIN_NOT_TERM, statA, statB);
         }
         // Copy any remaining TOF data from the DMA buffers to the TOF data buffers
         copyTOF_DMA('t', true);
@@ -2759,7 +2764,7 @@ void makeEvent() {
     if (doDiagnostics) {  // Check whether the hitslist CRCs match what the TKR calculated.
         for (int brd=0; brd<tkrData.nTkrBoards; ++brd) {
             if (!checkCRC(tkrData.boardHits[brd].nBytes, tkrData.boardHits[brd].hitList)) {
-                    addErrorOnce(ERR_BAD_CRC, brd, (uint8)cntGO);
+                    addErrorOnce(ERR_BAD_CRC, brd);
                     if (nBadCRC < 255) nBadCRC++;
                 }
         }
@@ -2783,7 +2788,7 @@ void makeEvent() {
             } else {
                 dataOut[39] = brd;
             }
-            addErrorOnce(ERR_EVT_TOO_BIG, dataOut[6], dataOut[10]);
+            addErrorOnce(ERR_EVT_TOO_BIG, dataOut[6]);
             if (nEvtTooBig < 255) nEvtTooBig++;
             break;  // We're really out of space. The event will be truncated.
         }
@@ -2797,14 +2802,14 @@ void makeEvent() {
         uint8 evt = (tkrData.boardHits[brd].hitList[2])>>1;
         if (lastEvt != 0xFF) {
             if (evt != lastEvt) {
-                addErrorOnce(TKR_TAG_EVT_MISMATCH, evt, brd);
+                addError(TKR_TAG_EVT_MISMATCH, evt, brd);
                 if (nTkrTagMismatch < 255) nTkrTagMismatch++;
             }
         }
         lastEvt = evt;
         uint8 err = tkrData.boardHits[brd].hitList[2] & 0x01;
         if (err) {
-            addErrorOnce(ERR_FPGA_ASIC_HEAD, (uint8)cntGO, brd);
+            addError(ERR_FPGA_ASIC_HEAD, (uint8)cntGO, brd);
             if (nBadASIChead < 255) nBadASIChead++;
         } 
         uint8 nChips = (tkrData.boardHits[brd].hitList[3])>>4;
@@ -2812,7 +2817,7 @@ void makeEvent() {
         if (nChips > 0 && doDiagnostics) {
             uint8* words = (uint8*) malloc(2*tkrData.boardHits[brd].nBytes);
             if (words == NULL) {
-                addErrorOnce(ERR_HEAP_NO_MEMORY, tkrData.boardHits[brd].nBytes, brd);
+                addErrorOnce(ERR_HEAP_NO_MEMORY, brd);
             } else {
                 int ptr = 4;
                 int idx = 0;
@@ -2843,38 +2848,38 @@ void makeEvent() {
                 idx = 0;
                 for (int chip=0; chip<nChips; ++chip) {
                     if (idx > nWords-1) {
-                        addErrorOnce(ERR_TKR_LIST_OVERFLOW, chip, brd);
+                        addError(ERR_TKR_LIST_OVERFLOW, chip, brd);
                         if (nTkrOverFlow < 255) nTkrOverFlow++;
                         break;
                     }
                     uint8 nClust = words[idx++] & 0x1F;
                     if (nClust > 10) {
-                        addErrorOnce(ERR_TKR_TOO_MANY_CLUST, nClust, chip);
+                        addError(ERR_TKR_TOO_MANY_CLUST, nClust, chip);
                         if (nBigClust < 255) nBigClust++;
                         break;
                     }
                     uint8 chipErr = (words[idx] & 0x20)>>5;           
                     if (chipErr) {
-                        addErrorOnce(ERR_TKR_ASIC, chip, brd);
+                        addErrorOnce(ERR_TKR_ASIC, brd);
                         if (nASICerrorEvts < 255) nASICerrorEvts++;
                     }
                     uint8 parityErr = (words[idx] & 0x10)>>4;
                     if (parityErr) {
-                        addErrorOnce(ERR_ASIC_PARITY, chip, brd);
+                        addErrorOnce(ERR_ASIC_PARITY, brd);
                         if (nASICparityErr < 255) nASICparityErr++;
                     }
                     uint8 chip = (words[idx++] & 0x0F);
-                    if (chip > MAX_TKR_ASIC-1) addErrorOnce(ERR_TKR_BAD_CHIP, chip, brd);
+                    if (chip > MAX_TKR_ASIC-1) addError(ERR_TKR_BAD_CHIP, chip, brd);
                     for (int clst=0; clst<nClust; ++clst) {
                         if (idx > nWords-1) {
-                            addErrorOnce(ERR_TKR_LIST_OVERFLOW, chip, brd);
+                            addErrorOnce(ERR_TKR_LIST_OVERFLOW, brd);
                             if (nTkrOverFlow < 255) nTkrOverFlow++;
                             break;
                         }
                         int nStripsM1 = words[idx++];
                         int strip0 = words[idx++];
                         if (strip0 + nStripsM1 > 63) {
-                            addErrorOnce(ERR_TKR_BAD_CLUST, nStripsM1, strip0);
+                            addErrorOnce(ERR_TKR_BAD_CLUST, nStripsM1);
                             if (nBadClust < 255) nBadClust++;
                         }
                     }
@@ -2930,7 +2935,7 @@ void tkrRateMonitor() {
                 uint8 cmdData[1];
                 sendTrackerCmd(brd, 0x6D, 0, cmdData, TKR_HOUSE_DATA);  // Get counts from tracker
                 if (nTkrHouseKeeping == 0) {
-                    addErrorOnce(ERR_MISSING_HOUSEKEEPING,brd,0x5D);
+                    addErrorOnce(ERR_MISSING_HOUSEKEEPING,brd);
                 } else {
                     tkrMonitorRates[brd] = (tkrHouseKeeping[0]<<8 & 0xff00) | tkrHouseKeeping[1];
                     nTkrHouseKeeping = 0;   // To keep this info from being sent out
@@ -3461,7 +3466,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 tkrCmdCode = '\x02';
                 clearTkrFIFO();
                 while (!(UART_TKR_ReadTxStatus() & UART_TKR_TX_STS_FIFO_EMPTY)) {
-                    addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode, 0x3F);
+                    addErrorOnce(ERR_TKR_FIFO_NOT_EMPTY, tkrCmdCode);
                     UART_TKR_ClearTxBuffer();
                 }
                 UART_TKR_WriteTxData('\x00');
@@ -4265,7 +4270,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 break;
         } // End of command switch
     } else { // Log an error if the user is sending spurious commands while the trigger is enabled
-        addErrorOnce(ERR_CMD_IGNORE, command, 0);
+        addErrorOnce(ERR_CMD_IGNORE, command);
         nIgnoredCmd++;
     }
 } // end of interpretCommand subroutine
