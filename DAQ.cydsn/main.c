@@ -91,6 +91,8 @@
  * V28.1:  Stretched trigger to tracker by one clock cycle. Modified makeEvent() such that it sends a dummy 
  *         empty event in case the tracker has no event ready after 5 tries.
  * V28.2:  Count errors for addErrorOnce()
+ * V28.3:  Verify ASIC registers by reading them back and comparing with the settings
+ * V28.4:  Improved addErrorOnce() so that its count does not roll over
  * =========================================
  */
 #include "project.h"
@@ -101,7 +103,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 28
-#define MINOR_VERSION 02
+#define MINOR_VERSION 04
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -263,7 +265,7 @@
 #define ERR_FIFO_OVERFLOW 41u
 #define ERR_GET_TKR_EVENT 42u
 #define BAD_DIE_TEMP 43u
-#define ASIC_CONFIG_WRONG_LEN 44u
+#define ASIC_REG_WRONG_LEN 44u
 #define ERR_NO_TRK_RESET 45u
 #define ERR_BYTE_ORDER 46u
 #define ERR_BYTECOUNT 47u
@@ -288,6 +290,10 @@
 #define ERR_TKR_UART_BREAK 66u
 #define ERR_NO_SUCH_DAC 67u
 #define ERR_TKR_MISSED_TRIGGER 68u
+#define ERR_TKR_BAD_CONFIG 69u
+#define ERR_TKR_BAD_DAC 70u
+#define ERR_TKR_BAD_DATA_MASK 71u
+#define ERR_TKR_BAD_TRG_MASK 72u
 
 #define WRAPINC(a,b) ((a + 1) % (b))
 #define ACTIVELEN(a,b,c) ((((c) - (a)) + (b)) % (c)) //Macro to calculate active length in a circular buffer.
@@ -310,6 +316,8 @@ int numErrRec = 0;
 #define TKR_HOUSE_DATA 0xC7
 #define TKR_ECHO_DATA 0xF1
 #define TKR_NO_ECHO 0x01
+#define TKR_ASIC_DATA 0xC5
+#define TKR_I2C_DATA 0xC6
 
 #define TKR_READ_TIMEOUT 1u    // Length of time to wait on the tracker before giving a time-out error
 #define TKR_WRITE_TIMEOUT 10u  // Length of time to wait for a tracker UART write to terminate
@@ -709,7 +717,7 @@ void addError(uint8 code, uint8 val0, uint8 val1) {
 void addErrorOnce(uint8 code, uint8 val0) {
     for (int i=0; i<nErrors; ++i) {
         if (errors[i].errorCode == code) {
-            errors[i].value1++;
+            if (errors[1].value1 < 255) errors[i].value1++;
             return;
         }
     }
@@ -1049,6 +1057,7 @@ void clearTkrFIFO() {
 }
 
 // Send a command to the tracker via the UART
+// Data returned end up in dataOut[]
 int sendTrackerCmd(uint8 FPGA, uint8 code, uint8 nData, uint8 cmdData[], uint rtnType) {
     if (!readTracker) return 0;
     tkrLED(true);
@@ -1158,7 +1167,7 @@ void tkrLoadI2cReg(uint8 FPGA, uint8 i2cAddress, uint8 regID, uint8 byte1, uint8
 // Read a Tracker I2C register
 uint16 tkrReadI2cReg(uint8 FPGA, uint8 i2cAddress) {
     cmdData[0] = i2cAddress;
-    sendTrackerCmd(FPGA, 0x46, 0x01, cmdData, TKR_HOUSE_DATA);
+    sendTrackerCmd(FPGA, 0x46, 0x01, cmdData, TKR_I2C_DATA);
     nDataReady = 0;
     uint16 outWord = (uint16)dataOut[1];
     outWord = (outWord<<8) | dataOut[2];
@@ -1912,8 +1921,88 @@ uint8 minTdif(uint8 t1, uint8 t2) {
     else return tD2;
 }
 
+// Read the ASIC configuration register 
+uint8 readASICconfig(uint8 FPGA, uint8 chip) {
+    tkrCmdCode = 0x22; // Config read command code 
+    uint8 rc = sendTrackerCmd(FPGA, tkrCmdCode, 1, &chip, TKR_ASIC_DATA);
+    return rc;
+}
+
+uint32 getTkrASICconfig(uint8 FPGA, uint8 chip) {
+    uint8 rc = readASICconfig(FPGA, chip);
+    if (rc != 0) return 0;
+    if (dataOut[0] != 0x09) {
+        addError(ASIC_REG_WRONG_LEN, FPGA, chip);
+    }
+    uint32 word = dataOut[1];
+    word = (word<<8) | dataOut[2];
+    word = (word<<8) | dataOut[3];
+    word = (word<<8) | dataOut[4];
+    return word;
+}
+
+uint16 getTkrASICthrDAC(uint8 FPGA, uint8 chip) {
+    tkrCmdCode = 0x21;
+    uint8 rc = sendTrackerCmd(FPGA, tkrCmdCode, 1, &chip, TKR_ASIC_DATA);
+    if (rc != 0) return 0;
+    if (dataOut[0] != 0x09) {
+        addError(ASIC_REG_WRONG_LEN, FPGA, chip);
+    }
+    uint16 word = dataOut[1];
+    word = (word<<8) | dataOut[2];
+    return word;
+}
+
+uint64 getTkrASICdataMask(uint8 FPGA, uint8 chip) {
+    tkrCmdCode = 0x23;
+    uint8 rc = sendTrackerCmd(FPGA, tkrCmdCode, 1, &chip, TKR_ASIC_DATA);
+    if (rc != 0) return 0;
+    if (dataOut[0] != 0x09) {
+        addError(ASIC_REG_WRONG_LEN, FPGA, chip);
+    }    
+    uint8 regType =  (dataOut[1] & 0x70)>>4;
+    if (regType != 0x04) {
+        addError(ERR_TKR_BAD_DATA_MASK, FPGA, chip);
+    }
+    uint64 mask;
+    mask = dataOut[1];
+    mask = mask<<8 | dataOut[2];    
+    mask = mask<<8 | dataOut[3];
+    mask = mask<<8 | dataOut[4];
+    mask = mask<<8 | dataOut[5];    
+    mask = mask<<8 | dataOut[6];
+    mask = mask<<8 | dataOut[7];
+    mask = mask<<8 | dataOut[8];
+    mask = mask<<5 | dataOut[9]>>3;
+    return mask;
+}
+
+uint64 getTkrASICtrgMask(uint8 FPGA, uint8 chip) {
+    tkrCmdCode = 0x24;
+    uint8 rc = sendTrackerCmd(FPGA, tkrCmdCode, 1, &chip, TKR_ASIC_DATA);
+    if (rc != 0) return 0;
+    if (dataOut[0] != 0x09) {
+        addError(ASIC_REG_WRONG_LEN, FPGA, chip);
+    }    
+    uint8 regType =  (dataOut[1] & 0x70)>>4;
+    if (regType != 0x05) {
+        addError(ERR_TKR_BAD_TRG_MASK, FPGA, chip);
+    }
+    uint64 mask;
+    mask = dataOut[1];
+    mask = mask<<8 | dataOut[2];    
+    mask = mask<<8 | dataOut[3];
+    mask = mask<<8 | dataOut[4];
+    mask = mask<<8 | dataOut[5];    
+    mask = mask<<8 | dataOut[6];
+    mask = mask<<8 | dataOut[7];
+    mask = mask<<8 | dataOut[8];
+    mask = mask<<5 | dataOut[9]>>3;
+    return mask;
+}
+
 // Configure all of the ASICs according to the settings stored in RAM
-void configureASICs() {
+void configureASICs(bool verify) {
     uint8 dataBytes[9];
     
     // First load all of the configuration registers with one wild-card call
@@ -1923,22 +2012,54 @@ void configureASICs() {
     dataBytes[2] = tkrConfigReg[1];
     dataBytes[3] = tkrConfigReg[2];
     sendTrackerCmd(0x00, tkrCmdCode, 4, dataBytes, TKR_ECHO_DATA);
+    CyDelayUs(10);
+    if (verify) {
+        tkrCmdCode = 0x22;
+        for (uint8 tkrFPGAaddress=0; tkrFPGAaddress<numTkrBrds; ++tkrFPGAaddress) {
+            for (uint8 chip=0; chip<MAX_TKR_ASIC; ++chip) {
+                uint32 config = getTkrASICconfig(tkrFPGAaddress, chip);
+                uint8 regType =  (config & 0x70000000)>>28;
+                if (regType != 0x03) {
+                    addError(ERR_TKR_BAD_CONFIG, tkrFPGAaddress, chip);
+                    continue;
+                }            
+                config = (config & 0xFFFFFFE0)<<8;
+                if (tkrConfigReg[0] != (config & 0xFF000000)>>24 || tkrConfigReg[1] != (config & 0x00FF0000)>>16 || tkrConfigReg[2] != (config & 0x0000FF00)>>8) {
+                    addError(ERR_TKR_BAD_CONFIG, tkrFPGAaddress, chip);
+                }
+            }
+        }
+    }
     
     // Next load all of the threshold DACs individually
-    tkrCmdCode = 0x11;
     for (uint8 tkrFPGAaddress=0; tkrFPGAaddress<numTkrBrds; ++tkrFPGAaddress) {
         for (uint8 chipAddress=0; chipAddress<MAX_TKR_ASIC; ++chipAddress) {
             dataBytes[0] = chipAddress;
             dataBytes[1] = tkrConfig[tkrFPGAaddress][chipAddress].threshDAC;
+            tkrCmdCode = 0x11;
             sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 2, dataBytes, TKR_ECHO_DATA);
+            CyDelayUs(10);
+            if (verify) {
+                uint16 regV = getTkrASICthrDAC(tkrFPGAaddress, chipAddress);
+                uint8 regType =  (regV & 0x7000)>>12;
+                if (regType != 0x02) {
+                    addError(ERR_TKR_BAD_DAC, tkrFPGAaddress, chipAddress);
+                    continue;
+                }
+                uint8 DACV = (regV>>3) & 0x00FF;
+                if (DACV != dataBytes[1]) {
+                    addError(ERR_TKR_BAD_DAC, tkrFPGAaddress, chipAddress);
+                }
+            }
         }
     }
     
     // Next load all of the data masks. Use wild card for the chip if all channels are to be enabled, as is the usual case
-    tkrCmdCode = 0x13;
+    //uint8 testMask[8] = {0xAB,0xCD,0xEF,0xAD,0xBC,0xDE,0xE2,0x75};
     for (uint8 tkrFPGAaddress=0; tkrFPGAaddress<numTkrBrds; ++tkrFPGAaddress) {
         dataBytes[0] = 0x1F;
         for (int i=0; i<8; ++i) dataBytes[1+i] = 0xFF;
+        tkrCmdCode = 0x13;
         sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
         for (uint8 chipAddress=0; chipAddress<MAX_TKR_ASIC; ++chipAddress) {
             dataBytes[0] = chipAddress;
@@ -1947,15 +2068,31 @@ void configureASICs() {
                 dataBytes[1+i] = tkrConfig[tkrFPGAaddress][chipAddress].datMask[i];
                 if (dataBytes[1+i] != 0xFF) allOn = false;
             }
-            if (!allOn) sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
+            if (!allOn) {
+                tkrCmdCode = 0x13;
+                sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
+            }
+            CyDelayUs(10);
+            uint64 maskSet = getTkrASICdataMask(tkrFPGAaddress, chipAddress);
+            uint64 maskTst = dataBytes[1];
+            maskTst = maskTst<<8 | dataBytes[2];
+            maskTst = maskTst<<8 | dataBytes[3];
+            maskTst = maskTst<<8 | dataBytes[4];
+            maskTst = maskTst<<8 | dataBytes[5];
+            maskTst = maskTst<<8 | dataBytes[6];
+            maskTst = maskTst<<8 | dataBytes[7];
+            maskTst = maskTst<<8 | dataBytes[8];
+            if (maskTst != maskSet) {
+                addError(ERR_TKR_BAD_DATA_MASK, tkrFPGAaddress, chipAddress);
+            }
         }
     }    
     
     // Next load all of the trigger masks. Use a wild card to cover the typical case of all enabled.
-    tkrCmdCode = 0x14;
     for (uint8 tkrFPGAaddress=0; tkrFPGAaddress<numTkrBrds; ++tkrFPGAaddress) {
         dataBytes[0] = 0x1F;
         for (int i=0; i<8; ++i) dataBytes[1+i] = 0xFF;
+        tkrCmdCode = 0x14;
         sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
         for (uint8 chipAddress=0; chipAddress<MAX_TKR_ASIC; ++chipAddress) {
             dataBytes[0] = chipAddress;
@@ -1964,31 +2101,26 @@ void configureASICs() {
                 dataBytes[1+i] = tkrConfig[tkrFPGAaddress][chipAddress].trgMask[i];
                 if (dataBytes[1+i] != 0xFF) allOn = false;
             }
-            if (!allOn) sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
+            if (!allOn) {
+                tkrCmdCode = 0x14;
+                sendTrackerCmd(tkrFPGAaddress, tkrCmdCode, 9, dataBytes, TKR_ECHO_DATA);
+            }
+            CyDelayUs(10);
+            uint64 maskSet = getTkrASICtrgMask(tkrFPGAaddress, chipAddress);
+            uint64 maskTst = dataBytes[1];
+            maskTst = maskTst<<8 | dataBytes[2];
+            maskTst = maskTst<<8 | dataBytes[3];
+            maskTst = maskTst<<8 | dataBytes[4];
+            maskTst = maskTst<<8 | dataBytes[5];
+            maskTst = maskTst<<8 | dataBytes[6];
+            maskTst = maskTst<<8 | dataBytes[7];
+            maskTst = maskTst<<8 | dataBytes[8];
+            if (maskTst != maskSet) {
+                addError(ERR_TKR_BAD_TRG_MASK, tkrFPGAaddress, chipAddress);
+            }
         }
     }    
-    
     nDataReady = 0;   // To prevent the last echo from being sent out from the PSOC
-}
-
-// Read the ASIC configuration register 
-uint8 readASICconfig(uint8 FPGA, uint8 chip) {
-    tkrCmdCode = 0x22; // Config read command code 
-    uint8 rc = sendTrackerCmd(FPGA, tkrCmdCode, 1, &chip, 0);
-    return rc;
-}
-
-uint32 getTkrASICconfig(uint8 FPGA, uint8 chip) {
-    uint8 rc = readASICconfig(FPGA, chip);
-    if (rc != 0) return 0;
-    if (dataOut[0] != 0x09) {
-        addError(ASIC_CONFIG_WRONG_LEN, FPGA, chip);
-    }
-    uint32 word = dataOut[1];
-    word = (word<<8) | dataOut[2];
-    word = (word<<8) | dataOut[3];
-    word = (word<<8) | dataOut[4];
-    return word;
 }
 
 // Read all of the DAQ error codes from the tracker ASICs
@@ -2123,7 +2255,7 @@ int resetAllTrackerLogic() {
         }
         tkrCmdCode = 0x0C;   // ASIC soft reset
         sendTrackerCmd(0x00, tkrCmdCode, 1, cmdData, TKR_ECHO_DATA);
-        configureASICs();
+        configureASICs(false);
         addError(ERR_ASICS_RESET, (cntGO>>8), cntGO);
     }
     if (doDiagnostics) makeErrorRecord(allErrCodes);
@@ -4149,7 +4281,7 @@ void interpretCommand(uint8 tofConfig[]) {
                 tkrCmdCode = 0x08;
                 sendTrackerCmd(0x00, tkrCmdCode, 0, cmdData, TKR_ECHO_DATA);     // Turn on the ASIC power
                 CyDelay(100);
-                configureASICs();
+                configureASICs(true);
                 for (int brd=0; brd<numTkrBrds; ++brd) sendSimpleTrackerCmd(brd, 0x04);  // State machine reset
                 break;
             case '\x5C': // Start sending tracker monitoring packets
