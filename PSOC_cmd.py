@@ -91,6 +91,23 @@ def mkDataByte(dataByte, address, byteID):
    end2 = LF.to_bytes(1,'big')   # LF
    return cmd1 + cmd1 + cmd1 + end1 + end2
 
+def badCMD(FPGA):
+    print("sending a bad command to the tracker board " + str(FPGA))
+    address = addrEvnt
+    cmdHeader = mkCmdHdr(3, 0x10, address)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(FPGA, address, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0x99, address, 2)
+    ser.write(data2)
+    data3 = mkDataByte(0x00, address, 3)
+    ser.write(data3)
+    time.sleep(0.1)
+    echo = getTkrEcho()
+    print(echo)
+    return   
+    
+
 def getData(address, debug = False): 
     ret = b''
     if debug: print("Entering getData for PSOC address " + str(address))
@@ -2183,7 +2200,21 @@ def NOOP():
     print("NOOP: sending a NOOP command to the event PSOC")
     cmdHeader= mkCmdHdr(0, 0x7A, addrEvnt)
     ser.write(cmdHeader)
-    
+
+def getTkrLyrBadCmdCnt(FPGA):
+    cmdHeader = mkCmdHdr(3, 0x10, addrEvnt)
+    ser.write(cmdHeader)
+    data1 = mkDataByte(FPGA, addrEvnt, 1)
+    ser.write(data1)
+    data2 = mkDataByte(0x77, addrEvnt, 2)
+    ser.write(data2)
+    data3 = mkDataByte(9, addrEvnt, 3)
+    ser.write(data3)
+    time.sleep(0.1)
+    byteList = getTkrHousekeeping()
+    for i in range(9): print(str(bytes2int(byteList[i])) + "  " + str(binascii.hexlify(byteList[i])))
+    print("getTkrLyrBadCmdCnt: for board " + str(FPGA) + " the count of bad commands is " + str(bytes2int(byteList[7])))
+
 def getTkrTrigOutputTiming(FPGA):
     cmdHeader = mkCmdHdr(3, 0x10, addrEvnt)
     ser.write(cmdHeader)
