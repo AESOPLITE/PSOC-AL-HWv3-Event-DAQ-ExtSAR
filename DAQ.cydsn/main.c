@@ -95,6 +95,7 @@
  * V28.4:  Improved addErrorOnce() so that its count does not roll over
  * V28.5:  Increased wait time for tracker uart transmit and receive
  * V28.6:  Check command code and FPGA address for all tracker command calls
+ * V28.7:  Correct length of Tracker housekeeping
  * =========================================
  */
 #include "project.h"
@@ -105,7 +106,7 @@
 #include <math.h>
 
 #define MAJOR_VERSION 28
-#define MINOR_VERSION 06
+#define MINOR_VERSION 07
 
 /*=========================================================================
  * Calibration/PMT input connections, from left to right looking down at the end of the DAQ board:
@@ -331,7 +332,7 @@ uint TKR_timeFirstByte;        // Time in microseconds to wait for the first byt
 
 // Some variables defined only for housekeeping information
 #define HOUSESIZE 81u
-#define TKRHOUSESIZE 201u
+#define TKRHOUSESIZE 202u
 #define BOR_LENGTH 85u
 uint8 dataBOR[BOR_LENGTH];
 bool doHouseKeeping;           // Set true to send housekeeping packets out
